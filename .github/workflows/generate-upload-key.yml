@@ -1,0 +1,64 @@
+name: 1 - Generate Play Upload Key
+
+on:
+  workflow_dispatch:
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Generate upload key and GitHub secrets file
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p output
+
+          STORE_PASSWORD="$(openssl rand -hex 16)"
+          # Use the same password for the keystore and the key alias.
+          # This avoids Android/Gradle "Cannot recover key" failures caused by
+          # mismatched key passwords when copying GitHub Secrets.
+          KEY_PASSWORD="$STORE_PASSWORD"
+          KEY_ALIAS="toxic"
+
+          keytool -genkeypair \
+            -v \
+            -keystore output/toxic-upload-key.jks \
+            -storetype JKS \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -alias "$KEY_ALIAS" \
+            -storepass "$STORE_PASSWORD" \
+            -keypass "$KEY_PASSWORD" \
+            -dname "CN=Toxic Search Tool, OU=Toxic, O=Toxic, L=Salvador, ST=Bahia, C=BR"
+
+          {
+            echo "KEYSTORE_BASE64=$(base64 -w 0 output/toxic-upload-key.jks)"
+            echo "KEYSTORE_PASSWORD=$STORE_PASSWORD"
+            echo "KEY_ALIAS=$KEY_ALIAS"
+            echo "KEY_PASSWORD=$KEY_PASSWORD"
+          } > output/github-secrets-to-add.txt
+
+          cat > output/LEIA-ME.txt <<'TXT'
+          Esta pasta contém a chave privada usada para assinar as versões enviadas ao Google Play.
+
+          IMPORTANTE:
+          1. Guarde o arquivo toxic-upload-key.jks em local seguro.
+          2. Não envie toxic-upload-key.jks para o repositório.
+          3. Copie os 4 valores de github-secrets-to-add.txt para:
+             GitHub > Settings > Secrets and variables > Actions > New repository secret.
+          4. Depois que os secrets estiverem salvos, rode o workflow "2 - Build Signed Android AAB".
+          5. Para atualizações futuras na Play Store, use a mesma chave/secrets e aumente o versionCode.
+          TXT
+
+      - name: Upload key and secrets artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: toxic-upload-key-and-github-secrets
+          path: output/
