@@ -96,8 +96,14 @@
     <string name="tutorial_settings_body">Tap the menu icon at the bottom to choose the hotel and change the app language.</string>
     <string name="tutorial_search_title">Search profile</string>
     <string name="tutorial_search_body">Enter a nickname in the search bar and tap Search to look up public data.</string>
-    <string name="tutorial_history_title">History</string>
-    <string name="tutorial_history_body">Use the history button to quickly return to profiles you already opened.</string>
+    <string name="tutorial_visuals_title">Look wardrobe</string>
+    <string name="tutorial_visuals_body">Try on, save, and restore looks with the wardrobe. Tap the second button in the bottom bar.</string>
+    <string name="profile_tutorial_rotate_title">Rotate the avatar</string>
+    <string name="profile_tutorial_rotate_body">Swipe the avatar left or right to change its direction.</string>
+    <string name="profile_tutorial_looks_title">View the look</string>
+    <string name="profile_tutorial_looks_body">Tap the avatar to see every item used in the current look.</string>
+    <string name="profile_tutorial_friend_title">Friend preview</string>
+    <string name="profile_tutorial_friend_body">In the friends list, press and hold a friend head to open their mini profile.</string>
     <string name="tutorial_next">Next</string>
     <string name="tutorial_finish">Got it</string>
     <string name="error_search_profile">Failed to search profile.</string>

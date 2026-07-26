@@ -96,8 +96,14 @@
     <string name="tutorial_settings_body">Tik onderaan op het menu-icoon om het hotel en de app-taal te wijzigen.</string>
     <string name="tutorial_search_title">Profiel zoeken</string>
     <string name="tutorial_search_body">Voer een naam in en tik op Zoeken om openbare gegevens te bekijken.</string>
-    <string name="tutorial_history_title">Geschiedenis</string>
-    <string name="tutorial_history_body">Gebruik geschiedenis om snel terug te keren naar geopende profielen.</string>
+    <string name="tutorial_visuals_title">Look-garderobe</string>
+    <string name="tutorial_visuals_body">Probeer looks, bewaar ze en haal ze terug met de garderobe. Tik op de tweede knop in de onderste balk.</string>
+    <string name="profile_tutorial_rotate_title">Avatar draaien</string>
+    <string name="profile_tutorial_rotate_body">Veeg de avatar naar links of rechts om de richting te wijzigen.</string>
+    <string name="profile_tutorial_looks_title">Bekijk de look</string>
+    <string name="profile_tutorial_looks_body">Tik op de avatar om alle onderdelen van de huidige look te zien.</string>
+    <string name="profile_tutorial_friend_title">Vriendvoorbeeld</string>
+    <string name="profile_tutorial_friend_body">Houd in de vriendenlijst het hoofd van een vriend ingedrukt om het miniprofiel te openen.</string>
     <string name="tutorial_next">Volgende</string>
     <string name="tutorial_finish">Begrepen</string>
     <string name="error_search_profile">Profiel zoeken mislukt.</string>

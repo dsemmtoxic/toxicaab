@@ -96,8 +96,14 @@
     <string name="tutorial_settings_body">Otel ve uygulama dilini değiştirmek için alttaki menü simgesine dokunun.</string>
     <string name="tutorial_search_title">Profil ara</string>
     <string name="tutorial_search_body">Bir nick yazıp Ara\'ya dokunarak herkese açık verileri görüntüleyin.</string>
-    <string name="tutorial_history_title">Geçmiş</string>
-    <string name="tutorial_history_body">Açılmış profillere hızlı dönmek için geçmiş düğmesini kullanın.</string>
+    <string name="tutorial_visuals_title">Görünüm gardırobu</string>
+    <string name="tutorial_visuals_body">Gardıropla görünümleri deneyin, kaydedin ve geri yükleyin. Alt çubuktaki ikinci düğmeye dokunun.</string>
+    <string name="profile_tutorial_rotate_title">Avatarı döndür</string>
+    <string name="profile_tutorial_rotate_body">Yönünü değiştirmek için avatarı sola veya sağa kaydırın.</string>
+    <string name="profile_tutorial_looks_title">Görünümü incele</string>
+    <string name="profile_tutorial_looks_body">Geçerli görünümdeki tüm parçaları görmek için avatara dokunun.</string>
+    <string name="profile_tutorial_friend_title">Arkadaş önizlemesi</string>
+    <string name="profile_tutorial_friend_body">Arkadaş listesinde bir arkadaşın başına basılı tutarak mini profilini açın.</string>
     <string name="tutorial_next">Sonraki</string>
     <string name="tutorial_finish">Anladım</string>
     <string name="error_search_profile">Profil aranamadı.</string>

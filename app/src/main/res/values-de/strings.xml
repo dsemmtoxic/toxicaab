@@ -96,8 +96,14 @@
     <string name="tutorial_settings_body">Tippe unten auf das Menü-Symbol, um Hotel und App-Sprache zu ändern.</string>
     <string name="tutorial_search_title">Profil suchen</string>
     <string name="tutorial_search_body">Gib einen Namen ein und tippe auf Suchen, um öffentliche Daten abzurufen.</string>
-    <string name="tutorial_history_title">Verlauf</string>
-    <string name="tutorial_history_body">Mit dem Verlauf kommst du schnell zu bereits geöffneten Profilen zurück.</string>
+    <string name="tutorial_visuals_title">Look-Kleiderschrank</string>
+    <string name="tutorial_visuals_body">Probiere Looks an, speichere sie und rufe sie wieder auf. Tippe auf die zweite Schaltfläche unten.</string>
+    <string name="profile_tutorial_rotate_title">Avatar drehen</string>
+    <string name="profile_tutorial_rotate_body">Wische den Avatar nach links oder rechts, um seine Richtung zu ändern.</string>
+    <string name="profile_tutorial_looks_title">Look ansehen</string>
+    <string name="profile_tutorial_looks_body">Tippe auf den Avatar, um alle Teile des aktuellen Looks zu sehen.</string>
+    <string name="profile_tutorial_friend_title">Freundesvorschau</string>
+    <string name="profile_tutorial_friend_body">Halte in der Freundesliste den Kopf eines Freundes gedrückt, um sein Miniprofil zu öffnen.</string>
     <string name="tutorial_next">Weiter</string>
     <string name="tutorial_finish">Verstanden</string>
     <string name="error_search_profile">Fehler bei der Profilsuche.</string>

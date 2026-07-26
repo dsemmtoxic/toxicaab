@@ -96,8 +96,14 @@
     <string name="tutorial_settings_body">Touchez l\'engrenage pour choisir l\'hôtel et changer la langue de l\'app.</string>
     <string name="tutorial_search_title">Rechercher un profil</string>
     <string name="tutorial_search_body">Saisissez un pseudo puis touchez Rechercher pour consulter les données publiques.</string>
-    <string name="tutorial_history_title">Historique</string>
-    <string name="tutorial_history_body">Utilisez le bouton d\'historique pour revenir vite aux profils ouverts.</string>
+    <string name="tutorial_visuals_title">Garde-robe de looks</string>
+    <string name="tutorial_visuals_body">Essayez, enregistrez et récupérez des looks avec la garde-robe. Touchez le deuxième bouton de la barre inférieure.</string>
+    <string name="profile_tutorial_rotate_title">Tourner l\'avatar</string>
+    <string name="profile_tutorial_rotate_body">Faites glisser l\'avatar à gauche ou à droite pour changer sa direction.</string>
+    <string name="profile_tutorial_looks_title">Voir le look</string>
+    <string name="profile_tutorial_looks_body">Touchez l\'avatar pour voir tous les éléments du look actuel.</string>
+    <string name="profile_tutorial_friend_title">Aperçu d\'un ami</string>
+    <string name="profile_tutorial_friend_body">Dans la liste d\'amis, maintenez la tête d\'un ami pour ouvrir son miniprofil.</string>
     <string name="tutorial_next">Suivant</string>
     <string name="tutorial_finish">Compris</string>
     <string name="error_search_profile">Échec de la recherche du profil.</string>

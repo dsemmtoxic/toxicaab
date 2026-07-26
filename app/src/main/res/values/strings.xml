@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name" translatable="false">Toxic Search Tool</string>
+    <string name="app_name" translatable="false">Toxic</string>
 
     <string name="favorites_pull">Puxe para atualizar favoritos</string>
     <string name="favorites_release">Solte para atualizar favoritos</string>
@@ -98,8 +98,14 @@
     <string name="tutorial_settings_body">Toque no ícone de menu na barra inferior para escolher o hotel e alterar o idioma do app.</string>
     <string name="tutorial_search_title">Pesquisar perfil</string>
     <string name="tutorial_search_body">Digite um nick na barra de pesquisa e toque em Pesquisar para consultar os dados públicos.</string>
-    <string name="tutorial_history_title">Histórico</string>
-    <string name="tutorial_history_body">Use o botão de histórico para voltar rapidamente aos perfis já abertos.</string>
+    <string name="tutorial_visuals_title">Guarda-roupas de visuais</string>
+    <string name="tutorial_visuals_body">Experimente, salve e recupere visuais com o guarda-roupas. Toque no segundo botão da barra inferior.</string>
+    <string name="profile_tutorial_rotate_title">Gire o avatar</string>
+    <string name="profile_tutorial_rotate_body">Deslize o avatar para a esquerda ou para a direita para mudar sua direção.</string>
+    <string name="profile_tutorial_looks_title">Veja o visual</string>
+    <string name="profile_tutorial_looks_body">Toque no avatar para ver todas as peças usadas no visual atual.</string>
+    <string name="profile_tutorial_friend_title">Prévia dos amigos</string>
+    <string name="profile_tutorial_friend_body">Na lista de amigos, pressione e segure a cabeça de um amigo para abrir seu miniperfil.</string>
     <string name="tutorial_next">Próximo</string>
     <string name="tutorial_finish">Entendi</string>
     <string name="error_search_profile">Falha ao buscar perfil.</string>

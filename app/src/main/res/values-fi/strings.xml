@@ -96,8 +96,14 @@
     <string name="tutorial_settings_body">Napauta alareunan valikkokuvaketta valitaksesi hotellin ja sovelluksen kielen.</string>
     <string name="tutorial_search_title">Hae profiilia</string>
     <string name="tutorial_search_body">Kirjoita nimimerkki ja napauta Hae nähdäksesi julkiset tiedot.</string>
-    <string name="tutorial_history_title">Historia</string>
-    <string name="tutorial_history_body">Historiapainikkeella pääset nopeasti aiemmin avattuihin profiileihin.</string>
+    <string name="tutorial_visuals_title">Tyylivaatekaappi</string>
+    <string name="tutorial_visuals_body">Kokeile, tallenna ja palauta tyylejä vaatekaapilla. Napauta alapalkin toista painiketta.</string>
+    <string name="profile_tutorial_rotate_title">Käännä avataria</string>
+    <string name="profile_tutorial_rotate_body">Pyyhkäise avataria vasemmalle tai oikealle vaihtaaksesi sen suuntaa.</string>
+    <string name="profile_tutorial_looks_title">Näytä tyyli</string>
+    <string name="profile_tutorial_looks_body">Napauta avataria nähdäksesi nykyisen tyylin kaikki osat.</string>
+    <string name="profile_tutorial_friend_title">Ystävän esikatselu</string>
+    <string name="profile_tutorial_friend_body">Pidä ystävälistassa ystävän päätä painettuna avataksesi miniprofiilin.</string>
     <string name="tutorial_next">Seuraava</string>
     <string name="tutorial_finish">Selvä</string>
     <string name="error_search_profile">Profiilin haku epäonnistui.</string>

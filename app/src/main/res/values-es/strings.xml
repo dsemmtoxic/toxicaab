@@ -96,8 +96,14 @@
     <string name="tutorial_settings_body">Toca el icono de menú inferior para elegir el hotel y cambiar el idioma de la app.</string>
     <string name="tutorial_search_title">Buscar perfil</string>
     <string name="tutorial_search_body">Escribe un nick en la barra y toca Buscar para consultar datos públicos.</string>
-    <string name="tutorial_history_title">Historial</string>
-    <string name="tutorial_history_body">Usa el botón de historial para volver rápidamente a perfiles abiertos.</string>
+    <string name="tutorial_visuals_title">Armario de looks</string>
+    <string name="tutorial_visuals_body">Prueba, guarda y recupera looks con el armario. Toca el segundo botón de la barra inferior.</string>
+    <string name="profile_tutorial_rotate_title">Gira el avatar</string>
+    <string name="profile_tutorial_rotate_body">Desliza el avatar a izquierda o derecha para cambiar su dirección.</string>
+    <string name="profile_tutorial_looks_title">Mira el look</string>
+    <string name="profile_tutorial_looks_body">Toca el avatar para ver todas las prendas del look actual.</string>
+    <string name="profile_tutorial_friend_title">Vista previa de amigos</string>
+    <string name="profile_tutorial_friend_body">En la lista de amigos, mantén pulsada la cabeza de un amigo para abrir su miniperfil.</string>
     <string name="tutorial_next">Siguiente</string>
     <string name="tutorial_finish">Entendido</string>
     <string name="error_search_profile">Error al buscar el perfil.</string>

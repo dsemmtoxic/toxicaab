@@ -68,6 +68,9 @@ public class MainActivity extends Activity {
     private int avatarDirection = 2;
     private ImageView currentAvatarImage;
     private String currentProfileFigure = "";
+    private String currentAvatarProfileKey = "";
+    private View profileAvatarTutorialTarget;
+    private View profileFriendTutorialTarget;
     private boolean currentProfilePrivate = false;
     private volatile int activeSearchToken = 0;
     private volatile boolean searchInProgress = false;
@@ -103,9 +106,13 @@ public class MainActivity extends Activity {
     private static final int MAX_SAVED_VISUALS = 6;
     private static final int MAX_FAVORITES = 12;
     private static final String PREF_TUTORIAL_VERSION = "tutorial_version";
-    private static final int CURRENT_TUTORIAL_VERSION = 3;
+    private static final int CURRENT_TUTORIAL_VERSION = 4;
+    private static final String PREF_PROFILE_FEATURES_TUTORIAL_VERSION = "profile_features_tutorial_version";
+    private static final String PREF_FRIEND_HEAD_TUTORIAL_VERSION = "friend_head_tutorial_version";
+    private static final int CURRENT_PROFILE_FEATURES_TUTORIAL_VERSION = 1;
     private ValueAnimator tutorialPulseAnimator;
     private FrameLayout tutorialOverlayView;
+    private boolean profileFeatureTutorialRunning = false;
     private static final long PROFILE_REFRESH_COOLDOWN_MS = 60L * 1000L;
     private static final long FAVORITES_REFRESH_COOLDOWN_MS = 15L * 1000L;
     private ScrollView mainScroll;
@@ -1818,7 +1825,7 @@ public class MainActivity extends Activity {
         TextView title = habboText(
                 safeStep == 0
                         ? t(R.string.tutorial_settings_title)
-                        : (safeStep == 1 ? t(R.string.tutorial_search_title) : t(R.string.tutorial_history_title)),
+                        : (safeStep == 1 ? t(R.string.tutorial_search_title) : t(R.string.tutorial_visuals_title)),
                 21,
                 true
         );
@@ -1845,7 +1852,7 @@ public class MainActivity extends Activity {
         TextView body = text(
                 safeStep == 0
                         ? t(R.string.tutorial_settings_body)
-                        : (safeStep == 1 ? t(R.string.tutorial_search_body) : t(R.string.tutorial_history_body)),
+                        : (safeStep == 1 ? t(R.string.tutorial_search_body) : t(R.string.tutorial_visuals_body)),
                 14,
                 Color.argb(232, 255, 255, 255),
                 false
@@ -1961,6 +1968,217 @@ public class MainActivity extends Activity {
                 .start();
     }
 
+    private void maybeShowProfileFeaturesTutorial() {
+        if (screen == null || mainScroll == null) return;
+        SharedPreferences sp = getSharedPreferences(PREFS, MODE_PRIVATE);
+        boolean needsAvatarTutorial = sp.getInt(PREF_PROFILE_FEATURES_TUTORIAL_VERSION, 0) < CURRENT_PROFILE_FEATURES_TUTORIAL_VERSION;
+        boolean needsFriendTutorial = sp.getInt(PREF_FRIEND_HEAD_TUTORIAL_VERSION, 0) < CURRENT_PROFILE_FEATURES_TUTORIAL_VERSION;
+        if (!needsAvatarTutorial && (!needsFriendTutorial || profileFriendTutorialTarget == null)) return;
+        if (profileFeatureTutorialRunning) return;
+        if (tutorialOverlayView != null) {
+            uiHandler.postDelayed(this::maybeShowProfileFeaturesTutorial, 450L);
+            return;
+        }
+
+        final int firstStep = needsAvatarTutorial ? 0 : 2;
+        final View firstTarget = firstStep == 2 ? profileFriendTutorialTarget : profileAvatarTutorialTarget;
+        if (firstTarget == null) return;
+        profileFeatureTutorialRunning = true;
+        scrollMainToTutorialTarget(firstTarget, () -> showProfileFeatureTutorial(firstStep));
+    }
+
+    private void scrollMainToView(View target, int topMargin) {
+        if (target == null || mainScroll == null) return;
+        mainScroll.post(() -> {
+            if (target.getParent() == null) return;
+            Rect rect = new Rect();
+            target.getDrawingRect(rect);
+            try {
+                mainScroll.offsetDescendantRectToMyCoords(target, rect);
+                mainScroll.smoothScrollTo(0, Math.max(0, rect.top - Math.max(0, topMargin)));
+            } catch (Exception ignored) {}
+        });
+    }
+
+    private void scrollMainToTutorialTarget(View target, Runnable afterScroll) {
+        if (target == null || mainScroll == null) {
+            profileFeatureTutorialRunning = false;
+            return;
+        }
+        scrollMainToView(target, dp(82));
+        uiHandler.postDelayed(() -> {
+            if (target.getParent() == null) {
+                profileFeatureTutorialRunning = false;
+                return;
+            }
+            if (afterScroll != null) afterScroll.run();
+        }, 420L);
+    }
+
+    private RectF tutorialTargetBounds(View target, int paddingDp) {
+        if (target == null || screen == null) return null;
+        int[] hostLocation = new int[2];
+        int[] targetLocation = new int[2];
+        screen.getLocationOnScreen(hostLocation);
+        target.getLocationOnScreen(targetLocation);
+        float pad = dp(paddingDp);
+        float left = targetLocation[0] - hostLocation[0] - pad;
+        float top = targetLocation[1] - hostLocation[1] - pad;
+        float right = left + target.getWidth() + (pad * 2f);
+        float bottom = top + target.getHeight() + (pad * 2f);
+        left = Math.max(dp(6), left);
+        top = Math.max(dp(6), top);
+        right = Math.min(screen.getWidth() - dp(6), right);
+        bottom = Math.min(screen.getHeight() - dp(6), bottom);
+        if (right <= left || bottom <= top) return null;
+        return new RectF(left, top, right, bottom);
+    }
+
+    private void showProfileFeatureTutorial(final int step) {
+        final int safeStep = Math.max(0, Math.min(2, step));
+        final View target = safeStep == 2 ? profileFriendTutorialTarget : profileAvatarTutorialTarget;
+        if (target == null || target.getParent() == null || screen == null) {
+            profileFeatureTutorialRunning = false;
+            return;
+        }
+        RectF spotlight = tutorialTargetBounds(target, safeStep == 2 ? 8 : 10);
+        if (spotlight == null) {
+            profileFeatureTutorialRunning = false;
+            return;
+        }
+
+        cancelTutorialPulseAnimation();
+        if (tutorialOverlayView != null) detachViewFromParent(tutorialOverlayView);
+
+        final FrameLayout overlay = new FrameLayout(this);
+        tutorialOverlayView = overlay;
+        if (Build.VERSION.SDK_INT >= 21) overlay.setElevation(dp(80));
+        overlay.setClickable(true);
+        overlay.setFocusable(true);
+        final ProfileTutorialOverlayDrawable overlayDrawable = new ProfileTutorialOverlayDrawable(spotlight, safeStep);
+        overlay.setBackground(overlayDrawable);
+
+        final LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(18), dp(18), dp(18), dp(16));
+        card.setBackground(new TutorialCardDrawable(safeStep));
+        card.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
+        if (Build.VERSION.SDK_INT >= 21) card.setElevation(dp(36));
+
+        int accent = tutorialAccentColor(safeStep);
+        TextView stepChip = text((safeStep + 1) + "  /  3", 10, accent, true);
+        stepChip.setGravity(Gravity.CENTER);
+        stepChip.setPadding(dp(10), 0, dp(10), 0);
+        stepChip.setBackground(round(
+                Color.argb(34, Color.red(accent), Color.green(accent), Color.blue(accent)),
+                dp(999),
+                Color.argb(80, Color.red(accent), Color.green(accent), Color.blue(accent)),
+                1
+        ));
+        card.addView(stepChip, new LinearLayout.LayoutParams(-2, dp(24)));
+
+        int titleRes = safeStep == 0
+                ? R.string.profile_tutorial_rotate_title
+                : (safeStep == 1 ? R.string.profile_tutorial_looks_title : R.string.profile_tutorial_friend_title);
+        int bodyRes = safeStep == 0
+                ? R.string.profile_tutorial_rotate_body
+                : (safeStep == 1 ? R.string.profile_tutorial_looks_body : R.string.profile_tutorial_friend_body);
+
+        TextView title = habboText(t(titleRes), 21, true);
+        title.setTextColor(Color.WHITE);
+        title.setMaxLines(2);
+        LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(-1, -2);
+        titleLp.topMargin = dp(6);
+        card.addView(title, titleLp);
+
+        TextView body = text(t(bodyRes), 14, Color.argb(232, 255, 255, 255), false);
+        body.setLineSpacing(dp(4), 1f);
+        body.setPadding(dp(14), dp(12), dp(14), dp(12));
+        body.setBackground(round(Color.argb(22, 255, 255, 255), dp(17), Color.argb(34, 255, 255, 255), 1));
+        LinearLayout.LayoutParams bodyLp = new LinearLayout.LayoutParams(-1, -2);
+        bodyLp.topMargin = dp(14);
+        card.addView(body, bodyLp);
+
+        TextView nextButton = habboText(
+                (safeStep == 2 ? t(R.string.tutorial_finish) : t(R.string.tutorial_next)) + "  ›",
+                13,
+                true
+        );
+        nextButton.setTextColor(Color.WHITE);
+        nextButton.setGravity(Gravity.CENTER);
+        nextButton.setSingleLine(true);
+        nextButton.setPadding(dp(18), 0, dp(18), 0);
+        nextButton.setBackground(grad(dp(14), tutorialAccentSecondaryColor(safeStep), accent));
+        LinearLayout.LayoutParams nextLp = new LinearLayout.LayoutParams(-1, dp(42));
+        nextLp.topMargin = dp(14);
+        card.addView(nextButton, nextLp);
+
+        FrameLayout.LayoutParams cardLp = new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        cardLp.setMargins(dp(16), 0, dp(16), dp(80));
+        overlay.addView(card, cardLp);
+
+        final boolean[] leaving = {false};
+        final ValueAnimator pulseAnimator = ValueAnimator.ofFloat(0f, 1f);
+        tutorialPulseAnimator = pulseAnimator;
+        pulseAnimator.setDuration(1150L);
+        pulseAnimator.setRepeatCount(ValueAnimator.INFINITE);
+        pulseAnimator.setRepeatMode(ValueAnimator.REVERSE);
+        pulseAnimator.addUpdateListener(animation -> {
+            overlayDrawable.setPulse((float) animation.getAnimatedValue());
+            overlay.invalidate();
+        });
+
+        Runnable advance = () -> {
+            if (leaving[0]) return;
+            leaving[0] = true;
+            try { pulseAnimator.cancel(); } catch (Exception ignored) {}
+            if (tutorialPulseAnimator == pulseAnimator) tutorialPulseAnimator = null;
+            overlay.animate()
+                    .alpha(0f)
+                    .setDuration(170L)
+                    .withEndAction(() -> {
+                        try { screen.removeView(overlay); } catch (Exception ignored) {}
+                        if (tutorialOverlayView == overlay) tutorialOverlayView = null;
+                        SharedPreferences sp = getSharedPreferences(PREFS, MODE_PRIVATE);
+                        if (safeStep == 0) {
+                            uiHandler.postDelayed(() -> showProfileFeatureTutorial(1), 70L);
+                        } else if (safeStep == 1) {
+                            sp.edit().putInt(PREF_PROFILE_FEATURES_TUTORIAL_VERSION, CURRENT_PROFILE_FEATURES_TUTORIAL_VERSION).apply();
+                            boolean needsFriendTutorial = sp.getInt(PREF_FRIEND_HEAD_TUTORIAL_VERSION, 0) < CURRENT_PROFILE_FEATURES_TUTORIAL_VERSION;
+                            if (needsFriendTutorial && profileFriendTutorialTarget != null && profileFriendTutorialTarget.getParent() != null) {
+                                scrollMainToTutorialTarget(profileFriendTutorialTarget, () -> showProfileFeatureTutorial(2));
+                            } else {
+                                profileFeatureTutorialRunning = false;
+                            }
+                        } else {
+                            sp.edit().putInt(PREF_FRIEND_HEAD_TUTORIAL_VERSION, CURRENT_PROFILE_FEATURES_TUTORIAL_VERSION).apply();
+                            profileFeatureTutorialRunning = false;
+                        }
+                    })
+                    .start();
+        };
+
+        overlay.setOnClickListener(v -> advance.run());
+        nextButton.setOnClickListener(v -> advance.run());
+        overlay.setAlpha(0f);
+        card.setAlpha(0f);
+        card.setScaleX(0.95f);
+        card.setScaleY(0.95f);
+        card.setTranslationY(dp(24));
+        screen.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
+        overlay.bringToFront();
+        pulseAnimator.start();
+        overlay.animate().alpha(1f).setDuration(190L).start();
+        card.animate()
+                .alpha(1f)
+                .scaleX(1f)
+                .scaleY(1f)
+                .translationY(0f)
+                .setDuration(390L)
+                .setInterpolator(new android.view.animation.OvershootInterpolator(0.7f))
+                .start();
+    }
+
     private void showStartState() {
         resultWrap.removeAllViews();
         LinearLayout c = sectionCard(t(R.string.ready_search), 0, false);
@@ -2064,6 +2282,7 @@ public class MainActivity extends Activity {
                     searchBtn.setEnabled(true);
                     searchBtn.setText(t(R.string.search_button));
                     hidePullRefreshIndicator();
+                    maybeShowProfileFeaturesTutorial();
                 });
             } catch (ProfileNotFoundException e) {
                 runOnUiThread(() -> {
@@ -2189,6 +2408,7 @@ public class MainActivity extends Activity {
                     searchBtn.setEnabled(true);
                     searchBtn.setText(t(R.string.search_button));
                     hidePullRefreshIndicator();
+                    maybeShowProfileFeaturesTutorial();
                 });
             } catch (ProfileNotFoundException e) {
                 runOnUiThread(() -> {
@@ -2743,6 +2963,8 @@ public class MainActivity extends Activity {
         activeRenderedProfile = r;
         rememberOpenedProfile(r);
         currentProfilePrivate = r != null && (r.privateProfile || r.banned);
+        profileAvatarTutorialTarget = null;
+        profileFriendTutorialTarget = null;
         if (!searchInProgress) setLoading(false, "");
         resultWrap.removeAllViews();
 
@@ -2761,9 +2983,10 @@ public class MainActivity extends Activity {
         ImageView avatar = new ImageView(this);
         avatar.setAdjustViewBounds(true);
         avatar.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        avatar.setPadding(dp(20), dp(10), dp(20), dp(84));
+        avatar.setPadding(dp(20), dp(10), dp(20), dp(10));
         avatarFrame.addView(avatar, new FrameLayout.LayoutParams(-1, -1));
         currentAvatarImage = avatar;
+        profileAvatarTutorialTarget = avatarFrame;
 
         TextView favoriteStar = text("", 22, Color.WHITE, true);
         favoriteStar.setGravity(Gravity.CENTER);
@@ -2777,25 +3000,12 @@ public class MainActivity extends Activity {
             toggleFavoriteProfile(r);
             favoriteStar.setBackground(new FavoriteStarDrawable(isFavoriteProfile(r)));
         });
+        String nextAvatarProfileKey = profileIdentityKey(r.hotelKey, r.uniqueId, r.name);
+        if (!nextAvatarProfileKey.equals(currentAvatarProfileKey)) avatarDirection = 2;
+        currentAvatarProfileKey = nextAvatarProfileKey;
         currentProfileFigure = r.figure;
-        avatarDirection = 2;
         updateProfileAvatar();
-
-        LinearLayout controls = new LinearLayout(this);
-        controls.setGravity(Gravity.CENTER);
-        controls.setOrientation(LinearLayout.HORIZONTAL);
-        FrameLayout.LayoutParams cp = new FrameLayout.LayoutParams(-2, dp(40), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        cp.bottomMargin = dp(10);
-        avatarFrame.addView(controls, cp);
-        TextView left = roundIconButton("‹");
-        TextView clothes = roundIconButton("shirt");
-        TextView right = roundIconButton("›");
-        controls.addView(left);
-        controls.addView(clothes);
-        controls.addView(right);
-        left.setOnClickListener(v -> { avatarDirection = normalizeDirection(avatarDirection + 1); updateProfileAvatar(); });
-        right.setOnClickListener(v -> { avatarDirection = normalizeDirection(avatarDirection - 1); updateProfileAvatar(); });
-        clothes.setOnClickListener(v -> showClothesDialog(currentProfileFigure, t(R.string.current_look)));
+        bindProfileAvatarGestures(avatar, r.figure);
 
         TextView name = habboText(r.name, 31, true);
         name.setGravity(Gravity.CENTER);
@@ -2868,8 +3078,58 @@ public class MainActivity extends Activity {
 
     private void updateProfileAvatar() {
         if (currentAvatarImage != null && currentProfileFigure != null && !currentProfileFigure.isEmpty()) {
-            loadAvatarImage(currentAvatarImage, avatarFull(currentProfileFigure, avatarDirection));
+            loadAvatarImageKeepingCurrent(currentAvatarImage, avatarFull(currentProfileFigure, avatarDirection));
         }
+    }
+
+    private void bindProfileAvatarGestures(final ImageView avatar, final String figure) {
+        if (avatar == null) return;
+        final float[] downX = {0f};
+        final float[] downY = {0f};
+        final float[] lastTurnX = {0f};
+        final boolean[] rotated = {false};
+        final int touchSlop = ViewConfiguration.get(this).getScaledTouchSlop();
+
+        avatar.setClickable(true);
+        avatar.setContentDescription(t(R.string.profile_tutorial_looks_body));
+        avatar.setOnClickListener(v -> showClothesDialog(figure, t(R.string.current_look)));
+        avatar.setOnTouchListener((v, event) -> {
+            int action = event.getActionMasked();
+            if (action == MotionEvent.ACTION_DOWN) {
+                downX[0] = event.getX();
+                downY[0] = event.getY();
+                lastTurnX[0] = event.getX();
+                rotated[0] = false;
+                return true;
+            }
+            if (action == MotionEvent.ACTION_MOVE) {
+                float totalDx = event.getX() - downX[0];
+                float totalDy = event.getY() - downY[0];
+                float turnDx = event.getX() - lastTurnX[0];
+                if (Math.abs(totalDx) > Math.abs(totalDy) && Math.abs(turnDx) >= dp(34)) {
+                    requestDisallowParents(v, true);
+                    avatarDirection = normalizeDirection(avatarDirection + (turnDx > 0 ? 1 : -1));
+                    lastTurnX[0] = event.getX();
+                    rotated[0] = true;
+                    updateProfileAvatar();
+                } else if (Math.abs(totalDy) > touchSlop && Math.abs(totalDy) > Math.abs(totalDx)) {
+                    requestDisallowParents(v, false);
+                }
+                return true;
+            }
+            if (action == MotionEvent.ACTION_UP) {
+                requestDisallowParents(v, false);
+                float dx = Math.abs(event.getX() - downX[0]);
+                float dy = Math.abs(event.getY() - downY[0]);
+                if (!rotated[0] && dx <= touchSlop && dy <= touchSlop) v.performClick();
+                return true;
+            }
+            if (action == MotionEvent.ACTION_CANCEL || action == MotionEvent.ACTION_OUTSIDE) {
+                requestDisallowParents(v, false);
+                return true;
+            }
+            return true;
+        });
     }
 
     private int normalizeDirection(int value) {
@@ -3774,8 +4034,9 @@ public class MainActivity extends Activity {
             btRemoved.setBackground(new TrashTabDrawable(showingRemoved[0]));
             btRemoved.setText("");
             ArrayList<JSONObject> data = showingRemoved[0] ? removedList : friendsList;
+            if (!showingRemoved[0] && page[0] == 1) profileFriendTutorialTarget = null;
             renderFriendsPage(content, data, page[0], 10, showingRemoved[0]);
-            renderPager(content, data.size(), 10, page, render[0]);
+            renderPager(content, data.size(), 10, page, render[0], () -> scrollMainToView(c, dp(12)));
         };
         btFriends.setOnClickListener(v -> { showingRemoved[0] = false; page[0] = 1; render[0].run(); });
         btRemoved.setOnClickListener(v -> { showingRemoved[0] = true; page[0] = 1; render[0].run(); });
@@ -3864,11 +4125,25 @@ public class MainActivity extends Activity {
 
         final String fname = n;
         final String friendId = fid;
-        bindProfileCardOpenAndHold(card, fname, currentHotelKey, fig, friendId, () -> openProfileReference(fname, friendId, fig, currentHotelKey));
+        card.setClickable(true);
+        card.setOnClickListener(v -> openProfileReference(fname, friendId, fig, currentHotelKey));
+        bindProfileHeadPreviewHold(
+                headWrap,
+                fname,
+                currentHotelKey,
+                fig,
+                friendId,
+                () -> openProfileReference(fname, friendId, fig, currentHotelKey)
+        );
+        if (!removed && profileFriendTutorialTarget == null) profileFriendTutorialTarget = headWrap;
         return card;
     }
 
     private void renderPager(LinearLayout content, int total, int per, int[] page, Runnable rerender) {
+        renderPager(content, total, per, page, rerender, null);
+    }
+
+    private void renderPager(LinearLayout content, int total, int per, int[] page, Runnable rerender, Runnable pageChanged) {
         int totalPages = Math.max(1, (int)Math.ceil(total/(double)per));
         if (totalPages <= 1) return;
         TextView label = text(tr(R.string.page_of, page[0], totalPages), 16, lightTheme ? Color.rgb(33,33,33) : Color.WHITE, true); label.setGravity(Gravity.CENTER); content.addView(label, lp(-1,-2,0,6,0,12));
@@ -3876,8 +4151,20 @@ public class MainActivity extends Activity {
         TextView prev = pageButton("‹", page[0] > 1); p.addView(prev);
         TextView one = pageButton(String.valueOf(page[0]), true); one.setBackground(grad(dp(14), purple2, purple)); p.addView(one);
         TextView next = pageButton("›", page[0] < totalPages); p.addView(next);
-        prev.setOnClickListener(v -> { if (page[0] > 1) { page[0]--; rerender.run(); } });
-        next.setOnClickListener(v -> { if (page[0] < totalPages) { page[0]++; rerender.run(); } });
+        prev.setOnClickListener(v -> {
+            if (page[0] > 1) {
+                page[0]--;
+                rerender.run();
+                if (pageChanged != null) pageChanged.run();
+            }
+        });
+        next.setOnClickListener(v -> {
+            if (page[0] < totalPages) {
+                page[0]++;
+                rerender.run();
+                if (pageChanged != null) pageChanged.run();
+            }
+        });
     }
 
     private TextView pageButton(String s, boolean enabled) { TextView v = text(s, 20, enabled?Color.WHITE:Color.argb(70,255,255,255), true); v.setGravity(Gravity.CENTER); v.setBackground(round(Color.argb(14,255,255,255), dp(14), Color.argb(24,255,255,255), 1)); LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(dp(44), dp(44)); p.setMargins(dp(6),0,dp(6),0); v.setLayoutParams(p); return v; }
@@ -4697,6 +4984,30 @@ private int loadingProgressFor(String message) {
             .placeholder(R.drawable.pre_load)
             .error(R.drawable.pre_load)
             .into(view));
+    }
+
+    private void loadAvatarImageKeepingCurrent(ImageView view, String url) {
+        if (view == null || url == null || url.trim().isEmpty()) return;
+        String clean = normalizeUrl(url);
+        runOnUiThread(() -> {
+            Drawable current = view.getDrawable();
+            if (current != null) {
+                Glide.with(MainActivity.this)
+                        .load(clean)
+                        .diskCacheStrategy(DiskCacheStrategy.AUTOMATIC)
+                        .placeholder(current)
+                        .error(current)
+                        .dontAnimate()
+                        .into(view);
+            } else {
+                Glide.with(MainActivity.this)
+                        .load(clean)
+                        .diskCacheStrategy(DiskCacheStrategy.AUTOMATIC)
+                        .error(new ColorDrawable(Color.TRANSPARENT))
+                        .dontAnimate()
+                        .into(view);
+            }
+        });
     }
 
 
@@ -5805,12 +6116,7 @@ private int loadingProgressFor(String message) {
             visualEditorCachedType = currentType[0];
             visualEditorCachedDirection = visualDirection[0];
             saveVisualEditorState();
-            Glide.with(MainActivity.this)
-                .load(avatarFull(currentFigure[0], visualDirection[0]))
-                .diskCacheStrategy(DiskCacheStrategy.NONE)
-                .placeholder(R.drawable.pre_load)
-                .error(R.drawable.pre_load)
-                .into(preview);
+            loadAvatarImageKeepingCurrent(preview, avatarFull(currentFigure[0], visualDirection[0]));
         };
         updatePreview.run();
 
@@ -6079,12 +6385,7 @@ private int loadingProgressFor(String message) {
 
                 ImageView avatar = new ImageView(this);
                 avatar.setScaleType(ImageView.ScaleType.FIT_CENTER);
-                Glide.with(MainActivity.this)
-                    .load(avatarMedium(look.figure, 2))
-                    .diskCacheStrategy(DiskCacheStrategy.NONE)
-                    .placeholder(R.drawable.pre_load)
-                    .error(R.drawable.pre_load)
-                    .into(avatar);
+                loadAvatarImageKeepingCurrent(avatar, avatarMedium(look.figure, 2));
                 row.addView(avatar, new LinearLayout.LayoutParams(dp(66), dp(76)));
 
                 LinearLayout mid = new LinearLayout(this);
@@ -7002,7 +7303,7 @@ private int loadingProgressFor(String message) {
         avatarImage.setScaleType(ImageView.ScaleType.FIT_CENTER);
         avatarImage.setBackground(round(lightTheme ? Color.rgb(248,248,248) : Color.argb(22,255,255,255), dp(18), lightTheme ? Color.rgb(220,220,220) : Color.argb(35,255,255,255), 1));
         wrap.addView(avatarImage, lp(-1, dp(150), 0, 0, 0, 12));
-        Glide.with(MainActivity.this).load(avatarFull(previewFigure, 2)).diskCacheStrategy(DiskCacheStrategy.NONE).placeholder(R.drawable.pre_load).error(R.drawable.pre_load).into(avatarImage);
+        loadAvatarImageKeepingCurrent(avatarImage, avatarFull(previewFigure, 2));
 
         LinearLayout info = new LinearLayout(this);
         info.setOrientation(LinearLayout.VERTICAL);
@@ -7121,7 +7422,7 @@ private int loadingProgressFor(String message) {
             img.setScaleX(visualItemScale(type));
             img.setScaleY(visualItemScale(type));
             img.setTranslationY(dp(visualItemOffsetDp(type)));
-            Glide.with(MainActivity.this).load(avatarFull(figure, 2)).diskCacheStrategy(DiskCacheStrategy.AUTOMATIC).placeholder(R.drawable.pre_load).error(R.drawable.pre_load).into(img);
+            loadAvatarImageKeepingCurrent(img, avatarFull(figure, 2));
         }
 
         return outer;
@@ -9284,7 +9585,15 @@ private int loadingProgressFor(String message) {
 
 
     private void bindProfileHeadPreviewHold(final View target, final String nick, final String hotelKey, final String fallbackFigure) {
-        bindProfileCardOpenAndHold(target, nick, hotelKey, fallbackFigure, "", null);
+        bindProfileHeadPreviewHold(target, nick, hotelKey, fallbackFigure, "", null);
+    }
+
+    private void bindProfileHeadPreviewHold(final View target, final String nick, final String hotelKey, final String fallbackFigure, final String uniqueId) {
+        bindProfileHeadPreviewHold(target, nick, hotelKey, fallbackFigure, uniqueId, null);
+    }
+
+    private void bindProfileHeadPreviewHold(final View target, final String nick, final String hotelKey, final String fallbackFigure, final String uniqueId, final Runnable openAction) {
+        bindProfileCardOpenAndHold(target, nick, hotelKey, fallbackFigure, uniqueId, openAction);
     }
 
     private void bindProfileCardOpenAndHold(final View target, final String nick, final String hotelKey, final String fallbackFigure, final Runnable openAction) {
@@ -10711,8 +11020,10 @@ private int loadingProgressFor(String message) {
             if (step == 1) {
                 return new RectF(b.left + dp(12), b.top + dp(132), b.right - dp(12), b.top + dp(252));
             }
-            float cx = b.left + dp(29);
-            float cy = b.top + dp(35);
+            float navLeft = b.left + dp(12);
+            float navWidth = b.width() - dp(24);
+            float cx = navLeft + navWidth * (3f / 8f);
+            float cy = b.bottom - dp(28);
             return new RectF(cx - dp(34), cy - dp(34), cx + dp(34), cy + dp(34));
         }
 
@@ -10775,6 +11086,69 @@ private int loadingProgressFor(String message) {
             float dotRadius = dp(2) + (dp(1) * pulse);
             c.drawCircle(hole.left + dp(8), hole.top + dp(8), dotRadius, p);
             c.drawCircle(hole.right - dp(8), hole.bottom - dp(8), dotRadius, p);
+        }
+
+        @Override public void setAlpha(int a){p.setAlpha(a);}
+        @Override public void setColorFilter(android.graphics.ColorFilter f){p.setColorFilter(f);}
+        @Override public int getOpacity(){return PixelFormat.TRANSLUCENT;}
+    }
+
+    public class ProfileTutorialOverlayDrawable extends Drawable {
+        private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final RectF spotlight;
+        private final int step;
+        private float pulse = 0f;
+
+        ProfileTutorialOverlayDrawable(RectF target, int tutorialStep) {
+            spotlight = new RectF(target);
+            step = tutorialStep;
+        }
+
+        void setPulse(float value) {
+            pulse = Math.max(0f, Math.min(1f, value));
+            invalidateSelf();
+        }
+
+        @Override public void draw(Canvas c) {
+            Rect bounds = getBounds();
+            RectF hole = new RectF(spotlight);
+            float radius = step == 2 ? dp(18) : dp(24);
+            int accent = tutorialAccentColor(step);
+            int secondary = tutorialAccentSecondaryColor(step);
+
+            Path overlayPath = new Path();
+            overlayPath.setFillType(Path.FillType.EVEN_ODD);
+            overlayPath.addRect(new RectF(bounds.left, bounds.top, bounds.right, bounds.bottom), Path.Direction.CW);
+            overlayPath.addRoundRect(hole, radius, radius, Path.Direction.CW);
+
+            p.setStyle(Paint.Style.FILL);
+            p.setShader(new LinearGradient(
+                    bounds.left,
+                    bounds.top,
+                    bounds.right,
+                    bounds.bottom,
+                    Color.argb(222, 3, 3, 8),
+                    Color.argb(232, 13, 5, 21),
+                    Shader.TileMode.CLAMP
+            ));
+            c.drawPath(overlayPath, p);
+            p.setShader(null);
+
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeWidth(dp(8) + (dp(7) * pulse));
+            p.setColor(Color.argb(
+                    (int) (70 - (30 * pulse)),
+                    Color.red(accent),
+                    Color.green(accent),
+                    Color.blue(accent)
+            ));
+            RectF halo = new RectF(hole.left - dp(2), hole.top - dp(2), hole.right + dp(2), hole.bottom + dp(2));
+            c.drawRoundRect(halo, radius + dp(5), radius + dp(5), p);
+
+            p.setStrokeWidth(dp(2));
+            p.setShader(new LinearGradient(hole.left, hole.top, hole.right, hole.bottom, secondary, accent, Shader.TileMode.CLAMP));
+            c.drawRoundRect(hole, radius, radius, p);
+            p.setShader(null);
         }
 
         @Override public void setAlpha(int a){p.setAlpha(a);}
