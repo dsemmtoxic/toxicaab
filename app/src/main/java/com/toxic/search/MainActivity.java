@@ -103,7 +103,7 @@ public class MainActivity extends Activity {
     private static final int MAX_SAVED_VISUALS = 6;
     private static final int MAX_FAVORITES = 12;
     private static final String PREF_TUTORIAL_VERSION = "tutorial_version";
-    private static final int CURRENT_TUTORIAL_VERSION = 2;
+    private static final int CURRENT_TUTORIAL_VERSION = 3;
     private ValueAnimator tutorialPulseAnimator;
     private FrameLayout tutorialOverlayView;
     private static final long PROFILE_REFRESH_COOLDOWN_MS = 60L * 1000L;
@@ -1757,15 +1757,11 @@ public class MainActivity extends Activity {
     }
 
     private int tutorialAccentColor(int step) {
-        if (step == 1) return Color.rgb(78, 214, 255);
-        if (step == 2) return Color.rgb(255, 100, 158);
-        return Color.rgb(205, 105, 255);
+        return Color.rgb(190, 96, 255);
     }
 
     private int tutorialAccentSecondaryColor(int step) {
-        if (step == 1) return Color.rgb(82, 94, 232);
-        if (step == 2) return Color.rgb(143, 60, 219);
-        return Color.rgb(112, 52, 190);
+        return Color.rgb(104, 48, 196);
     }
 
     private void cancelTutorialPulseAnimation() {
@@ -1801,16 +1797,10 @@ public class MainActivity extends Activity {
         header.setGravity(Gravity.CENTER_VERTICAL);
         card.addView(header, new LinearLayout.LayoutParams(-1, -2));
 
-        final View icon = new View(this);
-        icon.setBackground(new TutorialIconDrawable(safeStep));
-        icon.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
-        header.addView(icon, new LinearLayout.LayoutParams(dp(58), dp(58)));
-
         LinearLayout heading = new LinearLayout(this);
         heading.setOrientation(LinearLayout.VERTICAL);
         heading.setGravity(Gravity.CENTER_VERTICAL);
-        LinearLayout.LayoutParams headingLp = new LinearLayout.LayoutParams(0, -2, 1f);
-        headingLp.leftMargin = dp(14);
+        LinearLayout.LayoutParams headingLp = new LinearLayout.LayoutParams(-1, -2);
         header.addView(heading, headingLp);
 
         int accent = tutorialAccentColor(safeStep);
@@ -1954,8 +1944,6 @@ public class MainActivity extends Activity {
         card.setScaleX(0.94f);
         card.setScaleY(0.94f);
         card.setTranslationY(dp(34));
-        icon.setScaleX(0.78f);
-        icon.setScaleY(0.78f);
         screen.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
         overlay.bringToFront();
         pulseAnimator.start();
@@ -1970,13 +1958,6 @@ public class MainActivity extends Activity {
                 .translationY(0f)
                 .setDuration(430L)
                 .setInterpolator(new android.view.animation.OvershootInterpolator(0.72f))
-                .start();
-        icon.animate()
-                .scaleX(1f)
-                .scaleY(1f)
-                .setStartDelay(120L)
-                .setDuration(350L)
-                .setInterpolator(new android.view.animation.OvershootInterpolator(1.05f))
                 .start();
     }
 
@@ -10878,86 +10859,5 @@ private int loadingProgressFor(String message) {
         @Override public void setColorFilter(android.graphics.ColorFilter f){p.setColorFilter(f);}
         @Override public int getOpacity(){return PixelFormat.TRANSLUCENT;}
     }
-
-    public class TutorialIconDrawable extends Drawable {
-        private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final int step;
-
-        TutorialIconDrawable(int s) { step = s; }
-
-        @Override public void draw(Canvas c) {
-            Rect b = getBounds();
-            float cx = b.exactCenterX();
-            float cy = b.exactCenterY();
-            float radius = Math.min(b.width(), b.height()) * 0.43f;
-            int accent = tutorialAccentColor(step);
-            int secondary = tutorialAccentSecondaryColor(step);
-
-            p.setStyle(Paint.Style.FILL);
-            p.setShader(new LinearGradient(
-                    b.left,
-                    b.top,
-                    b.right,
-                    b.bottom,
-                    secondary,
-                    accent,
-                    Shader.TileMode.CLAMP
-            ));
-            p.setShadowLayer(
-                    dp(10),
-                    0,
-                    dp(4),
-                    Color.argb(110, Color.red(accent), Color.green(accent), Color.blue(accent))
-            );
-            c.drawCircle(cx, cy, radius, p);
-            p.clearShadowLayer();
-            p.setShader(null);
-
-            p.setStyle(Paint.Style.STROKE);
-            p.setStrokeWidth(dp(1));
-            p.setColor(Color.argb(115, 255, 255, 255));
-            c.drawCircle(cx, cy, radius - dp(1), p);
-
-            p.setColor(Color.WHITE);
-            p.setStrokeCap(Paint.Cap.ROUND);
-            p.setStrokeJoin(Paint.Join.ROUND);
-            if (step == 0) {
-                p.setStyle(Paint.Style.STROKE);
-                p.setStrokeWidth(dp(3));
-                c.drawCircle(cx, cy, dp(7), p);
-                for (int i = 0; i < 8; i++) {
-                    double angle = (Math.PI * i) / 4.0;
-                    float x1 = cx + (float) Math.cos(angle) * dp(11);
-                    float y1 = cy + (float) Math.sin(angle) * dp(11);
-                    float x2 = cx + (float) Math.cos(angle) * dp(15);
-                    float y2 = cy + (float) Math.sin(angle) * dp(15);
-                    c.drawLine(x1, y1, x2, y2, p);
-                }
-                p.setStyle(Paint.Style.FILL);
-                c.drawCircle(cx, cy, dp(2), p);
-            } else if (step == 1) {
-                p.setStyle(Paint.Style.STROKE);
-                p.setStrokeWidth(dp(3));
-                c.drawCircle(cx - dp(3), cy - dp(3), dp(9), p);
-                c.drawLine(cx + dp(4), cy + dp(4), cx + dp(13), cy + dp(13), p);
-                p.setStyle(Paint.Style.FILL);
-                c.drawCircle(cx - dp(7), cy - dp(6), dp(2), p);
-            } else {
-                p.setStyle(Paint.Style.STROKE);
-                p.setStrokeWidth(dp(3));
-                c.drawCircle(cx, cy, dp(12), p);
-                c.drawLine(cx, cy, cx, cy - dp(7), p);
-                c.drawLine(cx, cy, cx + dp(6), cy + dp(3), p);
-                p.setStyle(Paint.Style.FILL);
-                c.drawCircle(cx, cy, dp(2), p);
-            }
-        }
-
-        @Override public void setAlpha(int a){p.setAlpha(a);}
-        @Override public void setColorFilter(android.graphics.ColorFilter f){p.setColorFilter(f);}
-        @Override public int getOpacity(){return PixelFormat.TRANSLUCENT;}
-    }
-
-
 
 }
