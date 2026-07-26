@@ -9,9 +9,14 @@ Envie esta versão do projeto para o seu repositório.
 Arquivos importantes adicionados/alterados:
 
 - `app/build.gradle`
+- `build.gradle`
 - `.github/workflows/generate-upload-key.yml`
 - `.github/workflows/build-aab-release.yml`
 - `.gitignore`
+
+O projeto usa `compileSdk 36` e `targetSdk 36`, compatíveis com a exigência
+da Play Store para atualizações enviadas a partir de 31 de agosto de 2026.
+O build utiliza Android Gradle Plugin 8.10.1, Gradle 8.11.1 e JDK 17.
 
 ## 2. Gere sua chave de upload uma única vez
 
@@ -73,11 +78,23 @@ applicationId 'com.toxic.search'
 2. Aumente o `versionCode` em `app/build.gradle`:
 
 ```gradle
-versionCode 2
-versionName '1.1'
+versionCode 35
+versionName '1.2.3'
 ```
 
 O `versionCode` precisa sempre aumentar. O `versionName` é o texto exibido para você/usuário.
 
 3. Gere outro AAB pelo mesmo workflow **2 - Build Signed Android AAB**.
 4. Use sempre a mesma chave/secrets.
+
+## 6. Ative a renovação automática dos banners no AdMob
+
+O aplicativo tenta carregar novamente um banner quando ocorre falta de preenchimento
+ou erro de rede, começando após 30 segundos e aumentando gradualmente até 5 minutos.
+Quando um anúncio está carregado, a troca periódica do criativo é controlada pelo
+AdMob.
+
+No painel do AdMob, abra cada uma das cinco unidades de banner usadas pelo aplicativo
+e deixe a opção de atualização automática em **Otimizada pelo Google**. Essa é a
+configuração recomendada para manter banners visíveis recebendo novos anúncios sem
+criar solicitações duplicadas no código.
