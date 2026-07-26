@@ -78,8 +78,8 @@ applicationId 'com.toxic.search'
 2. Aumente o `versionCode` em `app/build.gradle`:
 
 ```gradle
-versionCode 35
-versionName '1.2.3'
+versionCode 36
+versionName '1.2.4'
 ```
 
 O `versionCode` precisa sempre aumentar. O `versionName` é o texto exibido para você/usuário.
@@ -98,3 +98,26 @@ No painel do AdMob, abra cada uma das cinco unidades de banner usadas pelo aplic
 e deixe a opção de atualização automática em **Otimizada pelo Google**. Essa é a
 configuração recomendada para manter banners visíveis recebendo novos anúncios sem
 criar solicitações duplicadas no código.
+
+## 7. Configure a compra Premium `remove_ads`
+
+O identificador usado pelo aplicativo continua sendo exatamente:
+
+```text
+remove_ads
+```
+
+Na Play Console, verifique:
+
+1. Abra **Monetizar > Produtos > Produtos únicos**.
+2. Confirme que existe um produto com o ID exato `remove_ads`.
+3. O produto deve ser do tipo **produto único**, não assinatura.
+4. Crie e ative uma opção de compra com preço definido.
+5. Confirme que ela está disponível no país da conta usada no teste.
+6. Publique as alterações e aguarde a propagação do Google Play.
+7. Teste com o aplicativo instalado por uma faixa da Play Store ou com uma conta
+   cadastrada como testadora de licença. O pacote precisa continuar sendo
+   `com.toxic.search`.
+
+O aplicativo usa Google Play Billing 9.1.0 e registra no Logcat, com a etiqueta
+`ToxicBilling`, o código retornado quando o produto não pode ser consultado.

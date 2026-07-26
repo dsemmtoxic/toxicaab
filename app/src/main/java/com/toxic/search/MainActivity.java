@@ -1,6 +1,7 @@
 package com.toxic.search;
 
 import android.app.*;
+import android.animation.ValueAnimator;
 import android.os.*;
 import android.graphics.*;
 import android.graphics.drawable.*;
@@ -42,6 +43,7 @@ import com.android.billingclient.api.PurchasesUpdatedListener;
 import com.android.billingclient.api.QueryProductDetailsParams;
 import com.android.billingclient.api.QueryProductDetailsResult;
 import com.android.billingclient.api.QueryPurchasesParams;
+import com.android.billingclient.api.UnfetchedProduct;
 import java.io.*;
 import java.net.*;
 import java.text.*;
@@ -100,7 +102,10 @@ public class MainActivity extends Activity {
     private static final String PREF_SAVED_VISUALS = "saved_visual_editor_figures";
     private static final int MAX_SAVED_VISUALS = 6;
     private static final int MAX_FAVORITES = 12;
-    private static final String PREF_TUTORIAL_SHOWN = "tutorial_shown";
+    private static final String PREF_TUTORIAL_VERSION = "tutorial_version";
+    private static final int CURRENT_TUTORIAL_VERSION = 2;
+    private ValueAnimator tutorialPulseAnimator;
+    private FrameLayout tutorialOverlayView;
     private static final long PROFILE_REFRESH_COOLDOWN_MS = 60L * 1000L;
     private static final long FAVORITES_REFRESH_COOLDOWN_MS = 15L * 1000L;
     private ScrollView mainScroll;
@@ -214,7 +219,7 @@ public class MainActivity extends Activity {
     private boolean billingConnecting = false;
     private boolean billingReady = false;
     private boolean pendingRemoveAdsPurchaseLaunch = false;
-    private static final long REWARDED_AD_FREE_MS = 30L * 60L * 1000L;
+    private static final long REWARDED_AD_FREE_MS = 2L * 60L * 60L * 1000L;
     private static final long MAX_AD_FREE_MS = 4L * 60L * 60L * 1000L;
     private static final int REWARDED_ADS_REQUIRED = 3;
     private int rewardedAdsWatched = 0;
@@ -899,6 +904,31 @@ public class MainActivity extends Activity {
     }
 
 
+    private void logBillingResult(String operation, BillingResult billingResult) {
+        if (billingResult == null) {
+            android.util.Log.w("ToxicBilling", operation + ": null BillingResult");
+            return;
+        }
+        android.util.Log.w(
+                "ToxicBilling",
+                operation
+                        + ": code=" + billingResult.getResponseCode()
+                        + ", message=" + billingResult.getDebugMessage()
+        );
+    }
+
+    private void showBillingFailure(String operation, BillingResult billingResult) {
+        logBillingResult(operation, billingResult);
+        int responseCode = billingResult == null
+                ? BillingClient.BillingResponseCode.ERROR
+                : billingResult.getResponseCode();
+        int messageId = responseCode == BillingClient.BillingResponseCode.ITEM_UNAVAILABLE
+                || responseCode == BillingClient.BillingResponseCode.BILLING_UNAVAILABLE
+                ? R.string.purchase_unavailable
+                : R.string.purchase_error;
+        runOnUiThread(() -> toast(t(messageId)));
+    }
+
     private void initBillingClient() {
         try {
             billingClient = BillingClient.newBuilder(this)
@@ -908,7 +938,7 @@ public class MainActivity extends Activity {
                             if (code == BillingClient.BillingResponseCode.OK && purchases != null) {
                                 handleRemoveAdsPurchases(purchases, true);
                             } else if (code != BillingClient.BillingResponseCode.USER_CANCELED) {
-                                runOnUiThread(() -> toast(t(R.string.purchase_error)));
+                                showBillingFailure("onPurchasesUpdated", billingResult);
                             }
                         }
                     })
@@ -935,6 +965,9 @@ public class MainActivity extends Activity {
                         queryRemoveAdsProductDetails();
                         queryRemoveAdsPurchases();
                         if (pendingRemoveAdsPurchaseLaunch && removeAdsProductDetails != null) runOnUiThread(() -> launchRemoveAdsPurchase());
+                    } else if (pendingRemoveAdsPurchaseLaunch) {
+                        pendingRemoveAdsPurchaseLaunch = false;
+                        showBillingFailure("onBillingSetupFinished", billingResult);
                     }
                 }
                 @Override public void onBillingServiceDisconnected() {
@@ -961,11 +994,48 @@ public class MainActivity extends Activity {
                     .build();
             billingClient.queryProductDetailsAsync(params, new ProductDetailsResponseListener() {
                 @Override public void onProductDetailsResponse(BillingResult billingResult, QueryProductDetailsResult result) {
-                    if (billingResult == null || billingResult.getResponseCode() != BillingClient.BillingResponseCode.OK || result == null) return;
+                    if (billingResult == null || billingResult.getResponseCode() != BillingClient.BillingResponseCode.OK || result == null) {
+                        if (pendingRemoveAdsPurchaseLaunch) {
+                            pendingRemoveAdsPurchaseLaunch = false;
+                            showBillingFailure("queryProductDetailsAsync", billingResult);
+                        } else {
+                            logBillingResult("queryProductDetailsAsync", billingResult);
+                        }
+                        return;
+                    }
                     List<ProductDetails> list = result.getProductDetailsList();
-                    if (list != null && !list.isEmpty()) {
-                        removeAdsProductDetails = list.get(0);
+                    ProductDetails matchingProduct = null;
+                    if (list != null) {
+                        for (ProductDetails details : list) {
+                            if (details != null && REMOVE_ADS_PRODUCT_ID.equals(details.getProductId())) {
+                                matchingProduct = details;
+                                break;
+                            }
+                        }
+                    }
+                    if (matchingProduct != null) {
+                        removeAdsProductDetails = matchingProduct;
                         if (pendingRemoveAdsPurchaseLaunch) runOnUiThread(() -> launchRemoveAdsPurchase());
+                        return;
+                    }
+
+                    removeAdsProductDetails = null;
+                    List<UnfetchedProduct> unfetchedProducts = result.getUnfetchedProductList();
+                    if (unfetchedProducts != null) {
+                        for (UnfetchedProduct product : unfetchedProducts) {
+                            if (product != null && REMOVE_ADS_PRODUCT_ID.equals(product.getProductId())) {
+                                android.util.Log.w(
+                                        "ToxicBilling",
+                                        "remove_ads unfetched: status=" + product.getStatusCode()
+                                                + ", type=" + product.getProductType()
+                                );
+                                break;
+                            }
+                        }
+                    }
+                    if (pendingRemoveAdsPurchaseLaunch) {
+                        pendingRemoveAdsPurchaseLaunch = false;
+                        runOnUiThread(() -> toast(t(R.string.purchase_unavailable)));
                     }
                 }
             });
@@ -1080,10 +1150,11 @@ public class MainActivity extends Activity {
                     queryRemoveAdsPurchases();
                 } else {
                     pendingRemoveAdsPurchaseLaunch = false;
-                    toast(t(R.string.purchase_error));
+                    showBillingFailure("launchBillingFlow", result);
                 }
             }
         } catch(Exception e) {
+            android.util.Log.w("ToxicBilling", "launchBillingFlow exception", e);
             toast(t(R.string.purchase_error));
         }
     }
@@ -1415,6 +1486,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onDestroy() {
         saveAdFreeUntil();
+        cancelTutorialPulseAnimation();
         uiHandler.removeCallbacks(adFreeTicker);
         cancelInterstitialAdRetry();
         cancelRewardedAdRetry();
@@ -1679,64 +1751,233 @@ public class MainActivity extends Activity {
 
     private void maybeShowFirstRunTutorial() {
         SharedPreferences sp = getSharedPreferences(PREFS, MODE_PRIVATE);
-        if (sp.getBoolean(PREF_TUTORIAL_SHOWN, false)) return;
-        sp.edit().putBoolean(PREF_TUTORIAL_SHOWN, true).apply();
+        if (sp.getInt(PREF_TUTORIAL_VERSION, 0) >= CURRENT_TUTORIAL_VERSION) return;
+        sp.edit().putInt(PREF_TUTORIAL_VERSION, CURRENT_TUTORIAL_VERSION).apply();
         uiHandler.postDelayed(() -> showTutorialOverlay(0), 2300L);
+    }
+
+    private int tutorialAccentColor(int step) {
+        if (step == 1) return Color.rgb(78, 214, 255);
+        if (step == 2) return Color.rgb(255, 100, 158);
+        return Color.rgb(205, 105, 255);
+    }
+
+    private int tutorialAccentSecondaryColor(int step) {
+        if (step == 1) return Color.rgb(82, 94, 232);
+        if (step == 2) return Color.rgb(143, 60, 219);
+        return Color.rgb(112, 52, 190);
+    }
+
+    private void cancelTutorialPulseAnimation() {
+        if (tutorialPulseAnimator != null) {
+            try { tutorialPulseAnimator.cancel(); } catch (Exception ignored) {}
+            tutorialPulseAnimator = null;
+        }
     }
 
     private void showTutorialOverlay(final int step) {
         if (screen == null) return;
         final int safeStep = Math.max(0, Math.min(2, step));
+        cancelTutorialPulseAnimation();
+        if (tutorialOverlayView != null) detachViewFromParent(tutorialOverlayView);
 
         final FrameLayout overlay = new FrameLayout(this);
+        tutorialOverlayView = overlay;
         if (Build.VERSION.SDK_INT >= 21) overlay.setElevation(dp(80));
         overlay.setClickable(true);
         overlay.setFocusable(true);
-        overlay.setBackground(new TutorialOverlayDrawable(safeStep));
+        final TutorialOverlayDrawable overlayDrawable = new TutorialOverlayDrawable(safeStep);
+        overlay.setBackground(overlayDrawable);
 
-        LinearLayout card = new LinearLayout(this);
+        final LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setPadding(dp(20), dp(18), dp(20), dp(18));
-        card.setBackground(new TutorialCardDrawable());
+        card.setPadding(dp(18), dp(18), dp(18), dp(16));
+        card.setBackground(new TutorialCardDrawable(safeStep));
+        card.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
+        if (Build.VERSION.SDK_INT >= 21) card.setElevation(dp(36));
 
-        TextView stepChip = text((safeStep + 1) + "/3", 12, Color.WHITE, true);
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        card.addView(header, new LinearLayout.LayoutParams(-1, -2));
+
+        final View icon = new View(this);
+        icon.setBackground(new TutorialIconDrawable(safeStep));
+        icon.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
+        header.addView(icon, new LinearLayout.LayoutParams(dp(58), dp(58)));
+
+        LinearLayout heading = new LinearLayout(this);
+        heading.setOrientation(LinearLayout.VERTICAL);
+        heading.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams headingLp = new LinearLayout.LayoutParams(0, -2, 1f);
+        headingLp.leftMargin = dp(14);
+        header.addView(heading, headingLp);
+
+        int accent = tutorialAccentColor(safeStep);
+        TextView stepChip = text((safeStep + 1) + "  /  3", 10, accent, true);
         stepChip.setGravity(Gravity.CENTER);
-        stepChip.setPadding(dp(10), dp(4), dp(10), dp(4));
-        stepChip.setBackground(grad(dp(999), purple2, purple));
-        LinearLayout.LayoutParams scp = new LinearLayout.LayoutParams(-2, dp(28));
-        scp.gravity = Gravity.CENTER_HORIZONTAL;
-        card.addView(stepChip, scp);
+        stepChip.setPadding(dp(10), 0, dp(10), 0);
+        stepChip.setBackground(round(
+                Color.argb(34, Color.red(accent), Color.green(accent), Color.blue(accent)),
+                dp(999),
+                Color.argb(80, Color.red(accent), Color.green(accent), Color.blue(accent)),
+                1
+        ));
+        heading.addView(stepChip, new LinearLayout.LayoutParams(-2, dp(24)));
 
-        TextView title = habboText(safeStep == 0 ? t(R.string.tutorial_settings_title) : (safeStep == 1 ? t(R.string.tutorial_search_title) : t(R.string.tutorial_history_title)), 22, true);
+        TextView title = habboText(
+                safeStep == 0
+                        ? t(R.string.tutorial_settings_title)
+                        : (safeStep == 1 ? t(R.string.tutorial_search_title) : t(R.string.tutorial_history_title)),
+                21,
+                true
+        );
         title.setTextColor(Color.WHITE);
-        title.setGravity(Gravity.CENTER);
+        title.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
+        title.setMaxLines(2);
         LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(-1, -2);
-        tp.setMargins(0, dp(10), 0, 0);
-        card.addView(title, tp);
+        tp.topMargin = dp(5);
+        heading.addView(title, tp);
 
-        TextView body = text(safeStep == 0 ? t(R.string.tutorial_settings_body) : (safeStep == 1 ? t(R.string.tutorial_search_body) : t(R.string.tutorial_history_body)), 14, Color.argb(230,255,255,255), false);
-        body.setGravity(Gravity.CENTER);
+        LinearLayout bodySurface = new LinearLayout(this);
+        bodySurface.setOrientation(LinearLayout.VERTICAL);
+        bodySurface.setPadding(dp(14), dp(12), dp(14), dp(12));
+        bodySurface.setBackground(round(
+                Color.argb(22, 255, 255, 255),
+                dp(17),
+                Color.argb(34, 255, 255, 255),
+                1
+        ));
+        LinearLayout.LayoutParams surfaceLp = new LinearLayout.LayoutParams(-1, -2);
+        surfaceLp.topMargin = dp(15);
+        card.addView(bodySurface, surfaceLp);
+
+        TextView body = text(
+                safeStep == 0
+                        ? t(R.string.tutorial_settings_body)
+                        : (safeStep == 1 ? t(R.string.tutorial_search_body) : t(R.string.tutorial_history_body)),
+                14,
+                Color.argb(232, 255, 255, 255),
+                false
+        );
+        body.setGravity(Gravity.LEFT);
         body.setLineSpacing(dp(4), 1f);
-        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(-1, -2);
-        bp.setMargins(0, dp(10), 0, dp(12));
-        card.addView(body, bp);
+        bodySurface.addView(body, new LinearLayout.LayoutParams(-1, -2));
 
-        TextView hint = text(safeStep >= 2 ? t(R.string.tutorial_finish) : t(R.string.tap_to_continue), 12, Color.argb(190,255,255,255), true);
-        hint.setGravity(Gravity.CENTER);
-        hint.setPadding(0, dp(4), 0, 0);
-        card.addView(hint, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout footer = new LinearLayout(this);
+        footer.setOrientation(LinearLayout.HORIZONTAL);
+        footer.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams footerLp = new LinearLayout.LayoutParams(-1, dp(44));
+        footerLp.topMargin = dp(14);
+        card.addView(footer, footerLp);
+
+        LinearLayout dots = new LinearLayout(this);
+        dots.setOrientation(LinearLayout.HORIZONTAL);
+        dots.setGravity(Gravity.CENTER_VERTICAL);
+        footer.addView(dots, new LinearLayout.LayoutParams(0, -1, 1f));
+        for (int i = 0; i < 3; i++) {
+            View dot = new View(this);
+            boolean active = i == safeStep;
+            dot.setBackground(round(
+                    active ? accent : Color.argb(70, 255, 255, 255),
+                    dp(999),
+                    active ? Color.argb(120, 255, 255, 255) : Color.TRANSPARENT,
+                    active ? 1 : 0
+            ));
+            LinearLayout.LayoutParams dotLp = new LinearLayout.LayoutParams(active ? dp(24) : dp(7), dp(7));
+            dotLp.rightMargin = dp(7);
+            dots.addView(dot, dotLp);
+        }
+
+        final TextView nextButton = habboText(
+                (safeStep >= 2 ? t(R.string.tutorial_finish) : t(R.string.tutorial_next)) + "  ›",
+                13,
+                true
+        );
+        nextButton.setTextColor(Color.WHITE);
+        nextButton.setGravity(Gravity.CENTER);
+        nextButton.setSingleLine(true);
+        nextButton.setMinWidth(dp(116));
+        nextButton.setPadding(dp(17), 0, dp(17), 0);
+        nextButton.setBackground(grad(
+                dp(14),
+                tutorialAccentSecondaryColor(safeStep),
+                accent
+        ));
+        nextButton.setClickable(true);
+        nextButton.setFocusable(true);
+        footer.addView(nextButton, new LinearLayout.LayoutParams(-2, dp(42)));
 
         FrameLayout.LayoutParams cp = new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        cp.setMargins(dp(18), 0, dp(18), dp(76));
+        cp.setMargins(dp(16), 0, dp(16), dp(80));
         overlay.addView(card, cp);
 
-        overlay.setOnClickListener(v -> {
-            try { screen.removeView(overlay); } catch (Exception ignored) {}
-            if (safeStep < 2) showTutorialOverlay(safeStep + 1);
+        final boolean[] leaving = {false};
+        final ValueAnimator pulseAnimator = ValueAnimator.ofFloat(0f, 1f);
+        tutorialPulseAnimator = pulseAnimator;
+        pulseAnimator.setDuration(1150L);
+        pulseAnimator.setRepeatCount(ValueAnimator.INFINITE);
+        pulseAnimator.setRepeatMode(ValueAnimator.REVERSE);
+        pulseAnimator.addUpdateListener(animation -> {
+            overlayDrawable.setPulse((float) animation.getAnimatedValue());
+            overlay.invalidate();
         });
 
+        Runnable advance = () -> {
+            if (leaving[0]) return;
+            leaving[0] = true;
+            try { pulseAnimator.cancel(); } catch (Exception ignored) {}
+            if (tutorialPulseAnimator == pulseAnimator) tutorialPulseAnimator = null;
+            card.animate()
+                    .alpha(0f)
+                    .translationY(dp(18))
+                    .scaleX(0.97f)
+                    .scaleY(0.97f)
+                    .setDuration(150L)
+                    .start();
+            overlay.animate()
+                    .alpha(0f)
+                    .setDuration(180L)
+                    .withEndAction(() -> {
+                        try { screen.removeView(overlay); } catch (Exception ignored) {}
+                        if (tutorialOverlayView == overlay) tutorialOverlayView = null;
+                        if (safeStep < 2) uiHandler.postDelayed(() -> showTutorialOverlay(safeStep + 1), 55L);
+                    })
+                    .start();
+        };
+
+        overlay.setOnClickListener(v -> advance.run());
+        nextButton.setOnClickListener(v -> advance.run());
+
+        overlay.setAlpha(0f);
+        card.setAlpha(0f);
+        card.setScaleX(0.94f);
+        card.setScaleY(0.94f);
+        card.setTranslationY(dp(34));
+        icon.setScaleX(0.78f);
+        icon.setScaleY(0.78f);
         screen.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
         overlay.bringToFront();
+        pulseAnimator.start();
+        overlay.animate()
+                .alpha(1f)
+                .setDuration(190L)
+                .start();
+        card.animate()
+                .alpha(1f)
+                .scaleX(1f)
+                .scaleY(1f)
+                .translationY(0f)
+                .setDuration(430L)
+                .setInterpolator(new android.view.animation.OvershootInterpolator(0.72f))
+                .start();
+        icon.animate()
+                .scaleX(1f)
+                .scaleY(1f)
+                .setStartDelay(120L)
+                .setDuration(350L)
+                .setInterpolator(new android.view.animation.OvershootInterpolator(1.05f))
+                .start();
     }
 
     private void showStartState() {
@@ -10467,65 +10708,251 @@ private int loadingProgressFor(String message) {
     }
 
     public class TutorialOverlayDrawable extends Drawable {
-        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        int step;
+        private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final int step;
+        private float pulse = 0f;
+
         TutorialOverlayDrawable(int s) { step = s; }
-        @Override public void draw(Canvas c) {
-            Rect b = getBounds();
-            RectF hole;
+
+        void setPulse(float value) {
+            pulse = Math.max(0f, Math.min(1f, value));
+            invalidateSelf();
+        }
+
+        private RectF spotlightBounds(Rect b) {
             if (step == 0) {
-                // 4 itens na bottom nav: Home, Visuais, Favoritos, Configurações.
-                // Considera o padding horizontal real da barra inferior para centralizar no botão Configurações.
                 float navLeft = b.left + dp(12);
                 float navWidth = b.width() - dp(24);
                 float cx = navLeft + navWidth * (7f / 8f);
                 float cy = b.bottom - dp(28);
-                hole = new RectF(cx - dp(28), cy - dp(28), cx + dp(28), cy + dp(28));
-            } else if (step == 1) {
-                hole = new RectF(b.left + dp(12), b.top + dp(132), b.right - dp(12), b.top + dp(252));
-            } else {
-                float cx = b.left + dp(29);
-                float cy = b.top + dp(35);
-                hole = new RectF(cx - dp(34), cy - dp(34), cx + dp(34), cy + dp(34));
+                return new RectF(cx - dp(28), cy - dp(28), cx + dp(28), cy + dp(28));
             }
+            if (step == 1) {
+                return new RectF(b.left + dp(12), b.top + dp(132), b.right - dp(12), b.top + dp(252));
+            }
+            float cx = b.left + dp(29);
+            float cy = b.top + dp(35);
+            return new RectF(cx - dp(34), cy - dp(34), cx + dp(34), cy + dp(34));
+        }
+
+        @Override public void draw(Canvas c) {
+            Rect b = getBounds();
+            RectF hole = spotlightBounds(b);
+            float radius = step == 1 ? dp(26) : dp(24);
+            int accent = tutorialAccentColor(step);
+            int secondary = tutorialAccentSecondaryColor(step);
 
             Path overlayPath = new Path();
             overlayPath.setFillType(Path.FillType.EVEN_ODD);
             overlayPath.addRect(new RectF(b.left, b.top, b.right, b.bottom), Path.Direction.CW);
-            overlayPath.addRoundRect(hole, dp(24), dp(24), Path.Direction.CW);
+            overlayPath.addRoundRect(hole, radius, radius, Path.Direction.CW);
 
             p.setStyle(Paint.Style.FILL);
-            p.setColor(Color.argb(218, 0, 0, 0));
+            p.setShader(new LinearGradient(
+                    b.left,
+                    b.top,
+                    b.right,
+                    b.bottom,
+                    Color.argb(222, 3, 3, 8),
+                    Color.argb(232, 13, 5, 21),
+                    Shader.TileMode.CLAMP
+            ));
             c.drawPath(overlayPath, p);
+            p.setShader(null);
 
             p.setStyle(Paint.Style.STROKE);
-            p.setStrokeWidth(dp(2));
-            p.setColor(Color.argb(245, 210, 112, 255));
-            c.drawRoundRect(hole, dp(24), dp(24), p);
+            p.setStrokeWidth(dp(8) + (dp(7) * pulse));
+            p.setColor(Color.argb(
+                    (int) (70 - (30 * pulse)),
+                    Color.red(accent),
+                    Color.green(accent),
+                    Color.blue(accent)
+            ));
+            RectF halo = new RectF(
+                    hole.left - dp(2),
+                    hole.top - dp(2),
+                    hole.right + dp(2),
+                    hole.bottom + dp(2)
+            );
+            c.drawRoundRect(halo, radius + dp(5), radius + dp(5), p);
 
-            p.setStrokeWidth(dp(8));
-            p.setColor(Color.argb(44, 210, 112, 255));
-            c.drawRoundRect(hole, dp(28), dp(28), p);
+            p.setStrokeWidth(dp(2));
+            p.setShader(new LinearGradient(
+                    hole.left,
+                    hole.top,
+                    hole.right,
+                    hole.bottom,
+                    secondary,
+                    accent,
+                    Shader.TileMode.CLAMP
+            ));
+            c.drawRoundRect(hole, radius, radius, p);
+            p.setShader(null);
+
+            p.setStyle(Paint.Style.FILL);
+            p.setColor(Color.WHITE);
+            float dotRadius = dp(2) + (dp(1) * pulse);
+            c.drawCircle(hole.left + dp(8), hole.top + dp(8), dotRadius, p);
+            c.drawCircle(hole.right - dp(8), hole.bottom - dp(8), dotRadius, p);
         }
+
         @Override public void setAlpha(int a){p.setAlpha(a);}
         @Override public void setColorFilter(android.graphics.ColorFilter f){p.setColorFilter(f);}
         @Override public int getOpacity(){return PixelFormat.TRANSLUCENT;}
     }
 
     public class TutorialCardDrawable extends Drawable {
-        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final int step;
+
+        TutorialCardDrawable(int s) { step = s; }
+
         @Override public void draw(Canvas c) {
             Rect b = getBounds();
-            RectF r = new RectF(b.left, b.top, b.right, b.bottom);
-            p.setShader(new LinearGradient(r.left, r.top, r.right, r.bottom, Color.rgb(35, 20, 55), Color.rgb(78, 28, 112), Shader.TileMode.CLAMP));
+            RectF r = new RectF(b.left + dp(3), b.top + dp(3), b.right - dp(3), b.bottom - dp(3));
+            float radius = dp(28);
+            int accent = tutorialAccentColor(step);
+            int secondary = tutorialAccentSecondaryColor(step);
+
             p.setStyle(Paint.Style.FILL);
-            c.drawRoundRect(r, dp(26), dp(26), p);
+            p.setShader(new LinearGradient(
+                    r.left,
+                    r.top,
+                    r.right,
+                    r.bottom,
+                    new int[]{
+                            Color.rgb(24, 18, 40),
+                            Color.rgb(38, 22, 60),
+                            Color.rgb(21, 17, 35)
+                    },
+                    new float[]{0f, 0.52f, 1f},
+                    Shader.TileMode.CLAMP
+            ));
+            p.setShadowLayer(dp(17), 0, dp(8), Color.argb(165, 0, 0, 0));
+            c.drawRoundRect(r, radius, radius, p);
+            p.clearShadowLayer();
             p.setShader(null);
+
+            p.setShader(new RadialGradient(
+                    r.right - dp(28),
+                    r.top + dp(20),
+                    Math.max(dp(140), r.width() * 0.72f),
+                    new int[]{
+                            Color.argb(105, Color.red(accent), Color.green(accent), Color.blue(accent)),
+                            Color.argb(22, Color.red(secondary), Color.green(secondary), Color.blue(secondary)),
+                            Color.TRANSPARENT
+                    },
+                    new float[]{0f, 0.42f, 1f},
+                    Shader.TileMode.CLAMP
+            ));
+            c.drawRoundRect(r, radius, radius, p);
+            p.setShader(null);
+
             p.setStyle(Paint.Style.STROKE);
             p.setStrokeWidth(dp(1));
-            p.setColor(Color.argb(70,255,255,255));
-            c.drawRoundRect(r, dp(26), dp(26), p);
+            p.setShader(new LinearGradient(
+                    r.left,
+                    r.top,
+                    r.right,
+                    r.bottom,
+                    Color.argb(185, Color.red(accent), Color.green(accent), Color.blue(accent)),
+                    Color.argb(45, 255, 255, 255),
+                    Shader.TileMode.CLAMP
+            ));
+            c.drawRoundRect(r, radius, radius, p);
+            p.setShader(null);
+
+            p.setStyle(Paint.Style.FILL);
+            p.setShader(new LinearGradient(r.left, r.top, r.right, r.top, secondary, accent, Shader.TileMode.CLAMP));
+            RectF accentBar = new RectF(r.left + dp(24), r.top, r.right - dp(24), r.top + dp(3));
+            c.drawRoundRect(accentBar, dp(999), dp(999), p);
+            p.setShader(null);
+
+            p.setColor(Color.argb(34, 255, 255, 255));
+            c.drawCircle(r.right - dp(30), r.top + dp(34), dp(12), p);
+            p.setColor(Color.argb(30, Color.red(accent), Color.green(accent), Color.blue(accent)));
+            c.drawCircle(r.right - dp(54), r.top + dp(23), dp(6), p);
         }
+
+        @Override public void setAlpha(int a){p.setAlpha(a);}
+        @Override public void setColorFilter(android.graphics.ColorFilter f){p.setColorFilter(f);}
+        @Override public int getOpacity(){return PixelFormat.TRANSLUCENT;}
+    }
+
+    public class TutorialIconDrawable extends Drawable {
+        private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final int step;
+
+        TutorialIconDrawable(int s) { step = s; }
+
+        @Override public void draw(Canvas c) {
+            Rect b = getBounds();
+            float cx = b.exactCenterX();
+            float cy = b.exactCenterY();
+            float radius = Math.min(b.width(), b.height()) * 0.43f;
+            int accent = tutorialAccentColor(step);
+            int secondary = tutorialAccentSecondaryColor(step);
+
+            p.setStyle(Paint.Style.FILL);
+            p.setShader(new LinearGradient(
+                    b.left,
+                    b.top,
+                    b.right,
+                    b.bottom,
+                    secondary,
+                    accent,
+                    Shader.TileMode.CLAMP
+            ));
+            p.setShadowLayer(
+                    dp(10),
+                    0,
+                    dp(4),
+                    Color.argb(110, Color.red(accent), Color.green(accent), Color.blue(accent))
+            );
+            c.drawCircle(cx, cy, radius, p);
+            p.clearShadowLayer();
+            p.setShader(null);
+
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeWidth(dp(1));
+            p.setColor(Color.argb(115, 255, 255, 255));
+            c.drawCircle(cx, cy, radius - dp(1), p);
+
+            p.setColor(Color.WHITE);
+            p.setStrokeCap(Paint.Cap.ROUND);
+            p.setStrokeJoin(Paint.Join.ROUND);
+            if (step == 0) {
+                p.setStyle(Paint.Style.STROKE);
+                p.setStrokeWidth(dp(3));
+                c.drawCircle(cx, cy, dp(7), p);
+                for (int i = 0; i < 8; i++) {
+                    double angle = (Math.PI * i) / 4.0;
+                    float x1 = cx + (float) Math.cos(angle) * dp(11);
+                    float y1 = cy + (float) Math.sin(angle) * dp(11);
+                    float x2 = cx + (float) Math.cos(angle) * dp(15);
+                    float y2 = cy + (float) Math.sin(angle) * dp(15);
+                    c.drawLine(x1, y1, x2, y2, p);
+                }
+                p.setStyle(Paint.Style.FILL);
+                c.drawCircle(cx, cy, dp(2), p);
+            } else if (step == 1) {
+                p.setStyle(Paint.Style.STROKE);
+                p.setStrokeWidth(dp(3));
+                c.drawCircle(cx - dp(3), cy - dp(3), dp(9), p);
+                c.drawLine(cx + dp(4), cy + dp(4), cx + dp(13), cy + dp(13), p);
+                p.setStyle(Paint.Style.FILL);
+                c.drawCircle(cx - dp(7), cy - dp(6), dp(2), p);
+            } else {
+                p.setStyle(Paint.Style.STROKE);
+                p.setStrokeWidth(dp(3));
+                c.drawCircle(cx, cy, dp(12), p);
+                c.drawLine(cx, cy, cx, cy - dp(7), p);
+                c.drawLine(cx, cy, cx + dp(6), cy + dp(3), p);
+                p.setStyle(Paint.Style.FILL);
+                c.drawCircle(cx, cy, dp(2), p);
+            }
+        }
+
         @Override public void setAlpha(int a){p.setAlpha(a);}
         @Override public void setColorFilter(android.graphics.ColorFilter f){p.setColorFilter(f);}
         @Override public int getOpacity(){return PixelFormat.TRANSLUCENT;}
