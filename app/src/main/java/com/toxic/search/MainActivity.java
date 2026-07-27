@@ -1727,7 +1727,7 @@ public class MainActivity extends Activity {
         splash.addView(splashCenter, centerLp);
 
         ImageView logo = new ImageView(this);
-        logo.setImageResource(R.mipmap.ic_launcher);
+        logo.setImageResource(R.mipmap.round_launcher);
         logo.setAdjustViewBounds(true);
         logo.setScaleType(ImageView.ScaleType.FIT_CENTER);
         logo.setPadding(dp(8), dp(8), dp(8), dp(8));
