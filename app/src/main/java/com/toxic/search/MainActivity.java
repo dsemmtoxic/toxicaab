@@ -5051,7 +5051,11 @@ private int loadingProgressFor(String message) {
 
 
     private String habbodexProfileByNameUrl(String name) {
-        return HABBODEX + "/habboinfo/" + enc(habbodexHotelCode(currentHotelKey)) + "/habbo?name=" + enc(name);
+        return habbodexProfileByNameUrlForHotel(name, currentHotelKey);
+    }
+
+    private String habbodexProfileByNameUrlForHotel(String name, String hotelKey) {
+        return HABBODEX + "/habboinfo/" + enc(habbodexHotelCode(hotelKey)) + "/habbo?name=" + enc(name);
     }
 
     private String habbodexProfileByUniqueUrl(String uniqueId) {
@@ -5901,6 +5905,74 @@ private int loadingProgressFor(String message) {
                 try { activeDialog.dismiss(); } catch (Exception ignored) {}
             }, 120L);
         }), new LinearLayout.LayoutParams(0, -1, 1));
+
+        bindBottomNavigationScrollBehavior(host, navWrap);
+    }
+
+    private void bindBottomNavigationScrollBehavior(final ViewGroup host, final View navWrap) {
+        if (host == null || navWrap == null) return;
+        host.post(() -> {
+            final ScrollView scrollView = findPrimaryVerticalScrollView(host);
+            if (scrollView == null) return;
+
+            final int[] lastScrollY = {scrollView.getScrollY()};
+            final int[] accumulatedDelta = {0};
+            final boolean[] hidden = {false};
+            final int triggerDistance = dp(10);
+
+            scrollView.getViewTreeObserver().addOnScrollChangedListener(() -> {
+                int currentScrollY = scrollView.getScrollY();
+                int delta = currentScrollY - lastScrollY[0];
+                lastScrollY[0] = currentScrollY;
+
+                if (currentScrollY <= dp(2)) {
+                    accumulatedDelta[0] = 0;
+                    if (hidden[0]) {
+                        hidden[0] = false;
+                        animateBottomNavigation(navWrap, false);
+                    }
+                    return;
+                }
+
+                if (delta == 0) return;
+                if ((delta > 0 && accumulatedDelta[0] < 0) || (delta < 0 && accumulatedDelta[0] > 0)) {
+                    accumulatedDelta[0] = 0;
+                }
+                accumulatedDelta[0] += delta;
+
+                if (!hidden[0] && accumulatedDelta[0] >= triggerDistance) {
+                    hidden[0] = true;
+                    accumulatedDelta[0] = 0;
+                    animateBottomNavigation(navWrap, true);
+                } else if (hidden[0] && accumulatedDelta[0] <= -triggerDistance) {
+                    hidden[0] = false;
+                    accumulatedDelta[0] = 0;
+                    animateBottomNavigation(navWrap, false);
+                }
+            });
+        });
+    }
+
+    private ScrollView findPrimaryVerticalScrollView(View view) {
+        if (view instanceof ScrollView && view.getVisibility() == View.VISIBLE) return (ScrollView) view;
+        if (!(view instanceof ViewGroup)) return null;
+        ViewGroup group = (ViewGroup) view;
+        for (int i = 0; i < group.getChildCount(); i++) {
+            ScrollView found = findPrimaryVerticalScrollView(group.getChildAt(i));
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    private void animateBottomNavigation(View navWrap, boolean hide) {
+        if (navWrap == null) return;
+        float targetY = hide ? Math.max(dp(64), navWrap.getHeight() + dp(8)) : 0f;
+        navWrap.animate().cancel();
+        navWrap.animate()
+                .translationY(targetY)
+                .alpha(hide ? 0f : 1f)
+                .setDuration(hide ? 180L : 210L)
+                .start();
     }
 
     private View bottomNavItem(String icon, boolean selected, final Runnable action) {
@@ -10066,12 +10138,32 @@ private int loadingProgressFor(String message) {
         out.uniqueId = uniqueId == null ? "" : uniqueId.trim();
         out.hotelKey = normalizeHotelKey(hotelKey);
         if (out.hotelKey.isEmpty()) out.hotelKey = currentHotelKey;
+
         try {
-            JSONObject dexById = out.uniqueId.isEmpty() ? null : unwrap(tryJson(habbodexProfileByUniqueUrlForHotel(out.uniqueId, out.hotelKey)));
-            JSONObject publicObj = tryJson("https://" + hotelDomain(out.hotelKey) + "/api/public/users?name=" + enc(out.nick));
-            publicObj = validProfileObject(publicObj);
-            JSONObject dexObj = unwrap(tryJson(habbodexProfileByNameUrl(out.nick)));
-            JSONObject base = firstObject(validProfileObject(dexById), validProfileObject(publicObj), validProfileObject(dexObj));
+            // A API oficial é sempre a fonte principal do mini perfil.
+            JSONObject official = null;
+            if (!out.nick.isEmpty()) {
+                official = validProfileObject(tryJson("https://" + hotelDomain(out.hotelKey) + "/api/public/users?name=" + enc(out.nick)));
+            } else if (!out.uniqueId.isEmpty()) {
+                official = validProfileObject(tryJson("https://" + hotelDomain(out.hotelKey) + "/api/public/users/" + enc(out.uniqueId) + "/profile"));
+            }
+
+            JSONObject base = official;
+            boolean usingHabboDexFallback = false;
+
+            // O HabboDex só é consultado quando a API oficial não retorna um perfil válido.
+            if (base == null) {
+                JSONObject dex = null;
+                if (!out.uniqueId.isEmpty()) {
+                    dex = validProfileObject(unwrap(tryJson(habbodexProfileByUniqueUrlForHotel(out.uniqueId, out.hotelKey))));
+                }
+                if (dex == null && !out.nick.isEmpty()) {
+                    dex = validProfileObject(unwrap(tryJson(habbodexProfileByNameUrlForHotel(out.nick, out.hotelKey))));
+                }
+                base = dex;
+                usingHabboDexFallback = base != null;
+            }
+
             if (base == null) return out;
 
             String realId = firstText(base, "uniqueId", "id", "habboId");
@@ -10081,25 +10173,14 @@ private int loadingProgressFor(String message) {
             if (!realNick.isEmpty()) out.nick = realNick;
 
             String fig = firstText(base, "figureString", "figure", "figure_string");
-            if (fig.isEmpty() && publicObj != null) fig = firstText(publicObj, "figureString", "figure", "figure_string");
             if (!fig.isEmpty()) out.figure = fig;
 
             out.motto = firstText(base, "motto", "mission");
-            if (out.motto.isEmpty() && publicObj != null) out.motto = firstText(publicObj, "motto", "mission");
-
             out.online = optBoolAny(base, false, "online", "isOnline");
-            if (publicObj != null && publicObj.has("online")) out.online = publicObj.optBoolean("online", out.online);
-
             out.privateProfile = !optBoolAny(base, true, "profileVisible", "isProfileVisible", "visible");
-            if (publicObj != null && publicObj.has("profileVisible")) out.privateProfile = !publicObj.optBoolean("profileVisible", true);
-
-            out.banned = publicObj != null && isSameProfileObject(base, publicObj) ? false : optBoolTrue(base, "isBanned", "banned", "ban", "is_banned");
-
+            out.banned = usingHabboDexFallback && optBoolTrue(base, "isBanned", "banned", "ban", "is_banned");
             out.memberSince = firstText(base, "memberSince", "creationTime", "createdAt", "registeredAt", "created_at", "registerDate", "registrationDate");
-            if (out.memberSince.isEmpty() && publicObj != null) out.memberSince = firstText(publicObj, "memberSince", "creationTime", "createdAt", "registeredAt", "created_at", "registerDate", "registrationDate");
-
             out.lastAccess = firstText(base, "lastAccessTime", "lastLoginTime", "lastOnline", "lastVisit");
-            if (out.lastAccess.isEmpty() && publicObj != null) out.lastAccess = firstText(publicObj, "lastAccessTime", "lastLoginTime", "lastOnline", "lastVisit");
         } catch(Exception ignored) {}
         return out;
     }
