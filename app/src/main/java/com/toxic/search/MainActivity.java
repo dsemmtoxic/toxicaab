@@ -1706,7 +1706,7 @@ public class MainActivity extends Activity {
         if (!openingSplashShownThisSession) {
             showOpeningSplashOverlay();
         } else {
-            addBottomNavigation(screen, 0, null);
+            addBottomNavigation(screen, 0, null, mainScroll);
         }
         maybeShowFirstRunTutorial();
     }
@@ -1756,7 +1756,7 @@ public class MainActivity extends Activity {
                     .setDuration(260)
                     .withEndAction(() -> {
                         try { screen.removeView(splash); } catch (Exception ignored) {}
-                        addBottomNavigation(screen, 0, null);
+                        addBottomNavigation(screen, 0, null, mainScroll);
                     })
                     .start();
         }, 2000L);
@@ -5051,11 +5051,7 @@ private int loadingProgressFor(String message) {
 
 
     private String habbodexProfileByNameUrl(String name) {
-        return habbodexProfileByNameUrlForHotel(name, currentHotelKey);
-    }
-
-    private String habbodexProfileByNameUrlForHotel(String name, String hotelKey) {
-        return HABBODEX + "/habboinfo/" + enc(habbodexHotelCode(hotelKey)) + "/habbo?name=" + enc(name);
+        return HABBODEX + "/habboinfo/" + enc(habbodexHotelCode(currentHotelKey)) + "/habbo?name=" + enc(name);
     }
 
     private String habbodexProfileByUniqueUrl(String uniqueId) {
@@ -5849,7 +5845,7 @@ private int loadingProgressFor(String message) {
         return new BottomNavBarDrawable();
     }
 
-    private void addBottomNavigation(FrameLayout host, int selectedTab, Dialog activeDialog) {
+    private void addBottomNavigation(FrameLayout host, int selectedTab, Dialog activeDialog, ScrollView controlledScroll) {
         if (host == null) return;
 
         FrameLayout navWrap = new FrameLayout(this);
@@ -5906,62 +5902,44 @@ private int loadingProgressFor(String message) {
             }, 120L);
         }), new LinearLayout.LayoutParams(0, -1, 1));
 
-        bindBottomNavigationScrollBehavior(host, navWrap);
+        bindBottomNavigationScrollBehavior(controlledScroll, navWrap);
     }
 
-    private void bindBottomNavigationScrollBehavior(final ViewGroup host, final View navWrap) {
-        if (host == null || navWrap == null) return;
-        host.post(() -> {
-            final ScrollView scrollView = findPrimaryVerticalScrollView(host);
-            if (scrollView == null) return;
+    private void bindBottomNavigationScrollBehavior(final ScrollView scrollView, final View navWrap) {
+        if (scrollView == null || navWrap == null) return;
 
-            final int[] lastScrollY = {scrollView.getScrollY()};
-            final int[] accumulatedDelta = {0};
-            final boolean[] hidden = {false};
-            final int triggerDistance = dp(10);
+        final int[] accumulatedDelta = {0};
+        final boolean[] hidden = {false};
+        final int triggerDistance = dp(12);
 
-            scrollView.getViewTreeObserver().addOnScrollChangedListener(() -> {
-                int currentScrollY = scrollView.getScrollY();
-                int delta = currentScrollY - lastScrollY[0];
-                lastScrollY[0] = currentScrollY;
+        scrollView.setOnScrollChangeListener((v, scrollX, scrollY, oldScrollX, oldScrollY) -> {
+            int delta = scrollY - oldScrollY;
 
-                if (currentScrollY <= dp(2)) {
-                    accumulatedDelta[0] = 0;
-                    if (hidden[0]) {
-                        hidden[0] = false;
-                        animateBottomNavigation(navWrap, false);
-                    }
-                    return;
-                }
-
-                if (delta == 0) return;
-                if ((delta > 0 && accumulatedDelta[0] < 0) || (delta < 0 && accumulatedDelta[0] > 0)) {
-                    accumulatedDelta[0] = 0;
-                }
-                accumulatedDelta[0] += delta;
-
-                if (!hidden[0] && accumulatedDelta[0] >= triggerDistance) {
-                    hidden[0] = true;
-                    accumulatedDelta[0] = 0;
-                    animateBottomNavigation(navWrap, true);
-                } else if (hidden[0] && accumulatedDelta[0] <= -triggerDistance) {
+            if (scrollY <= dp(2)) {
+                accumulatedDelta[0] = 0;
+                if (hidden[0]) {
                     hidden[0] = false;
-                    accumulatedDelta[0] = 0;
                     animateBottomNavigation(navWrap, false);
                 }
-            });
-        });
-    }
+                return;
+            }
 
-    private ScrollView findPrimaryVerticalScrollView(View view) {
-        if (view instanceof ScrollView && view.getVisibility() == View.VISIBLE) return (ScrollView) view;
-        if (!(view instanceof ViewGroup)) return null;
-        ViewGroup group = (ViewGroup) view;
-        for (int i = 0; i < group.getChildCount(); i++) {
-            ScrollView found = findPrimaryVerticalScrollView(group.getChildAt(i));
-            if (found != null) return found;
-        }
-        return null;
+            if (delta == 0) return;
+            if ((delta > 0 && accumulatedDelta[0] < 0) || (delta < 0 && accumulatedDelta[0] > 0)) {
+                accumulatedDelta[0] = 0;
+            }
+            accumulatedDelta[0] += delta;
+
+            if (!hidden[0] && accumulatedDelta[0] >= triggerDistance) {
+                hidden[0] = true;
+                accumulatedDelta[0] = 0;
+                animateBottomNavigation(navWrap, true);
+            } else if (hidden[0] && accumulatedDelta[0] <= -triggerDistance) {
+                hidden[0] = false;
+                accumulatedDelta[0] = 0;
+                animateBottomNavigation(navWrap, false);
+            }
+        });
     }
 
     private void animateBottomNavigation(View navWrap, boolean hide) {
@@ -6253,7 +6231,7 @@ private int loadingProgressFor(String message) {
         wrap.setBackgroundColor(Color.TRANSPARENT);
         visualScroll.addView(wrap, new ScrollView.LayoutParams(-1, -2));
 
-        addBottomNavigation(full, 1, dialog);
+        addBottomNavigation(full, 1, dialog, visualScroll);
         dialog.setContentView(full);
 
         LinearLayout nickRow = new LinearLayout(this);
@@ -8315,7 +8293,7 @@ private int loadingProgressFor(String message) {
         dialogScroll.addView(wrap, new ScrollView.LayoutParams(-1, -1));
         full.addView(dialogScroll, new FrameLayout.LayoutParams(-1, -1));
 
-        addBottomNavigation(full, 3, dialog);
+        addBottomNavigation(full, 3, dialog, dialogScroll);
         dialog.setContentView(full);
 
         TextView title = habboText(t(R.string.settings), 24, true);
@@ -9567,7 +9545,6 @@ private int loadingProgressFor(String message) {
         wrap.setBackgroundColor(Color.TRANSPARENT);
         full.addView(wrap, new FrameLayout.LayoutParams(-1, -1));
 
-        addBottomNavigation(full, 2, dialog);
         dialog.setContentView(full);
 
         TextView title = habboText(t(R.string.favorites), 24, true);
@@ -9583,6 +9560,7 @@ private int loadingProgressFor(String message) {
         sv.addView(list, new ScrollView.LayoutParams(-1, -2));
         LinearLayout.LayoutParams svLp = new LinearLayout.LayoutParams(-1, 0, 1);
         wrap.addView(sv, svLp);
+        addBottomNavigation(full, 2, dialog, sv);
 
         Runnable[] render = new Runnable[1];
         render[0] = () -> {
@@ -10140,25 +10118,36 @@ private int loadingProgressFor(String message) {
         if (out.hotelKey.isEmpty()) out.hotelKey = currentHotelKey;
 
         try {
-            // A API oficial é sempre a fonte principal do mini perfil.
+            // Esta regra é exclusiva do mini perfil: a API oficial é sempre a fonte principal.
             JSONObject official = null;
             if (!out.nick.isEmpty()) {
-                official = validProfileObject(tryJson("https://" + hotelDomain(out.hotelKey) + "/api/public/users?name=" + enc(out.nick)));
+                official = validProfileObject(tryJson(
+                        "https://" + hotelDomain(out.hotelKey) + "/api/public/users?name=" + enc(out.nick)
+                ));
             } else if (!out.uniqueId.isEmpty()) {
-                official = validProfileObject(tryJson("https://" + hotelDomain(out.hotelKey) + "/api/public/users/" + enc(out.uniqueId) + "/profile"));
+                JSONObject officialProfile = tryJson(
+                        "https://" + hotelDomain(out.hotelKey) + "/api/public/users/" + enc(out.uniqueId) + "/profile"
+                );
+                official = officialProfile == null ? null : validProfileObject(officialProfile.optJSONObject("user"));
+                if (official == null) official = validProfileObject(officialProfile);
             }
 
             JSONObject base = official;
             boolean usingHabboDexFallback = false;
 
-            // O HabboDex só é consultado quando a API oficial não retorna um perfil válido.
+            // Só o mini perfil cai para o HabboDex quando a API oficial não retorna dados válidos.
             if (base == null) {
                 JSONObject dex = null;
                 if (!out.uniqueId.isEmpty()) {
-                    dex = validProfileObject(unwrap(tryJson(habbodexProfileByUniqueUrlForHotel(out.uniqueId, out.hotelKey))));
+                    dex = validProfileObject(unwrap(tryJson(
+                            habbodexProfileByUniqueUrlForHotel(out.uniqueId, out.hotelKey)
+                    )));
                 }
                 if (dex == null && !out.nick.isEmpty()) {
-                    dex = validProfileObject(unwrap(tryJson(habbodexProfileByNameUrlForHotel(out.nick, out.hotelKey))));
+                    String dexByNameUrl = HABBODEX + "/habboinfo/"
+                            + enc(habbodexHotelCode(out.hotelKey))
+                            + "/habbo?name=" + enc(out.nick);
+                    dex = validProfileObject(unwrap(tryJson(dexByNameUrl)));
                 }
                 base = dex;
                 usingHabboDexFallback = base != null;
@@ -10178,7 +10167,8 @@ private int loadingProgressFor(String message) {
             out.motto = firstText(base, "motto", "mission");
             out.online = optBoolAny(base, false, "online", "isOnline");
             out.privateProfile = !optBoolAny(base, true, "profileVisible", "isProfileVisible", "visible");
-            out.banned = usingHabboDexFallback && optBoolTrue(base, "isBanned", "banned", "ban", "is_banned");
+            out.banned = usingHabboDexFallback
+                    && optBoolTrue(base, "isBanned", "banned", "ban", "is_banned");
             out.memberSince = firstText(base, "memberSince", "creationTime", "createdAt", "registeredAt", "created_at", "registerDate", "registrationDate");
             out.lastAccess = firstText(base, "lastAccessTime", "lastLoginTime", "lastOnline", "lastVisit");
         } catch(Exception ignored) {}
