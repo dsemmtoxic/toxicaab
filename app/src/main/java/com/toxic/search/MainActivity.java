@@ -51,7 +51,8 @@ import java.util.*;
 import java.util.concurrent.*;
 
 public class MainActivity extends Activity {
-    private static final String HABBODEX = "https://habbodex.com/api/v1";
+    private static final String PROFILE_API = "https://atoxic.com.br/api.php";
+    private static final String GENERIC_CLOTHING_ICON = "https://www.habbowidgets.com/images/kld1.gif";
     private final ExecutorService executor = Executors.newFixedThreadPool(10);
     private FrameLayout screen;
     private LinearLayout root, resultWrap;
@@ -3576,7 +3577,7 @@ public class MainActivity extends Activity {
         ImageView img = new ImageView(this); img.setScaleType(ImageView.ScaleType.FIT_CENTER); row.addView(img, new LinearLayout.LayoutParams(dp(40), dp(40)));
         String code = firstText(o, "code", "classname", "className", "id");
         String icon = firstText(o, "iconUrl", "imageUrl", "url", "thumbnail");
-        if (icon.isEmpty() && !code.isEmpty()) icon = "https://habbodex.com/images/furni/" + enc(code) + "/" + enc(code) + "_icon.png";
+        if (icon.isEmpty() && !code.isEmpty()) icon = GENERIC_CLOTHING_ICON;
         if (!icon.isEmpty()) loadImage(img, icon);
         LinearLayout txt = new LinearLayout(this); txt.setOrientation(LinearLayout.VERTICAL); LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, -2, 1); tp.leftMargin = dp(12); row.addView(txt,tp);
         String name = clothingName(o, code);
@@ -3715,11 +3716,8 @@ public class MainActivity extends Activity {
         if (roomId == null || roomId.trim().isEmpty()) return null;
         String id = roomId.trim();
         String[] urls = new String[] {
-            HABBODEX + "/roominfo/" + enc(habbodexHotelCode(currentHotelKey)) + "/room/" + enc(id),
             habboApiUrl("/api/public/rooms/" + enc(id)),
-            "https://www.habbo.com/api/public/rooms/" + enc(id),
-            HABBODEX + "/rooms/" + enc(habbodexHotelCode(currentHotelKey)) + "/" + enc(id),
-            HABBODEX + "/room/" + enc(habbodexHotelCode(currentHotelKey)) + "/" + enc(id)
+            "https://www.habbo.com/api/public/rooms/" + enc(id)
         };
         for (String url : urls) {
             try {
@@ -5051,7 +5049,7 @@ private int loadingProgressFor(String message) {
 
 
     private String habbodexProfileByNameUrl(String name) {
-        return HABBODEX + "/habboinfo/" + enc(habbodexHotelCode(currentHotelKey)) + "/habbo?name=" + enc(name);
+        return PROFILE_API + "/habboinfo/" + enc(habbodexHotelCode(currentHotelKey)) + "/habbo?name=" + enc(name);
     }
 
     private String habbodexProfileByUniqueUrl(String uniqueId) {
@@ -5059,22 +5057,22 @@ private int loadingProgressFor(String message) {
     }
 
     private String habbodexProfileByUniqueUrlForHotel(String uniqueId, String hotelKey) {
-        return HABBODEX + "/habboinfo/" + enc(uniqueId) + "?hotel=" + enc(habbodexHotelCode(hotelKey));
+        return PROFILE_API + "/habboinfo/" + enc(uniqueId) + "?hotel=" + enc(habbodexHotelCode(hotelKey));
     }
 
     private String habbodexEndpointUrl(String uniqueId, String endpoint, int page, int limit) {
-        return HABBODEX + "/habboinfo/" + enc(uniqueId) + "/" + enc(endpoint) + "?page=" + page + "&limit=" + limit + "&hotel=" + enc(habbodexHotelCode(currentHotelKey));
+        return PROFILE_API + "/habboinfo/" + enc(uniqueId) + "/" + enc(endpoint) + "?page=" + page + "&limit=" + limit + "&hotel=" + enc(habbodexHotelCode(currentHotelKey));
     }
 
     private String habbodexFigureUrl(String figure) {
-        return HABBODEX + "/furnidex/furni/from-figure-string?figureString=" + enc(figure) + "&hotel=" + enc(habbodexHotelCode(currentHotelKey));
+        return PROFILE_API + "/furnidex/furni/from-figure-string?figureString=" + enc(figure) + "&hotel=" + enc(habbodexHotelCode(currentHotelKey));
     }
 
     private String habbodexSuggestUrl(String name) {
-        return HABBODEX + "/habboinfo/habbos?name=" + enc(name) + "&includePreviousNames=true&hotel=" + enc(habbodexHotelCode(currentHotelKey));
+        return PROFILE_API + "/habboinfo/habbos?name=" + enc(name) + "&includePreviousNames=true&hotel=" + enc(habbodexHotelCode(currentHotelKey));
     }
 
-    private Object getJsonAny(String u) throws Exception { HttpURLConnection c = (HttpURLConnection)new URL(u).openConnection(); c.setConnectTimeout(12000); c.setReadTimeout(24000); c.setRequestProperty("Accept", "application/json, text/plain, */*"); c.setRequestProperty("User-Agent", "ToxicSearchTool/1.0 Android"); int code = c.getResponseCode(); InputStream is = code >= 200 && code < 300 ? c.getInputStream() : c.getErrorStream(); String body = readAll(is); if (code < 200 || code >= 300 || body == null || body.trim().isEmpty()) throw new IOException("HTTP " + code); String clean = body.trim(); return clean.startsWith("[") ? new JSONArray(clean) : new JSONObject(clean); }
+    private Object getJsonAny(String u) throws Exception { HttpURLConnection c = (HttpURLConnection)new URL(u).openConnection(); c.setConnectTimeout(12000); c.setReadTimeout(24000); c.setRequestProperty("Accept", "application/json, text/plain, */*"); c.setRequestProperty("User-Agent", "ToxicSearchTool/1.2.8 Android (+https://atoxic.com.br)"); c.setRequestProperty("X-Toxic-App", "1.2.8"); int code = c.getResponseCode(); InputStream is = code >= 200 && code < 300 ? c.getInputStream() : c.getErrorStream(); String body = readAll(is); if (code < 200 || code >= 300 || body == null || body.trim().isEmpty()) throw new IOException("HTTP " + code); String clean = body.trim(); return clean.startsWith("[") ? new JSONArray(clean) : new JSONObject(clean); }
     private JSONObject getJson(String u) throws Exception { Object any = getJsonAny(u); if (any instanceof JSONObject) return (JSONObject)any; JSONObject wrap = new JSONObject(); wrap.put("data", any); return wrap; }
     private JSONObject tryJson(String u) { try { return getJson(u); } catch (Exception e) { return null; } }
     private String readAll(InputStream is) throws IOException {
@@ -7563,7 +7561,7 @@ private int loadingProgressFor(String message) {
                 String name = clothingName(itemInfo, code.isEmpty() ? (type + "-" + itemId) : code);
                 String collection = clothingLineName(itemInfo, "");
                 String icon = firstText(itemInfo, "iconUrl", "imageUrl", "url", "thumbnail");
-                if (icon.isEmpty() && !code.isEmpty()) icon = "https://habbodex.com/images/furni/" + enc(code) + "/" + enc(code) + "_icon.png";
+                if (icon.isEmpty() && !code.isEmpty()) icon = GENERIC_CLOTHING_ICON;
 
                 info.addView(visualItemInfoRow(t(R.string.item_name), name.isEmpty() ? (type + "-" + itemId) : name));
                 info.addView(visualItemInfoRow(t(R.string.collection), collection.isEmpty() ? "-" : collection));
