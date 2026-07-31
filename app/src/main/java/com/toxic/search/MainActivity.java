@@ -52,6 +52,7 @@ import java.util.concurrent.*;
 
 public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
+    private static final String APP_VERSION = "1.3.0";
     private static final String GENERIC_CLOTHING_ICON = PROFILE_API + "/rarity-icon/generic";
     private final ExecutorService executor = Executors.newFixedThreadPool(10);
     private FrameLayout screen;
@@ -2577,11 +2578,18 @@ public class MainActivity extends Activity {
         r.uniqueId = uniqueId == null ? "" : uniqueId.trim();
         r.hotelKey = currentHotelKey;
 
-        JSONObject officialProfile = r.uniqueId.isEmpty() ? null : tryJson(habboApiUrl("/api/public/users/" + enc(r.uniqueId) + "/profile"));
-        JSONObject officialUser = officialProfile == null ? null : officialProfile.optJSONObject("user");
-        JSONObject dexProfile = r.uniqueId.isEmpty() ? null : validProfileObject(unwrap(tryJson(habbodexProfileByUniqueUrl(r.uniqueId))));
-        if (dexProfile != null && !isSameProfileId(r.uniqueId, dexProfile)) dexProfile = null;
-        JSONObject base = firstObject(validProfileObject(officialUser), validProfileObject(officialProfile), validProfileObject(dexProfile));
+        JSONObject officialUser = r.uniqueId.isEmpty() ? null : validProfileObject(
+                tryJson(habboApiUrl("/api/public/users/" + enc(r.uniqueId)))
+        );
+        JSONObject officialProfile = null;
+        r.habboPublic = officialUser;
+        JSONObject base = validProfileObject(officialUser);
+        JSONObject dexProfile = null;
+        if (base == null && !r.uniqueId.isEmpty()) {
+            dexProfile = validProfileObject(unwrap(tryJson(complementProfileByUniqueUrl(r.uniqueId))));
+            if (dexProfile != null && !isSameProfileId(r.uniqueId, dexProfile)) dexProfile = null;
+            base = validProfileObject(dexProfile);
+        }
         if (base == null) throw new ProfileNotFoundException(r.searchedNick, new ArrayList<>());
 
         if (r.uniqueId.isEmpty()) r.uniqueId = firstText(base, "uniqueId", "id", "habboId");
@@ -2597,7 +2605,7 @@ public class MainActivity extends Activity {
         if (r.motto.isEmpty()) r.motto = firstText(dexProfile, "motto", "mission");
         r.online = optBoolAny(base, false, "online", "isOnline");
         if (officialUser != null && officialUser.has("online")) r.online = officialUser.optBoolean("online", r.online);
-        r.privateProfile = resolveProfilePrivate(officialUser, officialProfile, dexProfile, null);
+        r.privateProfile = resolveProfilePrivate(officialUser, null, dexProfile, null);
         r.memberSince = firstText(base, "memberSince", "creationTime", "createdAt", "registeredAt", "created_at", "registerDate", "registrationDate");
         if (r.memberSince.isEmpty() && officialUser != null) r.memberSince = firstText(officialUser, "memberSince", "creationTime", "createdAt", "registeredAt", "created_at", "registerDate", "registrationDate");
         if (r.memberSince.isEmpty()) r.memberSince = firstText(dexProfile, "memberSince", "creationTime", "createdAt", "registeredAt", "created_at", "registerDate", "registrationDate");
@@ -2614,11 +2622,6 @@ public class MainActivity extends Activity {
         r.selectedBadges = mergeLists(extractList(officialUser, "selectedBadges"), extractList(dexProfile, "selectedBadges"));
         r.dexProfile = dexProfile;
         r.officialProfile = officialProfile;
-        if (officialProfile != null) {
-            r.friends = mergeLists(r.friends, extractList(officialProfile, "friends"));
-            r.rooms = mergeLists(r.rooms, extractList(officialProfile, "rooms"));
-            r.groups = mergeLists(r.groups, extractList(officialProfile, "groups"));
-        }
         if (includeSections) completeProfileSections(r, activeSearchToken);
         return r;
     }
@@ -2627,169 +2630,429 @@ public class MainActivity extends Activity {
         ProfileResult r = new ProfileResult();
         r.searchedNick = nick;
         r.hotelKey = currentHotelKey;
-        JSONObject habboPublic = validProfileObject(tryJson(habboApiUrl("/api/public/users?name=" + enc(nick))));
+
+        // Uma busca normal começa exclusivamente pela API oficial. O servidor
+        // complementar só participa desta fase quando o nome não é encontrado.
+        JSONObject habboPublic = validProfileObject(
+                tryJson(habboApiUrl("/api/public/users?name=" + enc(nick)))
+        );
         if (habboPublic != null) {
-            updateLoadingProfileFigureHint(firstText(habboPublic, "figureString", "figure", "figure_string"), token);
-        }
-        JSONObject dexByNameRaw = unwrap(tryJson(habbodexProfileByNameUrl(nick)));
-        JSONObject dexByName = validProfileObject(dexByNameRaw);
-        JSONObject suggest = unwrap(tryJson(habbodexSuggestUrl(nick)));
-
-        // A API oficial define a identidade da busca. A API da Toxic apenas
-        // complementa os campos e históricos quando pertence ao mesmo uniqueId.
-        if (habboPublic != null && dexByName != null && !isSameProfileObject(habboPublic, dexByName)) {
-            dexByName = null;
+            updateLoadingProfileFigureHint(
+                    firstText(habboPublic, "figureString", "figure", "figure_string"),
+                    token
+            );
         }
 
-        r.habboPublic = habboPublic; r.dex = dexByName; r.suggest = suggest;
-        JSONObject base = firstObject(validProfileObject(habboPublic), validProfileObject(dexByName));
-        if (base == null) throw new ProfileNotFoundException(nick, filterExactPreviousNickSuggestions(suggest, nick));
+        JSONObject complementByName = null;
+        JSONObject suggest = null;
+        if (habboPublic == null) {
+            Future<JSONObject> complementFuture = executor.submit(
+                    () -> validProfileObject(unwrap(tryJson(complementProfileByNameUrl(nick))))
+            );
+            Future<JSONObject> suggestFuture = executor.submit(
+                    () -> unwrap(tryJson(habbodexSuggestUrl(nick)))
+            );
+            try { complementByName = complementFuture.get(); } catch(Exception ignored) {}
+            try { suggest = suggestFuture.get(); } catch(Exception ignored) {}
+        }
 
+        JSONObject base = firstObject(habboPublic, complementByName);
+        if (base == null) {
+            throw new ProfileNotFoundException(
+                    nick,
+                    filterExactPreviousNickSuggestions(suggest, nick)
+            );
+        }
+
+        r.habboPublic = habboPublic;
+        r.dex = complementByName;
+        r.dexProfile = complementByName;
+        r.suggest = suggest;
         r.uniqueId = firstText(base, "uniqueId", "id", "habboId");
-        if (r.uniqueId.isEmpty() && habboPublic != null) r.uniqueId = habboPublic.optString("uniqueId", "");
         r.name = firstText(base, "name", "username", "habboName");
         if (r.name.isEmpty()) r.name = nick;
         r.figure = firstText(base, "figureString", "figure", "figure_string");
-        if (r.figure.isEmpty() && habboPublic != null) r.figure = habboPublic.optString("figureString", "");
         if (!r.figure.isEmpty()) updateLoadingProfileFigureHint(r.figure, token);
         if (r.figure.isEmpty()) r.figure = "hd-180-1";
         r.motto = firstText(base, "motto", "mission");
-        if (r.motto.isEmpty() && habboPublic != null) r.motto = habboPublic.optString("motto", "");
         r.online = optBoolAny(base, false, "online", "isOnline");
-        if (habboPublic != null && habboPublic.has("online")) r.online = habboPublic.optBoolean("online", r.online);
-        r.privateProfile = resolveProfilePrivate(habboPublic, null, dexByName, null);
-        r.memberSince = firstText(base, "memberSince", "creationTime", "createdAt", "registeredAt", "created_at", "registerDate", "registrationDate");
-        if (r.memberSince.isEmpty() && habboPublic != null) r.memberSince = habboPublic.optString("memberSince", "");
-        r.lastAccess = firstText(base, "lastAccessTime", "lastLoginTime", "lastOnline", "lastVisit");
+        r.privateProfile = resolveProfilePrivate(
+                habboPublic,
+                null,
+                complementByName,
+                null
+        );
+        r.memberSince = firstText(
+                base,
+                "memberSince", "creationTime", "createdAt", "registeredAt",
+                "created_at", "registerDate", "registrationDate"
+        );
+        r.lastAccess = firstText(
+                base,
+                "lastAccessTime", "lastLoginTime", "lastOnline", "lastVisit"
+        );
         r.level = firstText(base, "currentLevel", "level");
         r.starGems = firstText(base, "starGemCount", "starGems");
-        r.totalBadges = firstText(base, "totalBadges", "badgeCount", "badgesCount", "badgesTotal");
-        r.previousNames = mergeLists(extractList(dexByName, "previousNames"), extractPreviousNamesFromSuggest(suggest, r.name));
-        r.selectedBadges = extractList(dexByName, "selectedBadges");
+        r.totalBadges = firstText(
+                base,
+                "totalBadges", "badgeCount", "badgesCount", "badgesTotal"
+        );
+        r.previousNames = mergeLists(
+                extractList(complementByName, "previousNames"),
+                extractPreviousNamesFromSuggest(suggest, r.name)
+        );
+        r.selectedBadges = extractList(base, "selectedBadges");
 
-        if (!r.uniqueId.isEmpty()) {
-            JSONObject dexProfile = validProfileObject(unwrap(tryJson(habbodexProfileByUniqueUrl(r.uniqueId))));
-            if (dexProfile != null && !isSameProfileId(r.uniqueId, dexProfile)) dexProfile = null;
-            if (dexProfile != null) {
-                r.dexProfile = dexProfile;
-                if (r.motto.isEmpty()) r.motto = firstText(dexProfile, "motto", "mission");
-                if (r.memberSince.isEmpty()) r.memberSince = firstText(dexProfile, "memberSince", "creationTime", "createdAt", "registeredAt", "created_at", "registerDate", "registrationDate");
-                if (r.lastAccess.isEmpty()) r.lastAccess = firstText(dexProfile, "lastAccessTime", "lastLoginTime", "lastOnline");
-
-                if (r.level.isEmpty()) r.level = firstText(dexProfile, "currentLevel", "level");
-                if (r.starGems.isEmpty()) r.starGems = firstText(dexProfile, "starGemCount", "starGems");
-                if (r.totalBadges.isEmpty()) r.totalBadges = firstText(dexProfile, "totalBadges", "badgeCount", "badgesCount", "badgesTotal");
-                r.previousNames = mergeLists(r.previousNames, extractList(dexProfile, "previousNames"));
-                r.selectedBadges = mergeLists(r.selectedBadges, extractList(dexProfile, "selectedBadges"));
-            }
-
-            JSONObject officialProfile = tryJson(habboApiUrl("/api/public/users/" + enc(r.uniqueId) + "/profile"));
-            r.officialProfile = officialProfile;
-            if (officialProfile != null) {
-                JSONObject user = officialProfile.optJSONObject("user");
-                if (user != null) {
-                    if (r.level.isEmpty()) r.level = firstText(user, "currentLevel", "level");
-                    if (r.starGems.isEmpty()) r.starGems = firstText(user, "starGemCount", "starGems");
-                    if (r.totalBadges.isEmpty()) r.totalBadges = firstText(user, "totalBadges", "badgeCount", "badgesCount", "badgesTotal");
-                    if (r.memberSince.isEmpty()) r.memberSince = firstText(user, "memberSince", "creationTime", "createdAt", "registeredAt", "created_at", "registerDate", "registrationDate");
-                    if (r.lastAccess.isEmpty()) r.lastAccess = firstText(user, "lastAccessTime", "lastLoginTime", "lastOnline");
-                    r.online = optBoolAny(user, r.online, "online", "isOnline");
-                    r.selectedBadges = mergeLists(extractList(user, "selectedBadges"), r.selectedBadges);
-                }
-                r.friends = mergeLists(r.friends, extractList(officialProfile, "friends"));
-                r.rooms = mergeLists(r.rooms, extractList(officialProfile, "rooms"));
-                r.groups = mergeLists(r.groups, extractList(officialProfile, "groups"));
-            }
-            JSONObject officialUser = officialProfile == null ? null : officialProfile.optJSONObject("user");
-            r.privateProfile = resolveProfilePrivate(habboPublic, officialUser, r.dexProfile, dexByName);
-            if (includeSections) {
-                completeProfileSections(r, activeSearchToken);
-            }
+        if (r.uniqueId.isEmpty()) {
+            throw new ProfileNotFoundException(
+                    nick,
+                    filterExactPreviousNickSuggestions(suggest, nick)
+            );
         }
+        if (includeSections) completeProfileSections(r, activeSearchToken);
         return r;
     }
 
     private void completeProfileSections(ProfileResult r, int token) {
         if (r == null || r.uniqueId == null || r.uniqueId.isEmpty() || !isActiveToken(token)) return;
 
-        PageResult photosPage = null;
-        try { photosPage = fetchPageChunk(r.uniqueId, "photos", "photos", 1, PAGE_CHUNK, PAGE_CHUNK); } catch(Exception ignored) {}
-        if (photosPage != null) applyPhotosPage(r, photosPage, true);
-        try { enrichPhotoRoomInfo(r); } catch(Exception ignored) {}
-        if (!isActiveToken(token)) return;
-        runOnUiThread(() -> {
-            if (!isActiveToken(token)) return;
-            showInlineLoading(t(R.string.loading_history));
-            renderProfile(r);
-        });
+        // Perfil oficial, fotos oficiais e complemento histórico são independentes.
+        // Executá-los juntos elimina a antiga fila de várias rotas paginadas.
+        CompletionService<ProfileSectionPayload> completion =
+                new ExecutorCompletionService<>(executor);
+        int tasks = 0;
 
-        ArrayList<JSONObject> mottos = null;
-        try { mottos = fetchAll(r.uniqueId, "previous-mottos", null, 100, 3); } catch(Exception ignored) {}
-        if (mottos != null) r.previousMottos = mottos;
-        if (!isActiveToken(token)) return;
-        runOnUiThread(() -> {
-            if (!isActiveToken(token)) return;
-            showInlineLoading(t(R.string.loading_styles_friends));
-            renderProfile(r);
-        });
-
-        PageResult badgesPage = null;
-        try { badgesPage = fetchPage(r.uniqueId, "selected-badges", null, 1, 20); } catch(Exception ignored) {}
-        if (badgesPage != null && badgesPage.items != null && !badgesPage.items.isEmpty()) {
-            r.selectedBadges = new ArrayList<>(badgesPage.items);
+        if (r.officialProfile != null) {
+            r.officialProfileAttempted = true;
+            applyOfficialProfileData(r, r.officialProfile);
+        } else if (!r.officialProfileAttempted) {
+            completion.submit(() -> {
+                JSONObject data = tryJson(
+                        habboApiUrl("/api/public/users/" + enc(r.uniqueId) + "/profile")
+                );
+                return ProfileSectionPayload.object("official_profile", data);
+            });
+            tasks++;
         }
 
-        PageResult allBadgesPage = null;
-        try { allBadgesPage = fetchAllBadges(r.uniqueId, true, 100, 25); } catch(Exception ignored) {}
-        if (allBadgesPage != null) {
-            r.badges = allBadgesPage.items == null ? new ArrayList<>() : allBadgesPage.items;
-            if (allBadgesPage.total > 0) r.totalBadges = String.valueOf(allBadgesPage.total);
+        completion.submit(() -> {
+            try {
+                return ProfileSectionPayload.list(
+                        "official_photos",
+                        fetchOfficialPhotos(r.uniqueId),
+                        true
+                );
+            } catch(Exception ignored) {
+                return ProfileSectionPayload.list(
+                        "official_photos",
+                        new ArrayList<>(),
+                        false
+                );
+            }
+        });
+        tasks++;
+
+        if (r.dexProfile != null) {
+            applyComplementProfileData(r, r.dexProfile);
+        } else {
+            completion.submit(() -> {
+                JSONObject data = validProfileObject(
+                        unwrap(tryJson(complementProfileByUniqueUrl(r.uniqueId)))
+                );
+                if (data != null && !isSameProfileId(r.uniqueId, data)) data = null;
+                return ProfileSectionPayload.object("complement", data);
+            });
+            tasks++;
         }
-        PageResult allBadgesWithAchievementsPage = null;
-        try { allBadgesWithAchievementsPage = fetchAllBadges(r.uniqueId, false, 100, 25); } catch(Exception ignored) {}
-        if (allBadgesWithAchievementsPage != null) {
-            r.badgesWithAchievements = allBadgesWithAchievementsPage.items == null ? new ArrayList<>() : allBadgesWithAchievementsPage.items;
-            if (allBadgesWithAchievementsPage.total > 0) r.totalBadges = String.valueOf(allBadgesWithAchievementsPage.total);
+
+        int completed = 0;
+        while (completed < tasks && isActiveToken(token)) {
+            try {
+                ProfileSectionPayload payload = completion.take().get();
+                completed++;
+                if (payload == null || !isActiveToken(token)) continue;
+
+                if ("official_profile".equals(payload.kind)) {
+                    r.officialProfileAttempted = true;
+                    if (payload.object != null) applyOfficialProfileData(r, payload.object);
+                } else if ("official_photos".equals(payload.kind)) {
+                    applyOfficialPhotosData(r, payload.items, payload.success);
+                } else if ("complement".equals(payload.kind) && payload.object != null) {
+                    applyComplementProfileData(r, payload.object);
+                }
+
+                reconcileProfileSources(r);
+                enrichPhotoRoomInfo(r);
+                final int done = completed;
+                final int total = Math.max(1, tasks);
+                final ProfileResult snapshot = copyProfileResult(r);
+                runOnUiThread(() -> {
+                    if (!isActiveToken(token)) return;
+                    inlineProgressPct = Math.min(95, 30 + (done * 60 / total));
+                    showInlineLoading(done >= total
+                            ? t(R.string.loading_details)
+                            : t(R.string.loading_history));
+                    renderProfile(snapshot);
+                });
+            } catch(Exception ignored) {
+                completed++;
+            }
+        }
+
+        reconcileProfileSources(r);
+        enrichPhotoRoomInfo(r);
+    }
+
+    private void applyOfficialProfileData(ProfileResult r, JSONObject profile) {
+        if (r == null || profile == null) return;
+        r.officialProfile = profile;
+        JSONObject user = profile.optJSONObject("user");
+        JSONObject identity = user != null ? user : profile;
+
+        String value = firstText(identity, "uniqueId", "id", "habboId");
+        if (!value.isEmpty()) r.uniqueId = value;
+        value = firstText(identity, "name", "username", "habboName");
+        if (!value.isEmpty()) r.name = value;
+        value = firstText(identity, "figureString", "figure", "figure_string");
+        if (!value.isEmpty()) r.figure = value;
+        value = firstText(identity, "motto", "mission");
+        if (!value.isEmpty()) r.motto = value;
+        value = firstText(identity, "memberSince", "creationTime", "createdAt", "registeredAt");
+        if (!value.isEmpty()) r.memberSince = value;
+        value = firstText(identity, "lastAccessTime", "lastLoginTime", "lastOnline", "lastVisit");
+        if (!value.isEmpty()) r.lastAccess = value;
+        value = firstText(identity, "currentLevel", "level");
+        if (!value.isEmpty()) r.level = value;
+        value = firstText(identity, "starGemCount", "starGems");
+        if (!value.isEmpty()) r.starGems = value;
+        value = firstText(identity, "totalBadges", "badgeCount", "badgesCount", "badgesTotal");
+        if (!value.isEmpty()) r.totalBadges = value;
+        r.online = optBoolAny(identity, r.online, "online", "isOnline");
+        r.privateProfile = resolveProfilePrivate(
+                r.habboPublic,
+                profile,
+                r.dexProfile,
+                r.dex
+        );
+    }
+
+    private void applyComplementProfileData(ProfileResult r, JSONObject complement) {
+        if (r == null || complement == null) return;
+        r.dexProfile = complement;
+        if (r.dex == null) r.dex = complement;
+
+        r.previousNames = mergeLists(
+                r.previousNames,
+                extractList(complement, "previousNames")
+        );
+        r.previousMottos = extractList(complement, "previousMottos");
+        r.oldFriends = extractList(complement, "previousFriends");
+        r.oldRooms = extractList(complement, "previousRooms");
+        applyLocalStylesSource(r, extractList(complement, "previousStyles"));
+
+        if (r.motto.isEmpty()) r.motto = firstText(complement, "motto", "mission");
+        if (r.memberSince.isEmpty()) r.memberSince = firstText(
+                complement,
+                "memberSince", "creationTime", "createdAt", "registeredAt"
+        );
+        if (r.lastAccess.isEmpty()) r.lastAccess = firstText(
+                complement,
+                "lastAccessTime", "lastLoginTime", "lastOnline", "lastVisit"
+        );
+        if (r.level.isEmpty()) r.level = firstText(complement, "currentLevel", "level");
+        if (r.starGems.isEmpty()) r.starGems = firstText(complement, "starGemCount", "starGems");
+        if (r.totalBadges.isEmpty()) r.totalBadges = firstText(
+                complement,
+                "totalBadges", "badgeCount", "badgesCount", "badgesTotal"
+        );
+    }
+
+    private void reconcileProfileSources(ProfileResult r) {
+        if (r == null) return;
+        JSONObject complement = r.dexProfile;
+        JSONObject official = r.officialProfile;
+        JSONObject officialUser = official == null ? null : official.optJSONObject("user");
+        if (official != null) {
+            r.privateProfile = resolveProfilePrivate(
+                    r.habboPublic,
+                    official,
+                    complement,
+                    r.dex
+            );
+        }
+
+        ArrayList<JSONObject> complementFriends = extractList(complement, "friends");
+        ArrayList<JSONObject> complementRooms = extractList(complement, "rooms");
+        ArrayList<JSONObject> complementGroups = extractList(complement, "groups");
+        ArrayList<JSONObject> complementBadges = extractList(complement, "badges");
+        ArrayList<JSONObject> complementSelected = extractList(complement, "selectedBadges");
+
+        if (official != null) {
+            ArrayList<JSONObject> officialFriends = extractList(official, "friends");
+            ArrayList<JSONObject> officialRooms = extractList(official, "rooms");
+            ArrayList<JSONObject> officialGroups = extractList(official, "groups");
+            ArrayList<JSONObject> officialBadges = extractList(official, "badges");
+            ArrayList<JSONObject> officialSelected = extractList(officialUser, "selectedBadges");
+            boolean hasOfficialSelected = officialUser != null && officialUser.has("selectedBadges");
+            if (!hasOfficialSelected && r.habboPublic != null && r.habboPublic.has("selectedBadges")) {
+                officialSelected = extractList(r.habboPublic, "selectedBadges");
+                hasOfficialSelected = true;
+            }
+
+            if (r.privateProfile) {
+                r.friends = mergeListsEnrichingPrimary(officialFriends, complementFriends, true);
+                r.rooms = mergeListsEnrichingPrimary(officialRooms, complementRooms, true);
+                r.groups = mergeListsEnrichingPrimary(officialGroups, complementGroups, true);
+                r.selectedBadges = mergeListsEnrichingPrimary(officialSelected, complementSelected, true);
+                r.badgesWithAchievements = mergeListsEnrichingPrimary(officialBadges, complementBadges, true);
+            } else {
+                r.friends = official.has("friends")
+                        ? mergeListsEnrichingPrimary(officialFriends, complementFriends, false)
+                        : new ArrayList<>(complementFriends);
+                r.rooms = official.has("rooms")
+                        ? mergeListsEnrichingPrimary(officialRooms, complementRooms, false)
+                        : new ArrayList<>(complementRooms);
+                r.groups = official.has("groups")
+                        ? mergeListsEnrichingPrimary(officialGroups, complementGroups, false)
+                        : new ArrayList<>(complementGroups);
+                r.selectedBadges = hasOfficialSelected
+                        ? mergeListsEnrichingPrimary(officialSelected, complementSelected, false)
+                        : new ArrayList<>(complementSelected);
+                r.badgesWithAchievements = official.has("badges")
+                        ? mergeListsEnrichingPrimary(officialBadges, complementBadges, false)
+                        : new ArrayList<>(complementBadges);
+            }
+        } else if (r.privateProfile || r.officialProfileAttempted) {
+            // A fonte complementar assume dados atuais somente em perfil privado
+            // ou quando a rota oficial completa realmente não respondeu.
+            r.friends = mergeListsEnrichingPrimary(r.friends, complementFriends, true);
+            r.rooms = mergeListsEnrichingPrimary(r.rooms, complementRooms, true);
+            r.groups = mergeListsEnrichingPrimary(r.groups, complementGroups, true);
+            r.selectedBadges = mergeListsEnrichingPrimary(r.selectedBadges, complementSelected, true);
+            r.badgesWithAchievements = mergeListsEnrichingPrimary(
+                    r.badgesWithAchievements,
+                    complementBadges,
+                    true
+            );
+        }
+
+        r.badges = withoutAchievementBadges(r.badgesWithAchievements);
+        if (r.badgesWithAchievements != null && !r.badgesWithAchievements.isEmpty()) {
+            int declared = 0;
+            try { declared = Integer.parseInt(r.totalBadges); } catch(Exception ignored) {}
+            r.totalBadges = String.valueOf(Math.max(declared, r.badgesWithAchievements.size()));
         }
         enrichSelectedBadgesWithOwnership(r);
-        if (!isActiveToken(token)) return;
 
-        PageResult stylesPage = null;
-        try { stylesPage = fetchPageChunk(r.uniqueId, "previous-styles", null, 1, PAGE_CHUNK, PAGE_CHUNK); } catch(Exception ignored) {}
-        if (stylesPage != null) applyStylesPage(r, stylesPage, true);
-        if (!isActiveToken(token)) return;
+        if (r.officialPhotosAttempted) {
+            ArrayList<JSONObject> complementPhotos = extractList(complement, "photos");
+            if (!r.officialPhotosSucceeded || (r.privateProfile && r.allPhotosSource.isEmpty())) {
+                if (!complementPhotos.isEmpty()) applyLocalPhotosSource(r, complementPhotos, false);
+            }
+        }
+    }
 
-        ArrayList<JSONObject> friendsNow = null;
-        try { friendsNow = fetchAll(r.uniqueId, "friends", "friends", 100, 50); } catch(Exception ignored) {}
-        if (friendsNow != null) r.friends = mergeLists(friendsNow, r.friends);
-        if (!isActiveToken(token)) return;
+    private void applyOfficialPhotosData(
+            ProfileResult r,
+            ArrayList<JSONObject> photos,
+            boolean success
+    ) {
+        if (r == null) return;
+        r.officialPhotosAttempted = true;
+        r.officialPhotosSucceeded = success;
+        if (success) applyLocalPhotosSource(r, photos, true);
+    }
 
-        ArrayList<JSONObject> removedFriends = null;
-        try { removedFriends = fetchAll(r.uniqueId, "previous-friends", null, 100, 50); } catch(Exception ignored) {}
-        if (removedFriends != null) r.oldFriends = removedFriends;
-        if (!isActiveToken(token)) return;
-        runOnUiThread(() -> {
-            if (!isActiveToken(token)) return;
-            showInlineLoading(t(R.string.loading_rooms_groups));
-            renderProfile(r);
-        });
+    private void applyLocalPhotosSource(
+            ProfileResult r,
+            ArrayList<JSONObject> source,
+            boolean official
+    ) {
+        if (r == null) return;
+        r.allPhotosSource = source == null ? new ArrayList<>() : new ArrayList<>(source);
+        r.photosFromOfficial = official;
+        int end = Math.min(PAGE_CHUNK, r.allPhotosSource.size());
+        r.photos = new ArrayList<>(r.allPhotosSource.subList(0, end));
+        r.photosTotal = r.allPhotosSource.size();
+        r.photosHasMore = end < r.photosTotal;
+        r.photosNextPage = r.photosHasMore ? 2 : 0;
+    }
 
-        ArrayList<JSONObject> roomsNow = null;
-        try { roomsNow = fetchAll(r.uniqueId, "rooms", "rooms", 100, 3); } catch(Exception ignored) {}
-        if (roomsNow != null) r.rooms = mergeLists(roomsNow, r.rooms);
-        if (!isActiveToken(token)) return;
+    private void applyLocalStylesSource(ProfileResult r, ArrayList<JSONObject> source) {
+        if (r == null) return;
+        r.allStylesSource = source == null ? new ArrayList<>() : new ArrayList<>(source);
+        r.stylesFromComplement = true;
+        int end = Math.min(PAGE_CHUNK, r.allStylesSource.size());
+        r.previousStyles = new ArrayList<>(r.allStylesSource.subList(0, end));
+        r.stylesTotal = r.allStylesSource.size();
+        r.stylesHasMore = end < r.stylesTotal;
+        r.stylesNextPage = r.stylesHasMore ? 2 : 0;
+    }
 
-        ArrayList<JSONObject> oldRoomsNow = null;
-        try { oldRoomsNow = fetchAll(r.uniqueId, "previous-rooms", "rooms", 100, 3); } catch(Exception ignored) {}
-        if (oldRoomsNow != null) r.oldRooms = oldRoomsNow;
-        if (!isActiveToken(token)) return;
+    private ArrayList<JSONObject> withoutAchievementBadges(ArrayList<JSONObject> source) {
+        ArrayList<JSONObject> out = new ArrayList<>();
+        if (source == null) return out;
+        for (JSONObject item : source) {
+            if (!optBoolAny(item, false, "isAchievement", "achievement")) out.add(item);
+        }
+        return out;
+    }
 
-        ArrayList<JSONObject> groupsNow = null;
-        try { groupsNow = fetchAll(r.uniqueId, "groups", "groups", 100, 3); } catch(Exception ignored) {}
-        if (groupsNow != null) r.groups = groupsNow;
-        if (!isActiveToken(token)) return;
+    private ArrayList<JSONObject> mergeListsEnrichingPrimary(
+            ArrayList<JSONObject> primary,
+            ArrayList<JSONObject> supplement,
+            boolean appendMissing
+    ) {
+        ArrayList<JSONObject> out = new ArrayList<>();
+        HashMap<String, JSONObject> byKey = new HashMap<>();
+        if (primary != null) {
+            for (JSONObject item : primary) {
+                if (item == null) continue;
+                out.add(item);
+                byKey.put(stableItemKey(item), item);
+            }
+        }
+        if (supplement != null) {
+            for (JSONObject item : supplement) {
+                if (item == null) continue;
+                String key = stableItemKey(item);
+                JSONObject target = byKey.get(key);
+                if (target != null) {
+                    fillMissingJsonFields(target, item);
+                } else if (appendMissing) {
+                    out.add(item);
+                    byKey.put(key, item);
+                }
+            }
+        }
+        return out;
+    }
 
-        try { enrichPhotoRoomInfo(r); } catch(Exception ignored) {}
+    private void fillMissingJsonFields(JSONObject target, JSONObject supplement) {
+        if (target == null || supplement == null) return;
+        Iterator<String> keys = supplement.keys();
+        while (keys.hasNext()) {
+            String key = keys.next();
+            Object extra = supplement.opt(key);
+            Object current = target.opt(key);
+            try {
+                if (isMissingJsonValue(current)) {
+                    target.put(key, extra);
+                } else if (current instanceof JSONObject && extra instanceof JSONObject) {
+                    fillMissingJsonFields((JSONObject) current, (JSONObject) extra);
+                }
+            } catch(Exception ignored) {}
+        }
+    }
+
+    private boolean isMissingJsonValue(Object value) {
+        if (value == null || value == JSONObject.NULL) return true;
+        if (value instanceof String) {
+            String text = ((String) value).trim();
+            return text.isEmpty() || "null".equalsIgnoreCase(text);
+        }
+        if (value instanceof JSONArray) return ((JSONArray) value).length() == 0;
+        return false;
     }
 
     private PageResult fetchBadgesPage(String uniqueId, int page, int limit, boolean hideAchievements) {
@@ -3019,6 +3282,17 @@ public class MainActivity extends Activity {
 
     private void loadMorePhotos(ProfileResult r, HorizontalScrollView photosHsv) {
         if (r == null || r.photosLoading || !r.photosHasMore || r.uniqueId == null || r.uniqueId.isEmpty()) return;
+        if (r.allPhotosSource != null && !r.allPhotosSource.isEmpty()) {
+            photosScrollX = photosHsv == null ? 0 : photosHsv.getScrollX();
+            int end = Math.min(r.photos.size() + PAGE_CHUNK, r.allPhotosSource.size());
+            r.photos = new ArrayList<>(r.allPhotosSource.subList(0, end));
+            r.photosTotal = r.allPhotosSource.size();
+            r.photosHasMore = end < r.photosTotal;
+            r.photosNextPage = r.photosHasMore ? (end / PAGE_CHUNK) + 1 : 0;
+            enrichPhotoRoomInfo(r);
+            renderProfile(r);
+            return;
+        }
         final int token = activeSearchToken;
         final int page = r.photosNextPage <= 0 ? 2 : r.photosNextPage;
         r.photosLoading = true;
@@ -3043,6 +3317,16 @@ public class MainActivity extends Activity {
 
     private void loadMoreStyles(ProfileResult r, HorizontalScrollView stylesHsv) {
         if (r == null || r.stylesLoading || !r.stylesHasMore || r.uniqueId == null || r.uniqueId.isEmpty()) return;
+        if (r.stylesFromComplement && r.allStylesSource != null && !r.allStylesSource.isEmpty()) {
+            stylesScrollX = stylesHsv == null ? 0 : stylesHsv.getScrollX();
+            int end = Math.min(r.previousStyles.size() + PAGE_CHUNK, r.allStylesSource.size());
+            r.previousStyles = new ArrayList<>(r.allStylesSource.subList(0, end));
+            r.stylesTotal = r.allStylesSource.size();
+            r.stylesHasMore = end < r.stylesTotal;
+            r.stylesNextPage = r.stylesHasMore ? (end / PAGE_CHUNK) + 1 : 0;
+            renderProfile(r);
+            return;
+        }
         final int token = activeSearchToken;
         final int page = r.stylesNextPage <= 0 ? 2 : r.stylesNextPage;
         r.stylesLoading = true;
@@ -3064,21 +3348,21 @@ public class MainActivity extends Activity {
         });
     }
 
-    private ArrayList<JSONObject> fetchOfficialPhotos(String uniqueId) {
+    private ArrayList<JSONObject> fetchOfficialPhotos(String uniqueId) throws Exception {
         ArrayList<JSONObject> out = new ArrayList<>();
         if (uniqueId == null || uniqueId.trim().isEmpty()) return out;
-        try {
-            Object data = getJsonAny(habboApiUrl("/extradata/public/users/" + enc(uniqueId) + "/photos"));
-            if (data instanceof JSONArray) {
-                JSONArray a = (JSONArray)data;
-                for (int i=0; i<a.length(); i++) {
-                    JSONObject o = a.optJSONObject(i);
-                    if (o != null) out.add(o);
-                }
-            } else if (data instanceof JSONObject) {
-                out.addAll(extractList((JSONObject)data, null));
+        Object data = getJsonAny(
+                habboApiUrl("/extradata/public/users/" + enc(uniqueId) + "/photos")
+        );
+        if (data instanceof JSONArray) {
+            JSONArray a = (JSONArray)data;
+            for (int i=0; i<a.length(); i++) {
+                JSONObject o = a.optJSONObject(i);
+                if (o != null) out.add(o);
             }
-        } catch(Exception ignored) {}
+        } else if (data instanceof JSONObject) {
+            out.addAll(extractList((JSONObject)data, null));
+        }
         return out;
     }
 
@@ -3271,7 +3555,11 @@ public class MainActivity extends Activity {
         wrap.addView(statRow("friends", t(R.string.friends), String.valueOf(r.friends.size())));
         wrap.addView(statRow("rooms", t(R.string.rooms), String.valueOf(r.rooms.size())));
         wrap.addView(statRow("groups", t(R.string.groups), String.valueOf(r.groups.size())));
-        wrap.addView(statRow("photos", t(R.string.photos), String.valueOf(r.photos.size())));
+        wrap.addView(statRow(
+                "photos",
+                t(R.string.photos),
+                String.valueOf(Math.max(r.photosTotal, r.photos.size()))
+        ));
         wrap.addView(statRow("star", t(R.string.stars), emptyDash(r.starGems)));
         wrap.addView(statRow("level", t(R.string.level), emptyDash(r.level)));
         wrap.addView(statRow("badge", t(R.string.badges), emptyDash(r.totalBadges)));
@@ -3637,60 +3925,73 @@ public class MainActivity extends Activity {
     private void enrichPhotoRoomInfo(ProfileResult r) {
         if (r == null || r.photos == null || r.photos.isEmpty()) return;
         HashMap<String, JSONObject> byRoom = new HashMap<>();
-        if (r.rooms != null) for (JSONObject room : r.rooms) {
-            String id = firstText(room, "id", "roomId", "room_id");
-            if (!id.isEmpty()) byRoom.put(id, room);
+        if (r.rooms != null) {
+            for (JSONObject room : r.rooms) {
+                String id = firstText(room, "id", "roomId", "room_id");
+                if (!id.isEmpty()) byRoom.put(id, room);
+            }
         }
+        // Durante o perfil, só cruza dados que já chegaram. Consultas individuais
+        // ao endpoint de quartos são feitas apenas quando a foto é aberta.
         for (JSONObject photo : r.photos) {
-            String rid = getPhotoRoomId(photo);
-            if (rid.isEmpty()) continue;
-            JSONObject room = byRoom.get(rid);
-            if (room != null) {
-                try {
-                    String rn = firstText(room, "name", "roomName", "caption", "title");
-                    String ro = firstNestedText(room, "owner", "name");
-                    String roFig = firstNestedText(room, "owner", "figureString");
-                    if (roFig.isEmpty()) roFig = firstNestedText(room, "owner", "figure");
-                    if (ro.isEmpty()) ro = firstText(room, "ownerName", "owner_name", "roomOwner");
-                    if (roFig.isEmpty()) roFig = firstText(room, "ownerFigureString", "ownerFigure", "owner_figure_string");
-                    if (!rn.isEmpty() && firstText(photo, "room_name", "roomName", "roomname").isEmpty()) photo.put("room_name", rn);
-                    if (!ro.isEmpty() && getPhotoRoomOwnerName(photo).isEmpty()) photo.put("roomOwner", ro);
-                    if (!roFig.isEmpty() && getPhotoRoomOwnerFigure(photo).isEmpty()) photo.put("roomOwnerFigureString", roFig);
-                } catch(Exception ignored) {}
-            }
-            if (getPhotoRoomName(photo).isEmpty() || getPhotoRoomOwner(photo).isEmpty()) {
-                JSONObject info = fetchRoomInfoById(rid);
-                if (info != null) {
-                    try {
-                        String rn = firstText(info, "name", "roomName", "room_name", "caption", "title");
-                        String ro = extractNameFromUnknown(info.opt("owner"));
-                        if (ro.isEmpty()) ro = firstText(info, "ownerName", "owner_name", "roomOwner");
-                        String roFig = extractFigureFromUnknown(info.opt("owner"));
-                        if (roFig.isEmpty()) roFig = firstText(info, "ownerFigureString", "ownerFigure", "owner_figure_string");
-                        if (!rn.isEmpty()) photo.put("room_name", rn);
-                        if (!ro.isEmpty()) photo.put("roomOwner", ro);
-                        if (!roFig.isEmpty()) photo.put("roomOwnerFigureString", roFig);
-                    } catch(Exception ignored) {}
-                }
-
-            }
+            JSONObject room = byRoom.get(getPhotoRoomId(photo));
+            if (room != null) enrichPhotoWithRoomInfo(photo, room);
         }
+    }
+
+    private void enrichPhotoWithRoomInfo(JSONObject photo, JSONObject roomInfo) {
+        if (photo == null || roomInfo == null) return;
+        try {
+            String roomName = firstText(
+                    roomInfo,
+                    "name", "roomName", "room_name", "caption", "title"
+            );
+            String ownerName = extractNameFromUnknown(roomInfo.opt("owner"));
+            if (ownerName.isEmpty()) {
+                ownerName = firstText(
+                        roomInfo,
+                        "ownerName", "owner_name", "roomOwner"
+                );
+            }
+            String ownerFigure = extractFigureFromUnknown(roomInfo.opt("owner"));
+            if (ownerFigure.isEmpty()) {
+                ownerFigure = firstText(
+                        roomInfo,
+                        "ownerFigureString", "ownerFigure", "owner_figure_string"
+                );
+            }
+            String ownerId = extractUniqueIdFromUnknown(roomInfo.opt("owner"));
+            if (ownerId.isEmpty()) {
+                ownerId = firstText(
+                        roomInfo,
+                        "ownerUniqueId", "ownerId", "owner_id"
+                );
+            }
+
+            if (!roomName.isEmpty() && getPhotoRoomName(photo).isEmpty()) {
+                photo.put("room_name", roomName);
+            }
+            if (!ownerName.isEmpty() && getPhotoRoomOwnerName(photo).isEmpty()) {
+                photo.put("roomOwner", ownerName);
+            }
+            if (!ownerFigure.isEmpty() && getPhotoRoomOwnerFigure(photo).isEmpty()) {
+                photo.put("roomOwnerFigureString", ownerFigure);
+            }
+            if (!ownerId.isEmpty() && getPhotoRoomOwnerId(photo).isEmpty()) {
+                photo.put("roomOwnerId", ownerId);
+            }
+        } catch(Exception ignored) {}
     }
 
     private JSONObject fetchRoomInfoById(String roomId) {
         if (roomId == null || roomId.trim().isEmpty()) return null;
-        String id = roomId.trim();
-        String[] urls = new String[] {
-            habboApiUrl("/api/public/rooms/" + enc(id)),
-            "https://www.habbo.com/api/public/rooms/" + enc(id)
-        };
-        for (String url : urls) {
-            try {
-                JSONObject o = unwrap(getJson(url));
-                if (o != null) return o;
-            } catch(Exception ignored) {}
+        try {
+            return unwrap(getJson(
+                    habboApiUrl("/api/public/rooms/" + enc(roomId.trim()))
+            ));
+        } catch(Exception ignored) {
+            return null;
         }
-        return null;
     }
 
     private String getPhotoRoomId(JSONObject photo) {
@@ -3943,27 +4244,13 @@ public class MainActivity extends Activity {
         wrap.addView(img, lp(-1, dp(260), 0,0,0,12));
         loadImage(img, url);
 
-        String room = getPhotoRoomName(photo);
-        String ownerName = getPhotoRoomOwnerName(photo);
-        String ownerFigure = getPhotoRoomOwnerFigure(photo);
-        String ownerId = getPhotoRoomOwnerId(photo);
         ArrayList<String> likers = getPhotoLikerNames(photo);
 
         LinearLayout infoGrid = new LinearLayout(this);
         infoGrid.setOrientation(LinearLayout.VERTICAL);
         wrap.addView(infoGrid, lp(-1, -2, 0, 0, 0, 12));
 
-        infoGrid.addView(photoInfoCard(t(R.string.date), getPhotoTimestamp(photo), "", ""));
-        if (!room.isEmpty()) infoGrid.addView(photoInfoCard(t(R.string.room), room, "", ""));
-        if (!ownerName.isEmpty()) {
-            LinearLayout ownerCard = photoInfoCard(t(R.string.owner), ownerName, ownerFigure, ownerName, ownerId);
-            ownerCard.setOnClickListener(v -> {
-                dialog.dismiss();
-                openProfileReference(ownerName, ownerId, ownerFigure, currentHotelKey);
-            });
-            infoGrid.addView(ownerCard);
-        }
-        infoGrid.addView(photoInfoCard(t(R.string.likes), String.valueOf(likers.size()), "", ""));
+        populatePhotoInfoGrid(infoGrid, photo, dialog);
 
         if (!likers.isEmpty()) {
             TextView likesTitle = habboText(t(R.string.liked_by), 17, true);
@@ -4007,6 +4294,66 @@ public class MainActivity extends Activity {
             params.height = WindowManager.LayoutParams.WRAP_CONTENT;
             shownWindow.setAttributes(params);
         }
+
+        String roomId = getPhotoRoomId(photo);
+        boolean needsRoomDetails = !roomId.isEmpty()
+                && (getPhotoRoomName(photo).isEmpty() || getPhotoRoomOwnerName(photo).isEmpty())
+                && !photo.optBoolean("_officialRoomLookupDone", false);
+        if (needsRoomDetails) {
+            try { photo.put("_officialRoomLookupDone", true); } catch(Exception ignored) {}
+            executor.execute(() -> {
+                JSONObject roomInfo = fetchRoomInfoById(roomId);
+                if (roomInfo == null) return;
+                enrichPhotoWithRoomInfo(photo, roomInfo);
+                runOnUiThread(() -> {
+                    if (!dialog.isShowing()) return;
+                    populatePhotoInfoGrid(infoGrid, photo, dialog);
+                });
+            });
+        }
+    }
+
+    private void populatePhotoInfoGrid(
+            LinearLayout infoGrid,
+            JSONObject photo,
+            Dialog dialog
+    ) {
+        if (infoGrid == null || photo == null) return;
+        infoGrid.removeAllViews();
+        String room = getPhotoRoomName(photo);
+        String ownerName = getPhotoRoomOwnerName(photo);
+        String ownerFigure = getPhotoRoomOwnerFigure(photo);
+        String ownerId = getPhotoRoomOwnerId(photo);
+
+        infoGrid.addView(photoInfoCard(t(R.string.date), getPhotoTimestamp(photo), "", ""));
+        if (!room.isEmpty()) {
+            infoGrid.addView(photoInfoCard(t(R.string.room), room, "", ""));
+        }
+        if (!ownerName.isEmpty()) {
+            LinearLayout ownerCard = photoInfoCard(
+                    t(R.string.owner),
+                    ownerName,
+                    ownerFigure,
+                    ownerName,
+                    ownerId
+            );
+            ownerCard.setOnClickListener(v -> {
+                if (dialog != null) dialog.dismiss();
+                openProfileReference(
+                        ownerName,
+                        ownerId,
+                        ownerFigure,
+                        currentHotelKey
+                );
+            });
+            infoGrid.addView(ownerCard);
+        }
+        infoGrid.addView(photoInfoCard(
+                t(R.string.likes),
+                String.valueOf(getPhotoLikerNames(photo).size()),
+                "",
+                ""
+        ));
     }
 
     private LinearLayout photoInfoCard(String label, String value, String figure, String nickToOpen) {
@@ -5011,12 +5358,20 @@ private int loadingProgressFor(String message) {
         return PROFILE_API + "/habboinfo/" + enc(habbodexHotelCode(currentHotelKey)) + "/habbo?name=" + enc(name);
     }
 
+    private String complementProfileByNameUrl(String name) {
+        return habbodexProfileByNameUrl(name) + "&complementOnly=true";
+    }
+
     private String habbodexProfileByUniqueUrl(String uniqueId) {
         return habbodexProfileByUniqueUrlForHotel(uniqueId, currentHotelKey);
     }
 
     private String habbodexProfileByUniqueUrlForHotel(String uniqueId, String hotelKey) {
         return PROFILE_API + "/habboinfo/" + enc(uniqueId) + "?hotel=" + enc(habbodexHotelCode(hotelKey));
+    }
+
+    private String complementProfileByUniqueUrl(String uniqueId) {
+        return habbodexProfileByUniqueUrl(uniqueId) + "&complementOnly=true";
     }
 
     private String habbodexEndpointUrl(String uniqueId, String endpoint, int page, int limit) {
@@ -5031,7 +5386,7 @@ private int loadingProgressFor(String message) {
         return PROFILE_API + "/habboinfo/habbos?name=" + enc(name) + "&includePreviousNames=true&hotel=" + enc(habbodexHotelCode(currentHotelKey));
     }
 
-    private Object getJsonAny(String u) throws Exception { HttpURLConnection c = (HttpURLConnection)new URL(u).openConnection(); c.setUseCaches(false); c.setDefaultUseCaches(false); c.setConnectTimeout(12000); c.setReadTimeout(24000); c.setRequestProperty("Accept", "application/json, text/plain, */*"); c.setRequestProperty("Cache-Control", "no-cache, no-store"); c.setRequestProperty("Pragma", "no-cache"); c.setRequestProperty("User-Agent", "ToxicSearchTool/1.2.9 Android (+https://atoxic.com.br)"); c.setRequestProperty("X-Toxic-App", "1.2.9"); int code = c.getResponseCode(); InputStream is = code >= 200 && code < 300 ? c.getInputStream() : c.getErrorStream(); String body = readAll(is); if (code < 200 || code >= 300 || body == null || body.trim().isEmpty()) throw new IOException("HTTP " + code); String clean = body.trim(); return clean.startsWith("[") ? new JSONArray(clean) : new JSONObject(clean); }
+    private Object getJsonAny(String u) throws Exception { HttpURLConnection c = (HttpURLConnection)new URL(u).openConnection(); boolean complement = u != null && u.startsWith(PROFILE_API); c.setUseCaches(false); c.setDefaultUseCaches(false); c.setConnectTimeout(complement ? 10000 : 8000); c.setReadTimeout(complement ? 30000 : 15000); c.setRequestProperty("Accept", "application/json, text/plain, */*"); c.setRequestProperty("Cache-Control", "no-cache, no-store"); c.setRequestProperty("Pragma", "no-cache"); c.setRequestProperty("User-Agent", "ToxicSearchTool/" + APP_VERSION + " Android (+https://atoxic.com.br)"); c.setRequestProperty("X-Toxic-App", APP_VERSION); int code = c.getResponseCode(); InputStream is = code >= 200 && code < 300 ? c.getInputStream() : c.getErrorStream(); String body = readAll(is); if (code < 200 || code >= 300 || body == null || body.trim().isEmpty()) throw new IOException("HTTP " + code); String clean = body.trim(); return clean.startsWith("[") ? new JSONArray(clean) : new JSONObject(clean); }
     private JSONObject getJson(String u) throws Exception { Object any = getJsonAny(u); if (any instanceof JSONObject) return (JSONObject)any; JSONObject wrap = new JSONObject(); wrap.put("data", any); return wrap; }
     private JSONObject tryJson(String u) { try { return getJson(u); } catch (Exception e) { return null; } }
     private String readAll(InputStream is) throws IOException {
@@ -5079,10 +5434,10 @@ private int loadingProgressFor(String message) {
             final String finalHotel = hotel;
             executor.execute(() -> {
                 try {
-                    JSONObject officialProfile = tryJson("https://" + hotelDomain(finalHotel) + "/api/public/users/" + enc(id) + "/profile");
-                    JSONObject officialUser = officialProfile == null ? null : officialProfile.optJSONObject("user");
+                    JSONObject officialUser = validProfileObject(tryJson(
+                            "https://" + hotelDomain(finalHotel) + "/api/public/users/" + enc(id)
+                    ));
                     String fetchedFigure = firstText(officialUser, "figureString", "figure", "figure_string");
-                    if (fetchedFigure.isEmpty()) fetchedFigure = firstText(officialProfile, "figureString", "figure", "figure_string");
                     if (!fetchedFigure.isEmpty()) {
                         final String resolvedFigure = fetchedFigure;
                         runOnUiThread(() -> loadHeadImage(view, avatarHead(resolvedFigure)));
@@ -5226,8 +5581,12 @@ private int loadingProgressFor(String message) {
 
     private void normalizeProfileState(ProfileResult r) {
         if (r == null) return;
-        JSONObject officialUser = r.officialProfile == null ? null : r.officialProfile.optJSONObject("user");
-        r.privateProfile = resolveProfilePrivate(r.habboPublic, officialUser != null ? officialUser : r.officialProfile, r.dexProfile, r.dex);
+        r.privateProfile = resolveProfilePrivate(
+                r.habboPublic,
+                r.officialProfile,
+                r.dexProfile,
+                r.dex
+        );
     }
 
     private String avatarFull(String figure) { return avatarFull(figure, 2); }
@@ -6238,7 +6597,7 @@ private int loadingProgressFor(String message) {
                     String fig = firstText(p, "figureString", "figure");
                     String g = firstText(p, "gender", "sex");
                     if (fig.isEmpty()) {
-                        JSONObject d = unwrap(tryJson(habbodexProfileByNameUrl(nick)));
+                        JSONObject d = unwrap(tryJson(complementProfileByNameUrl(nick)));
                         fig = firstText(d, "figureString", "figure");
                         if (g.isEmpty()) g = firstText(d, "gender", "sex");
                     }
@@ -8660,8 +9019,10 @@ private int loadingProgressFor(String message) {
         c.online = src.online; c.privateProfile = src.privateProfile;
         c.habboPublic = src.habboPublic; c.dex = src.dex; c.suggest = src.suggest; c.dexProfile = src.dexProfile; c.officialProfile = src.officialProfile;
         c.previousNames = new ArrayList<>(src.previousNames); c.previousMottos = new ArrayList<>(src.previousMottos); c.previousStyles = new ArrayList<>(src.previousStyles); c.photos = new ArrayList<>(src.photos); c.friends = new ArrayList<>(src.friends); c.oldFriends = new ArrayList<>(src.oldFriends); c.rooms = new ArrayList<>(src.rooms); c.oldRooms = new ArrayList<>(src.oldRooms); c.groups = new ArrayList<>(src.groups); c.badges = new ArrayList<>(src.badges); c.badgesWithAchievements = new ArrayList<>(src.badgesWithAchievements); c.totalBadges = src.totalBadges; c.selectedBadges = new ArrayList<>(src.selectedBadges);
+        c.allPhotosSource = new ArrayList<>(src.allPhotosSource); c.allStylesSource = new ArrayList<>(src.allStylesSource);
         c.photosNextPage = src.photosNextPage; c.stylesNextPage = src.stylesNextPage; c.photosTotal = src.photosTotal; c.stylesTotal = src.stylesTotal;
         c.photosHasMore = src.photosHasMore; c.stylesHasMore = src.stylesHasMore; c.photosLoading = false; c.stylesLoading = false;
+        c.officialProfileAttempted = src.officialProfileAttempted; c.officialPhotosAttempted = src.officialPhotosAttempted; c.officialPhotosSucceeded = src.officialPhotosSucceeded; c.photosFromOfficial = src.photosFromOfficial; c.stylesFromComplement = src.stylesFromComplement;
         return c;
     }
 
@@ -8876,9 +9237,9 @@ private int loadingProgressFor(String message) {
             JSONObject obj = null;
             String storedId = item.uniqueId == null ? "" : item.uniqueId.trim();
             if (!storedId.isEmpty()) {
-                JSONObject profile = tryJson("https://" + hotelDomain(hotel) + "/api/public/users/" + enc(storedId) + "/profile");
-                obj = profile == null ? null : profile.optJSONObject("user");
-                if (obj == null) obj = validProfileObject(profile);
+                obj = validProfileObject(tryJson(
+                        "https://" + hotelDomain(hotel) + "/api/public/users/" + enc(storedId)
+                ));
             }
             if (obj == null && item.nick != null && !item.nick.trim().isEmpty()) {
                 obj = validProfileObject(tryJson("https://" + hotelDomain(hotel) + "/api/public/users?name=" + enc(item.nick)));
@@ -9794,11 +10155,12 @@ private int loadingProgressFor(String message) {
             if (publicObj != null && !out.uniqueId.isEmpty() && !isSameProfileId(out.uniqueId, publicObj)) {
                 publicObj = null;
             }
-            JSONObject officialProfile = publicObj == null && !out.uniqueId.isEmpty()
-                    ? tryJson("https://" + hotelDomain(out.hotelKey) + "/api/public/users/" + enc(out.uniqueId) + "/profile")
+            JSONObject officialUser = publicObj == null && !out.uniqueId.isEmpty()
+                    ? validProfileObject(tryJson(
+                            "https://" + hotelDomain(out.hotelKey) + "/api/public/users/" + enc(out.uniqueId)
+                    ))
                     : null;
-            JSONObject officialUser = officialProfile == null ? null : officialProfile.optJSONObject("user");
-            JSONObject base = firstObject(validProfileObject(publicObj), validProfileObject(officialUser), validProfileObject(officialProfile));
+            JSONObject base = firstObject(validProfileObject(publicObj), validProfileObject(officialUser));
             if (base == null) return out;
 
             String realId = firstText(base, "uniqueId", "id", "habboId");
@@ -9819,7 +10181,7 @@ private int loadingProgressFor(String message) {
 
             out.privateProfile = !optBoolAny(base, true, "profileVisible", "isProfileVisible", "visible");
             if (publicObj != null && publicObj.has("profileVisible")) out.privateProfile = !publicObj.optBoolean("profileVisible", true);
-            out.privateProfile = resolveProfilePrivate(publicObj, officialUser != null ? officialUser : officialProfile, null, null);
+            out.privateProfile = resolveProfilePrivate(publicObj, officialUser, null, null);
 
             out.memberSince = firstText(base, "memberSince", "creationTime", "createdAt", "registeredAt", "created_at", "registerDate", "registrationDate");
             if (out.memberSince.isEmpty() && publicObj != null) out.memberSince = firstText(publicObj, "memberSince", "creationTime", "createdAt", "registeredAt", "created_at", "registerDate", "registrationDate");
@@ -9900,8 +10262,41 @@ private int loadingProgressFor(String message) {
         boolean online = false, privateProfile = false;
         JSONObject habboPublic, dex, suggest, dexProfile, officialProfile;
         ArrayList<JSONObject> previousNames = new ArrayList<>(), previousMottos = new ArrayList<>(), previousStyles = new ArrayList<>(), photos = new ArrayList<>(), friends = new ArrayList<>(), oldFriends = new ArrayList<>(), rooms = new ArrayList<>(), oldRooms = new ArrayList<>(), groups = new ArrayList<>(), selectedBadges = new ArrayList<>(), badges = new ArrayList<>(), badgesWithAchievements = new ArrayList<>();
+        ArrayList<JSONObject> allPhotosSource = new ArrayList<>(), allStylesSource = new ArrayList<>();
         int photosNextPage = 0, stylesNextPage = 0, photosTotal = 0, stylesTotal = 0;
         boolean photosHasMore = false, stylesHasMore = false, photosLoading = false, stylesLoading = false;
+        boolean officialProfileAttempted = false, officialPhotosAttempted = false, officialPhotosSucceeded = false, photosFromOfficial = false, stylesFromComplement = false;
+    }
+
+    private static class ProfileSectionPayload {
+        final String kind;
+        final JSONObject object;
+        final ArrayList<JSONObject> items;
+        final boolean success;
+
+        private ProfileSectionPayload(
+                String kind,
+                JSONObject object,
+                ArrayList<JSONObject> items,
+                boolean success
+        ) {
+            this.kind = kind == null ? "" : kind;
+            this.object = object;
+            this.items = items == null ? new ArrayList<>() : items;
+            this.success = success;
+        }
+
+        static ProfileSectionPayload object(String kind, JSONObject value) {
+            return new ProfileSectionPayload(kind, value, null, value != null);
+        }
+
+        static ProfileSectionPayload list(
+                String kind,
+                ArrayList<JSONObject> value,
+                boolean success
+        ) {
+            return new ProfileSectionPayload(kind, null, value, success);
+        }
     }
 
     private static class PageResult {
@@ -9974,7 +10369,7 @@ private int loadingProgressFor(String message) {
             try {
                 String safeId = uniqueId == null ? "" : uniqueId.trim();
                 URL u;
-                if (!safeId.isEmpty()) u = new URL("https://" + hotelDomainStatic(hotel) + "/api/public/users/" + URLEncoder.encode(safeId, "UTF-8") + "/profile");
+                if (!safeId.isEmpty()) u = new URL("https://" + hotelDomainStatic(hotel) + "/api/public/users/" + URLEncoder.encode(safeId, "UTF-8"));
                 else u = new URL("https://" + hotelDomainStatic(hotel) + "/api/public/users?name=" + URLEncoder.encode(nick, "UTF-8"));
                 c = (HttpURLConnection)u.openConnection();
                 c.setUseCaches(false);
@@ -9984,7 +10379,7 @@ private int loadingProgressFor(String message) {
                 c.setRequestProperty("Accept", "application/json, text/plain, */*");
                 c.setRequestProperty("Cache-Control", "no-cache, no-store");
                 c.setRequestProperty("Pragma", "no-cache");
-                c.setRequestProperty("User-Agent", "ToxicSearchTool/1.2.9 Android");
+                c.setRequestProperty("User-Agent", "ToxicSearchTool/" + APP_VERSION + " Android");
                 int code = c.getResponseCode();
                 InputStream is = code >= 200 && code < 400 ? c.getInputStream() : c.getErrorStream();
                 String body = readAllStatic(is);
