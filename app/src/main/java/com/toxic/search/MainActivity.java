@@ -2847,7 +2847,6 @@ public class MainActivity extends Activity {
         );
         r.previousMottos = extractList(complement, "previousMottos");
         r.oldFriends = extractList(complement, "previousFriends");
-        r.oldRooms = extractList(complement, "previousRooms");
         applyLocalStylesSource(r, extractList(complement, "previousStyles"));
 
         if (r.motto.isEmpty()) r.motto = firstText(complement, "motto", "mission");
@@ -3440,7 +3439,7 @@ public class MainActivity extends Activity {
         addPreviousStyles(r);
         addStats(r);
         addFriendsTabs(r.friends, r.oldFriends);
-        addRoomsTabs(r.rooms, r.oldRooms);
+        addRoomsTabs(r.rooms);
         addGroups(r.groups);
         addBadgesSection(r);
     }
@@ -3799,14 +3798,18 @@ public class MainActivity extends Activity {
             try {
                 JSONObject data = unwrap(getJson(habbodexFigureUrl(figure)));
                 final ArrayList<JSONObject> clothes = normalizeClothingEntries(data);
+                final ArrayList<JSONObject> namedClothes = new ArrayList<>();
+                for (JSONObject item : clothes) {
+                    if (hasCompleteClothingName(item)) namedClothes.add(item);
+                }
                 runOnUiThread(() -> {
                     clothesContainer.removeAllViews();
-                    if (clothes.isEmpty()) {
+                    if (namedClothes.isEmpty()) {
                         clothesContainer.addView(mottoItem(t(R.string.no_clothes_found), ""));
                         return;
                     }
-                    for (int i=0; i<Math.min(clothes.size(), 40); i++) {
-                        clothesContainer.addView(clothingRow(clothes.get(i)));
+                    for (int i=0; i<Math.min(namedClothes.size(), 40); i++) {
+                        clothesContainer.addView(clothingRow(namedClothes.get(i)));
                     }
                 });
             } catch (Exception ex) {
@@ -3831,6 +3834,43 @@ public class MainActivity extends Activity {
         return row;
     }
 
+
+    private boolean hasCompleteClothingName(JSONObject item) {
+        if (item == null) return false;
+        String code = firstText(item, "code", "classname", "className", "id");
+        String localized = pickLocalizedValue(item.optJSONObject("localeNames"), "");
+        String rawName = localized.isEmpty()
+                ? firstText(item, "name", "publicName", "furniName")
+                : localized;
+        String name = sanitizeClothingLabel(rawName);
+        if (name.isEmpty()) return false;
+        if (!code.isEmpty() && normalizeClothingIdentity(name).equals(normalizeClothingIdentity(code))) return false;
+        return !looksLikeClothingCode(name);
+    }
+
+    private String normalizeClothingIdentity(String value) {
+        return (value == null ? "" : value)
+                .trim()
+                .toLowerCase(Locale.ROOT)
+                .replaceAll("[^a-z0-9]", "");
+    }
+
+    private boolean looksLikeClothingCode(String value) {
+        String clean = value == null ? "" : value.trim();
+        return clean.matches("(?i)^[a-z]{2,4}[-_ ]?\\d+(?:[-_ ]?\\d+)*$")
+                || clean.matches("(?i)^(?:nft|kld)[-_ ]?\\d+(?:[-_ ]?\\d+)*$");
+    }
+
+    private String clothingRarity(JSONObject item) {
+        String rarity = firstText(item, "rarity", "rarityType", "type").toLowerCase(Locale.ROOT);
+        if (optBoolAny(item, false, "isNft", "nft") || rarity.contains("nft") || rarity.contains("collect")) return "nft";
+        if (optBoolAny(item, false, "isRare", "rare") || rarity.contains("rare") || rarity.contains("raro")) return "rare";
+        String combined = (firstText(item, "code", "classname", "className", "id") + " "
+                + clothingName(item, "")).toLowerCase(Locale.ROOT);
+        if (combined.contains("nft") || combined.contains("kld3")) return "nft";
+        if (combined.contains("kld2")) return "rare";
+        return "generic";
+    }
 
     private String clothingName(JSONObject o, String fallback) {
         String n = pickLocalizedValue(o == null ? null : o.optJSONObject("localeNames"), fallback);
@@ -4640,41 +4680,20 @@ public class MainActivity extends Activity {
 
     private TextView pageButton(String s, boolean enabled) { TextView v = text(s, 20, enabled?Color.WHITE:Color.argb(70,255,255,255), true); v.setGravity(Gravity.CENTER); v.setBackground(round(Color.argb(14,255,255,255), dp(14), Color.argb(24,255,255,255), 1)); LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(dp(44), dp(44)); p.setMargins(dp(6),0,dp(6),0); v.setLayoutParams(p); return v; }
 
-    private void addRoomsTabs(ArrayList<JSONObject> rooms, ArrayList<JSONObject> oldRooms) {
-        if (rooms.isEmpty() && oldRooms.isEmpty()) return;
-        LinearLayout c = sectionCard(null, 0, false);
-
-        LinearLayout tabs = new LinearLayout(this);
-        tabs.setOrientation(LinearLayout.HORIZONTAL);
-        tabs.setGravity(Gravity.CENTER_VERTICAL);
-        c.addView(tabs, lp(-1, dp(58), 0, 0, 0, 14));
-
-        TextView btRooms = tabButton(t(R.string.rooms) + " (" + rooms.size() + ")", true);
-        TextView btOld = trashTabButton(false);
-        tabs.addView(btRooms);
-        Space tabSpace = new Space(this);
-        tabs.addView(tabSpace, new LinearLayout.LayoutParams(0, 1, 1));
-        tabs.addView(btOld);
-
+    private void addRoomsTabs(ArrayList<JSONObject> rooms) {
+        if (rooms == null || rooms.isEmpty()) return;
+        LinearLayout c = sectionCard(t(R.string.rooms), rooms.size(), true);
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
-        c.addView(content, lp(-1,-2,0,0,0,0));
+        c.addView(content, lp(-1, -2, 0, 0, 0, 0));
 
-        final boolean[] old = {false};
         final int[] page = {1};
         Runnable[] render = new Runnable[1];
         render[0] = () -> {
             content.removeAllViews();
-            btRooms.setBackground(old[0] ? tabBg(false) : tabBg(true));
-            btRooms.setTextColor(old[0] ? tabInactiveTextColor() : Color.WHITE);
-            btOld.setBackground(new TrashTabDrawable(old[0]));
-            btOld.setText("");
-            ArrayList<JSONObject> data = old[0] ? oldRooms : rooms;
-            renderRoomsPage(content, data, page[0], 5, old[0]);
-            renderPager(content, data.size(), 5, page, render[0]);
+            renderRoomsPage(content, rooms, page[0], 5, false);
+            renderPager(content, rooms.size(), 5, page, render[0], () -> scrollMainToView(c, dp(12)));
         };
-        btRooms.setOnClickListener(v -> { old[0] = false; page[0] = 1; render[0].run(); });
-        btOld.setOnClickListener(v -> { old[0] = true; page[0] = 1; render[0].run(); });
         render[0].run();
     }
 
@@ -7750,14 +7769,21 @@ private int loadingProgressFor(String message) {
                 String code = firstText(itemInfo, "code", "classname", "className", "id");
                 String name = clothingName(itemInfo, code.isEmpty() ? (type + "-" + itemId) : code);
                 String collection = clothingLineName(itemInfo, "");
+                String rarity = clothingRarity(itemInfo);
                 String icon = firstText(itemInfo, "rarityIconUrl", "iconUrl", "imageUrl", "url", "thumbnail");
-                if (icon.isEmpty()) icon = GENERIC_CLOTHING_ICON;
+                if (icon.isEmpty()) icon = PROFILE_API + "/rarity-icon/" + rarity;
 
                 info.addView(visualItemInfoRow(t(R.string.item_name), name.isEmpty() ? (type + "-" + itemId) : name));
                 info.addView(visualItemInfoRow(t(R.string.collection), collection.isEmpty() ? "-" : collection));
+                Drawable rarityFallback = new ClothingRarityDrawable(rarity);
+                rarityThumbnail.setImageDrawable(rarityFallback);
+                rarityThumbnail.setVisibility(View.VISIBLE);
                 if (!icon.isEmpty()) {
-                    rarityThumbnail.setVisibility(View.VISIBLE);
-                    Glide.with(MainActivity.this).load(icon).into(rarityThumbnail);
+                    Glide.with(MainActivity.this)
+                            .load(icon)
+                            .placeholder(rarityFallback)
+                            .error(rarityFallback)
+                            .into(rarityThumbnail);
                 }
             });
         });
@@ -11020,6 +11046,60 @@ private int loadingProgressFor(String message) {
             p.setColor(Color.rgb(255,107,122)); c.drawRect(ox+sw*.36f, oy+sh*.84f, ox+sw*.64f, oy+sh*.91f, p);
         }
         @Override public void setAlpha(int a){p.setAlpha(a);} @Override public void setColorFilter(android.graphics.ColorFilter f){p.setColorFilter(f);} @Override public int getOpacity(){return PixelFormat.TRANSLUCENT;}
+    }
+
+    public class ClothingRarityDrawable extends Drawable {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final String rarity;
+
+        ClothingRarityDrawable(String rarity) {
+            String normalized = rarity == null ? "generic" : rarity.trim().toLowerCase(Locale.ROOT);
+            this.rarity = ("rare".equals(normalized) || "nft".equals(normalized)) ? normalized : "generic";
+        }
+
+        @Override public void draw(Canvas canvas) {
+            Rect bounds = getBounds();
+            float size = Math.min(bounds.width(), bounds.height());
+            float left = bounds.centerX() - size / 2f;
+            float top = bounds.centerY() - size / 2f;
+            RectF box = new RectF(left + dp(1), top + dp(1), left + size - dp(1), top + size - dp(1));
+
+            int background = "nft".equals(rarity)
+                    ? Color.rgb(8, 125, 134)
+                    : ("rare".equals(rarity) ? Color.rgb(123, 67, 198) : Color.rgb(104, 115, 134));
+            int foreground = "nft".equals(rarity)
+                    ? Color.rgb(98, 240, 220)
+                    : ("rare".equals(rarity) ? Color.rgb(243, 211, 93) : Color.rgb(215, 222, 234));
+            String letter = "nft".equals(rarity) ? "N" : ("rare".equals(rarity) ? "R" : "G");
+
+            paint.setShader(null);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(background);
+            canvas.drawRoundRect(box, size * .23f, size * .23f, paint);
+
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(Math.max(dp(1), size * .055f));
+            paint.setColor(foreground);
+            canvas.drawRoundRect(box, size * .23f, size * .23f, paint);
+            RectF inner = new RectF(box.left + size * .22f, box.top + size * .22f, box.right - size * .22f, box.bottom - size * .22f);
+            paint.setStrokeWidth(Math.max(dp(1), size * .035f));
+            paint.setAlpha(155);
+            canvas.drawRect(inner, paint);
+            paint.setAlpha(255);
+
+            paint.setStyle(Paint.Style.FILL);
+            paint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
+            paint.setTextAlign(Paint.Align.CENTER);
+            paint.setTextSize(size * .39f);
+            paint.setColor(foreground);
+            Paint.FontMetrics fm = paint.getFontMetrics();
+            float baseline = bounds.centerY() - (fm.ascent + fm.descent) / 2f;
+            canvas.drawText(letter, bounds.centerX(), baseline, paint);
+        }
+
+        @Override public void setAlpha(int alpha) { paint.setAlpha(alpha); }
+        @Override public void setColorFilter(android.graphics.ColorFilter filter) { paint.setColorFilter(filter); }
+        @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
     }
 
     public class PlaceholderDrawable extends Drawable {
