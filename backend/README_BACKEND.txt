@@ -1,27 +1,42 @@
-BACKEND DO TOXIC HABBO
+BACKEND DO TOXIC
 
-O app Android nativo NÃO importa PHP/CSS para dentro do APK.
-Ele usa o seu site como backend.
+O aplicativo está configurado para usar:
 
-Arquivo obrigatório no site:
-- /api.php
+https://atoxic.com.br/api.php
 
-Esse arquivo é o proxy JSON que consulta o Habbodex e devolve respostas no formato:
-{"ok":true,"data":...}
+O arquivo backend/api.php desta versão é a API de compatibilidade da Toxic.
+Dados atuais usam a API pública oficial do Habbo; históricos são usados apenas
+como complemento. A API não mantém respostas em cache.
 
-Endpoints usados pelo app:
-- /api.php?name=NICK
-- /api.php?endpoint=habbos-suggest&name=NICK&includePreviousNames=true&hotel=br
-- /api.php?uniqueId=ID
-- /api.php?uniqueId=ID&endpoint=previous-mottos&page=1&limit=100
-- /api.php?uniqueId=ID&endpoint=previous-styles&page=1&limit=100
-- /api.php?uniqueId=ID&endpoint=photos&page=1&limit=100
-- /api.php?uniqueId=ID&endpoint=friends&page=1&limit=100
-- /api.php?uniqueId=ID&endpoint=previous-friends&page=1&limit=100
-- /api.php?uniqueId=ID&endpoint=rooms&page=1&limit=100
-- /api.php?uniqueId=ID&endpoint=previous-rooms&page=1&limit=100
-- /api.php?uniqueId=ID&endpoint=groups&page=1&limit=100
-- /api.php?endpoint=from-figure-string&figureString=FIGURE
+PUBLICAÇÃO
 
-Se quiser mudar o domínio, edite MainActivity.java:
-private static final String API = "https://atoxic.com.br/api.php";
+1. Envie backend/api.php para public_html/api.php no atoxic.com.br.
+2. Use PHP 8.0 ou superior, com as extensões cURL e DOM habilitadas.
+3. Permita que o PHP crie a pasta cache ao lado do arquivo. Ela guarda somente
+   bloqueios de concorrência e o histórico de observações, nunca respostas de API.
+4. Confirme que a hospedagem aceita PATH_INFO nas URLs de api.php.
+
+TESTE
+
+https://atoxic.com.br/api.php/habboinfo/br/habbo?name=Refresh
+
+ROTAS PRINCIPAIS
+
+- /api.php/habboinfo/br/habbo?name=NICK
+- /api.php/habboinfo/UNIQUE_ID?hotel=br
+- /api.php/habboinfo/UNIQUE_ID/photos?page=1&limit=100&hotel=br
+- /api.php/habboinfo/UNIQUE_ID/previous-mottos?page=1&limit=100&hotel=br
+- /api.php/habboinfo/UNIQUE_ID/selected-badges?page=1&limit=100&hotel=br
+- /api.php/habboinfo/UNIQUE_ID/badges?page=1&limit=100&hotel=br
+- /api.php/habboinfo/UNIQUE_ID/previous-badges?page=1&limit=100&hotel=br
+- /api.php/habboinfo/UNIQUE_ID/previous-styles?page=1&limit=100&hotel=br
+- /api.php/habboinfo/UNIQUE_ID/friends?page=1&limit=100&hotel=br
+- /api.php/habboinfo/UNIQUE_ID/previous-friends?page=1&limit=100&hotel=br
+- /api.php/habboinfo/UNIQUE_ID/rooms?page=1&limit=100&hotel=br
+- /api.php/habboinfo/UNIQUE_ID/previous-rooms?page=1&limit=100&hotel=br
+- /api.php/habboinfo/UNIQUE_ID/groups?page=1&limit=100&hotel=br
+- /api.php/habboinfo/UNIQUE_ID/previous-groups?page=1&limit=100&hotel=br
+- /api.php/furnidex/furni/from-figure-string?figureString=FIGURE&hotel=br
+
+O endpoint também mantém compatibilidade com o formato antigo por query string
+e com o modo gateway usando os parâmetros path e query.

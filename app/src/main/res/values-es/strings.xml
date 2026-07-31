@@ -43,10 +43,8 @@
     <string name="item_name">Nombre del visual</string>
     <string name="collection">Colección</string>
     <string name="image">Imagen</string>
-    <string name="thumbnail">Miniatura</string>
     <string name="disclaimer1">Esta aplicación no está afiliada, respaldada, patrocinada ni específicamente aprobada por Sulake Corporation Oy o sus afiliadas.</string>
     <string name="profile_private">Privado</string>
-    <string name="banned">Baneado</string>
     <string name="status">Estado</string>
     <string name="online">En línea</string>
     <string name="offline">Desconectado</string>

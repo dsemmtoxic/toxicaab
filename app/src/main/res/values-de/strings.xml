@@ -43,10 +43,8 @@
     <string name="item_name">Name des Looks</string>
     <string name="collection">Kollektion</string>
     <string name="image">Bild</string>
-    <string name="thumbnail">Vorschaubild</string>
     <string name="disclaimer1">Diese Anwendung ist weder mit Sulake Corporation Oy oder ihren verbundenen Unternehmen verbunden noch von ihnen unterstützt, gesponsert oder ausdrücklich genehmigt.</string>
     <string name="profile_private">Privat</string>
-    <string name="banned">Gesperrt</string>
     <string name="status">Status</string>
     <string name="online">Online</string>
     <string name="offline">Offline</string>

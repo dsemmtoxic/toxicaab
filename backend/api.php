@@ -3,7 +3,7 @@
 declare(strict_types=1);
 
 /*
- * Toxic HabboWidgets Compatibility API
+ * Toxic Profile Compatibility API
  *
  * Envie este arquivo para https://atoxic.com.br/api.php.
  * No aplicativo, a base compatível com as rotas do HabboDex passa a ser:
@@ -14,25 +14,19 @@ declare(strict_types=1);
  *   - /api.php/habboinfo/br/habbo?name=Refresh
  *   - /api.php/habboinfo/hhbr-.../friends?page=1&limit=100&hotel=br
  *   - /api.php/furnidex/furni/from-figure-string?figureString=...&hotel=br
- *   - /api.php?path=habboinfo%2F...&query=... (gateway da versão 1.2.7)
+ *   - /api.php?path=habboinfo%2F...&query=... (gateway legado)
  *   - o formato antigo por query string documentado no projeto.
  *
  * Requisitos: PHP 8.0+, cURL, DOM e permissão para criar ./cache.
- *
- * Fontes:
- *   1. HabboWidgets: históricos, emblemas completos, amigos removidos,
- *      visuais, ticker e o armário de roupas.
- *   2. API pública oficial do Habbo: dados atuais e complemento das fotos,
- *      quando o perfil está público.
- *
- * Datas históricas do HabboWidgets são datas de detecção do site, não
- * necessariamente a data exata em que a ação ocorreu.
+ * Dados atuais vêm da API pública oficial; a fonte histórica é usada somente
+ * como complemento. Datas históricas são datas de detecção.
  */
 
-const TOXIC_API_VERSION = '1.0.0';
-const TOXIC_USER_AGENT = 'ToxicSearchTool/1.2.8 (+https://atoxic.com.br)';
+const TOXIC_API_VERSION = '1.1.0';
+const TOXIC_USER_AGENT = 'ToxicSearchTool/1.2.9 (+https://atoxic.com.br)';
 const HABBOWIDGETS_BASE = 'https://www.habbowidgets.com';
 const CACHE_ROOT = __DIR__ . '/cache/habbowidgets_api';
+const ENABLE_API_CACHE = false;
 const PROFILE_CACHE_TTL = 600;
 const HTTP_CACHE_TTL = 600;
 const HTTP_STALE_TTL = 2_592_000;
@@ -78,7 +72,11 @@ function main(): void
     $gatewayMode = isset($_GET['path']);
     try {
         ensureCacheDirectories();
+        purgeDisabledApiCache();
         [$path, $params, $gatewayMode] = parseIncomingRequest();
+        if (preg_match('#^rarity-icon/(generic|rare|nft)$#i', $path, $iconMatch)) {
+            sendRarityIcon(strtolower($iconMatch[1]));
+        }
         [$payload, $cacheHit] = dispatch($path, $params);
         sendSuccess($payload, $gatewayMode, $cacheHit);
     } catch (ApiProblem $problem) {
@@ -104,17 +102,20 @@ function sendCommonHeaders(): void
     header('Content-Type: application/json; charset=utf-8');
     header('X-Content-Type-Options: nosniff');
     header('Referrer-Policy: no-referrer');
-    header('Cache-Control: public, max-age=60, stale-while-revalidate=300');
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    header('Pragma: no-cache');
+    header('Expires: 0');
 }
 
 function sendSuccess(mixed $payload, bool $gatewayMode, bool $cacheHit): void
 {
     http_response_code(200);
+    $payload = sanitizePublicPayload($payload);
     if ($gatewayMode) {
         $payload = [
             'ok' => true,
-            'cached' => $cacheHit,
-            'source' => 'habbowidgets',
+            'cached' => false,
+            'source' => 'toxic',
             'data' => $payload,
         ];
     }
@@ -125,17 +126,71 @@ function sendSuccess(mixed $payload, bool $gatewayMode, bool $cacheHit): void
 function sendFailure(ApiProblem $problem, bool $gatewayMode): void
 {
     http_response_code($problem->httpStatus);
-    $payload = [
+    $payload = sanitizePublicPayload([
         'error' => $problem->getMessage(),
         'code' => $problem->apiCode,
-    ];
+    ]);
     if ($problem->details !== []) {
-        $payload += $problem->details;
+        $payload += sanitizePublicPayload($problem->details);
     }
     if ($gatewayMode) {
         $payload = ['ok' => false] + $payload;
     }
     echo encodeJson($payload);
+    exit;
+}
+
+function sanitizePublicPayload(mixed $value, string $key = ''): mixed
+{
+    if (is_array($value)) {
+        $out = [];
+        foreach ($value as $childKey => $childValue) {
+            $normalizedKey = strtolower((string) $childKey);
+            if (in_array($normalizedKey, ['isbanned', 'banned', 'ban', 'is_banned'], true)) {
+                continue;
+            }
+            $publicKey = str_contains($normalizedKey, 'habbowidgets')
+                ? 'sourceCounts'
+                : $childKey;
+            $out[$publicKey] = sanitizePublicPayload($childValue, (string) $publicKey);
+        }
+        return $out;
+    }
+    if (!is_string($value)) {
+        return $value;
+    }
+    if (in_array(strtolower($key), ['sourceurl', 'closeturl'], true)) {
+        return '';
+    }
+    $clean = preg_replace(
+        '/\s*[-–|]\s*(?:Habbo\s+(?:Guarda[- ]Roupa|Closet).*|Habbo\s*Widgets(?:\.com)?.*)$/iu',
+        '',
+        $value
+    ) ?? $value;
+    $clean = preg_replace('/Habbo\s*Widgets(?:\.com)?/iu', 'Toxic', $clean) ?? $clean;
+    $clean = str_ireplace(
+        ['atoxic-Toxic', 'toxic-Toxic', 'Toxic-closet', 'Toxic-ticker'],
+        ['toxic', 'toxic', 'toxic', 'toxic'],
+        $clean
+    );
+    return trim($clean);
+}
+
+function sendRarityIcon(string $rarity): void
+{
+    $styles = [
+        'generic' => ['#687386', '#d7deea', 'G'],
+        'rare' => ['#7b43c6', '#f3d35d', 'R'],
+        'nft' => ['#087d86', '#62f0dc', 'N'],
+    ];
+    [$background, $foreground, $letter] = $styles[$rarity] ?? $styles['generic'];
+    header('Content-Type: image/svg+xml; charset=utf-8');
+    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
+    echo '<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36">'
+        . '<rect x="1" y="1" width="34" height="34" rx="9" fill="' . $background . '" stroke="' . $foreground . '" stroke-width="2"/>'
+        . '<path d="M9 27V9h18v18z" fill="none" stroke="' . $foreground . '" stroke-width="1.4" opacity=".6"/>'
+        . '<text x="18" y="23" text-anchor="middle" font-family="Arial,sans-serif" font-size="14" font-weight="700" fill="' . $foreground . '">' . $letter . '</text>'
+        . '</svg>';
     exit;
 }
 
@@ -239,10 +294,10 @@ function dispatch(string $path, array $params): array
 {
     if ($path === '') {
         return [[
-            'name' => 'Toxic HabboWidgets Compatibility API',
+            'name' => 'Toxic Profile Compatibility API',
             'version' => TOXIC_API_VERSION,
             'status' => 'ok',
-            'provider' => 'habbowidgets',
+            'provider' => 'toxic',
             'examples' => [
                 '/api.php/habboinfo/br/habbo?name=Refresh',
                 '/api.php/habboinfo/hhbr-.../friends?hotel=br&page=1&limit=100',
@@ -382,9 +437,9 @@ function paginated(
             'nextPage' => $nextPage,
         ],
         'meta' => [
-            'provider' => 'habbowidgets',
+            'provider' => 'toxic',
             'datesAreDetectionDates' => true,
-            'sourceUrl' => (string) ($sourceMeta['sourceUrl'] ?? ''),
+            'sourceUrl' => '',
         ],
     ];
 }
@@ -499,17 +554,53 @@ function mbSubstrSafe(string $value, int $start, int $length): string
 
 function ensureCacheDirectories(): void
 {
-    foreach (['http', 'profiles', 'history', 'closet', 'locks'] as $child) {
+    $directories = ENABLE_API_CACHE
+        ? ['http', 'profiles', 'history', 'closet', 'locks']
+        : ['history', 'locks'];
+    foreach ($directories as $child) {
         $directory = CACHE_ROOT . '/' . $child;
         if (!is_dir($directory) && !@mkdir($directory, 0775, true) && !is_dir($directory)) {
             throw new ApiProblem(
                 500,
                 'cache_not_writable',
                 'O PHP não conseguiu criar a pasta de cache.',
-                ['directory' => './cache/habbowidgets_api/' . $child]
+                ['directory' => './cache/toxic_profile_api/' . $child]
             );
         }
     }
+}
+
+function purgeDisabledApiCache(): void
+{
+    if (ENABLE_API_CACHE) {
+        return;
+    }
+    foreach (['http', 'profiles', 'closet'] as $child) {
+        deleteCacheTree(CACHE_ROOT . '/' . $child);
+    }
+}
+
+function deleteCacheTree(string $path): void
+{
+    if (!is_dir($path)) {
+        return;
+    }
+    $items = @scandir($path);
+    if (!is_array($items)) {
+        return;
+    }
+    foreach ($items as $item) {
+        if ($item === '.' || $item === '..') {
+            continue;
+        }
+        $target = $path . '/' . $item;
+        if (is_dir($target) && !is_link($target)) {
+            deleteCacheTree($target);
+        } else {
+            @unlink($target);
+        }
+    }
+    @rmdir($path);
 }
 
 function profileCacheFile(string $hotel, string $identifier): string
@@ -523,6 +614,9 @@ function readProfileCache(
     string $identifier,
     bool $freshOnly
 ): ?array {
+    if (!ENABLE_API_CACHE) {
+        return null;
+    }
     if ($identifier === '') {
         return null;
     }
@@ -543,7 +637,7 @@ function readProfileCache(
 
 function writeProfileCache(string $hotel, string $identifier, array $profile): void
 {
-    if ($identifier === '') {
+    if (!ENABLE_API_CACHE || $identifier === '') {
         return;
     }
     writeJsonAtomic(profileCacheFile($hotel, $identifier), [
@@ -625,7 +719,7 @@ function buildProfile(string $hotel, string $requestedName, string $requestedId)
                 $sources[] = 'habbo-public-user';
             }
         } catch (Throwable $error) {
-            $warnings[] = 'A busca oficial por nome não respondeu; o HabboWidgets foi usado como alternativa.';
+            $warnings[] = 'A busca oficial por nome não respondeu; a fonte complementar foi usada como alternativa.';
         }
     }
 
@@ -655,13 +749,13 @@ function buildProfile(string $hotel, string $requestedName, string $requestedId)
             $resolvedId
         );
         if (($widgetResult['valid'] ?? false) === true) {
-            $sources[] = 'habbowidgets';
+            $sources[] = 'toxic-history';
             $widgetData = $widgetResult['profile'];
             $resolvedName = firstString($widgetData, ['name']) ?: $resolvedName;
             $resolvedId = firstString($widgetData, ['uniqueId']) ?: $resolvedId;
         }
     } catch (Throwable $error) {
-        $warnings[] = 'O HabboWidgets não respondeu nesta atualização.';
+        $warnings[] = 'A fonte histórica não respondeu nesta atualização.';
     }
 
     if ($officialUser === null && $resolvedName !== '') {
@@ -730,7 +824,7 @@ function buildProfile(string $hotel, string $requestedName, string $requestedId)
             [[
                 'name' => $requestedName,
                 'changedAt' => (string) ($profile['lastChangeAt'] ?? ''),
-                'source' => 'habbowidgets-name-resolution',
+                'source' => 'toxic-history',
                 'datePrecision' => 'observed',
             ]],
             ['name']
@@ -738,24 +832,24 @@ function buildProfile(string $hotel, string $requestedName, string $requestedId)
     }
 
     $profile['_meta'] = [
-        'provider' => 'atoxic-habbowidgets',
+        'provider' => 'toxic-profile-api',
         'apiVersion' => TOXIC_API_VERSION,
         'hotel' => $hotel,
         'sources' => array_values(array_unique($sources)),
-        'sourceUrl' => (string) ($widgetResult['sourceUrl'] ?? ''),
+        'sourceUrl' => '',
         'fetchedAt' => gmdate('c'),
         'datesAreDetectionDates' => true,
         'stale' => (bool) ($widgetResult['stale'] ?? false),
         'warnings' => array_values(array_unique($warnings)),
         'availability' => [
-            'previousFriends' => 'HabboWidgets + observações futuras desta API',
-            'previousRooms' => 'bloco de removidos + ticker do HabboWidgets + observações futuras desta API',
-            'previousBadges' => 'bloco de emblemas removidos do HabboWidgets',
-            'previousGroups' => 'bloco de grupos removidos do HabboWidgets',
-            'previousNames' => 'resolução do HabboWidgets + observações após a primeira consulta',
-            'previousStyles' => 'HabboWidgets',
-            'previousMottos' => 'HabboWidgets',
-            'photos' => 'HabboWidgets + API pública oficial do Habbo quando disponível',
+            'previousFriends' => 'fonte histórica + observações futuras desta API',
+            'previousRooms' => 'bloco histórico de removidos + observações futuras desta API',
+            'previousBadges' => 'bloco histórico de emblemas removidos',
+            'previousGroups' => 'bloco histórico de grupos removidos',
+            'previousNames' => 'resolução histórica + observações após a primeira consulta',
+            'previousStyles' => 'fonte histórica',
+            'previousMottos' => 'fonte histórica',
+            'photos' => 'fonte histórica + API pública oficial do Habbo quando disponível',
         ],
     ];
 
@@ -864,7 +958,7 @@ function fetchAndParseHabbowidgetsProfile(
         if ($lastError instanceof Throwable) {
             throw $lastError;
         }
-        throw new ApiProblem(502, 'habbowidgets_unavailable', 'HabboWidgets indisponível.');
+        throw new ApiProblem(502, 'history_source_unavailable', 'Fonte histórica indisponível.');
     }
 
     $parsed = parseHabbowidgetsHtml(
@@ -942,7 +1036,7 @@ function cachedHttpRequest(
                     'Accept: text/html,application/json;q=0.9,*/*;q=0.7',
                     'Accept-Language: ' . $language,
                     'Referer: ' . HABBOWIDGETS_BASE . '/',
-                    'X-Toxic-App: 1.2.7',
+                    'X-Toxic-App: 1.2.9',
                 ],
                 CURLOPT_WRITEFUNCTION => static function ($curl, string $chunk) use (
                     &$body,
@@ -994,12 +1088,14 @@ function cachedHttpRequest(
                 );
             }
 
-            writeFileAtomic($bodyFile, $body);
-            writeJsonAtomic($metaFile, [
-                'savedAt' => time(),
-                'status' => $status,
-                'effectiveUrl' => $effectiveUrl !== '' ? $effectiveUrl : $url,
-            ]);
+            if (ENABLE_API_CACHE) {
+                writeFileAtomic($bodyFile, $body);
+                writeJsonAtomic($metaFile, [
+                    'savedAt' => time(),
+                    'status' => $status,
+                    'effectiveUrl' => $effectiveUrl !== '' ? $effectiveUrl : $url,
+                ]);
+            }
 
             return [
                 'body' => $body,
@@ -1050,6 +1146,9 @@ function assertAllowedUpstreamUrl(string $url): void
 
 function readHttpCache(string $bodyFile, string $metaFile): ?array
 {
+    if (!ENABLE_API_CACHE) {
+        return null;
+    }
     if (!is_file($bodyFile) || !is_file($metaFile)) {
         return null;
     }
@@ -1112,7 +1211,7 @@ function parseHabbowidgetsHtml(
     libxml_clear_errors();
     libxml_use_internal_errors($previous);
     if (!$loaded) {
-        throw new ApiProblem(502, 'invalid_habbowidgets_html', 'Não foi possível ler o HTML do HabboWidgets.');
+        throw new ApiProblem(502, 'invalid_history_html', 'Não foi possível ler a resposta da fonte histórica.');
     }
 
     $xpath = new DOMXPath($document);
@@ -1120,12 +1219,12 @@ function parseHabbowidgetsHtml(
     if (!$summary instanceof DOMNode) {
         $pageText = normalizeText((string) ($document->textContent ?? ''));
         if (preg_match('/not found|não encontrado|niet gevonden|nicht gefunden|introuvable/i', $pageText)) {
-            throw new ApiProblem(404, 'profile_not_found', 'Perfil não encontrado no HabboWidgets.');
+            throw new ApiProblem(404, 'profile_not_found', 'Perfil não encontrado na fonte histórica.');
         }
         throw new ApiProblem(
             502,
-            'unexpected_habbowidgets_page',
-            'O HabboWidgets devolveu uma página sem os dados esperados.'
+            'unexpected_history_page',
+            'A fonte histórica devolveu uma página sem os dados esperados.'
         );
     }
 
@@ -1155,20 +1254,6 @@ function parseHabbowidgetsHtml(
             $summary
         ) instanceof DOMNode;
     }
-    $bannedProfile = firstXpathNode($xpath, '//*[@id="extract-banned"]') instanceof DOMNode;
-    foreach (xpathNodes(
-        $xpath,
-        './/a[contains(concat(" ", normalize-space(@class), " "), " btn-danger ")]',
-        $summary
-    ) as $warningNode) {
-        if (preg_match(
-            '/banido|banned|gesperrt|banni|baneado|bannato|verbannen|yasakl|porttikielto/i',
-            nodeText($warningNode)
-        )) {
-            $bannedProfile = true;
-            break;
-        }
-    }
     $lastChangeAt = nodeAttribute(
         firstXpathNode($xpath, './/time[@datetime][1]', $summary),
         'datetime'
@@ -1186,7 +1271,7 @@ function parseHabbowidgetsHtml(
                 'look' => $event['figureString'],
                 'changedAt' => (string) ($event['date'] ?? ''),
                 'imageUrl' => (string) ($event['imageUrl'] ?? ''),
-                'source' => 'habbowidgets-ticker',
+                'source' => 'toxic-history',
                 'datePrecision' => 'observed',
             ];
         }
@@ -1330,7 +1415,7 @@ function parseHabbowidgetsHtml(
                 'date' => (string) ($event['date'] ?? ''),
                 'url' => (string) ($event['url'] ?? ''),
                 'thumbnailUrl' => (string) ($event['imageUrl'] ?? ''),
-                'source' => 'habbowidgets-ticker',
+                'source' => 'toxic-history',
                 'datePrecision' => 'observed',
             ];
         }
@@ -1338,7 +1423,7 @@ function parseHabbowidgetsHtml(
             $previousNames[] = [
                 'name' => (string) $event['previousName'],
                 'changedAt' => (string) ($event['date'] ?? ''),
-                'source' => 'habbowidgets-ticker',
+                'source' => 'toxic-history',
                 'datePrecision' => 'observed',
             ];
         }
@@ -1397,8 +1482,6 @@ function parseHabbowidgetsHtml(
         'profileVisible' => !$privateProfile,
         'isProfileVisible' => !$privateProfile,
         'visible' => !$privateProfile,
-        'isBanned' => $bannedProfile,
-        'banned' => $bannedProfile,
         'lastChangeAt' => normalizeDate($lastChangeAt),
         'currentLevel' => (string) ($levelValues[0] ?? ''),
         'level' => (string) ($levelValues[0] ?? ''),
@@ -1427,7 +1510,7 @@ function parseHabbowidgetsHtml(
         'photos' => $photos,
         'ticker' => $ticker,
         'clothing' => array_values($clothing),
-        'habbowidgetsCounts' => $counts,
+        'sourceCounts' => $counts,
     ];
 
     return [
@@ -1584,7 +1667,7 @@ function parsePreviousMottos(DOMXPath $xpath, DOMNode $summary): array
                 'motto' => trim($parts[2]),
                 'changedAt' => normalizeDate(trim($parts[1])),
                 'date' => normalizeDate(trim($parts[1])),
-                'source' => 'habbowidgets',
+                'source' => 'toxic-history',
                 'datePrecision' => 'observed',
             ];
         }
@@ -1613,7 +1696,7 @@ function parsePreviousStyles(DOMXPath $xpath, DOMNode $summary): array
             'changedAt' => $date,
             'date' => $date,
             'imageUrl' => $url,
-            'source' => 'habbowidgets',
+            'source' => 'toxic-history',
             'datePrecision' => 'observed',
         ];
     }
@@ -1700,7 +1783,7 @@ function parseBadgeNode(DOMXPath $xpath, DOMNode $node, bool $selected): array
         'isRare' => $isRare,
         'isNft' => (bool) $isNft,
         'rarity' => $rarity,
-        'source' => 'habbowidgets',
+        'source' => 'toxic-history',
         'datePrecision' => 'observed',
     ];
 }
@@ -1763,7 +1846,7 @@ function parseFriendNode(DOMXPath $xpath, DOMNode $node, bool $removed): array
         'avatarUrl' => $headUrl,
         'online' => false,
         'isOnline' => false,
-        'source' => 'habbowidgets',
+        'source' => 'toxic-history',
         'datePrecision' => 'observed',
     ];
     if ($removed) {
@@ -1853,7 +1936,7 @@ function parseHabbowidgetsPhotos(DOMXPath $xpath): array
             'likes' => $likerNames,
             'likers' => $likerNames,
             'likesCount' => $likesCount,
-            'source' => 'habbowidgets',
+            'source' => 'toxic-history',
             'datePrecision' => 'observed',
         ];
     }
@@ -1916,7 +1999,7 @@ function parseRoomNode(DOMXPath $xpath, DOMNode $node): array
         'thumbnailUrl' => $imageUrl,
         'url' => $imageUrl,
         'roomUrl' => $url,
-        'source' => 'habbowidgets',
+        'source' => 'toxic-history',
         'datePrecision' => 'observed',
     ];
 }
@@ -1996,7 +2079,7 @@ function parseGroupNode(DOMXPath $xpath, DOMNode $node): array
         'primaryColour' => (string) ($colors[0] ?? ''),
         'secondaryColour' => (string) ($colors[1] ?? ''),
         'colors' => $colors,
-        'source' => 'habbowidgets',
+        'source' => 'toxic-history',
         'datePrecision' => 'observed',
     ];
 }
@@ -2084,7 +2167,7 @@ function parseGroupFragmentsFromHtml(string $html): array
             'primaryColour' => (string) ($colors[0] ?? ''),
             'secondaryColour' => (string) ($colors[1] ?? ''),
             'colors' => $colors,
-            'source' => 'habbowidgets',
+            'source' => 'toxic-history',
             'datePrecision' => 'observed',
         ];
     }
@@ -2175,7 +2258,7 @@ function parseTicker(DOMXPath $xpath): array
             'url' => $url,
             'roomId' => $roomId,
             'previousName' => $previousName,
-            'source' => 'habbowidgets-ticker',
+            'source' => 'toxic-history',
             'datePrecision' => 'observed',
         ];
     }
@@ -2257,12 +2340,12 @@ function clothingRecord(
     string $hotel,
     string $closetUrl = ''
 ): array {
-    $name = trim($name) !== '' ? trim($name) : $code;
+    $name = sanitizeClothingName($name, $code);
     $category = trim($category);
     if ($category === '') {
         $category = clothingSlotName($slot, $hotel);
     }
-    if ($iconUrl === '') {
+    if ($iconUrl === '' || str_contains(strtolower($iconUrl), 'habbowidgets')) {
         $iconUrl = rarityIconUrl($rarity);
     }
     return [
@@ -2286,9 +2369,28 @@ function clothingRecord(
         'iconUrl' => $iconUrl,
         'imageUrl' => $iconUrl,
         'rarityIconUrl' => $iconUrl,
-        'closetUrl' => $closetUrl,
-        'source' => 'habbowidgets-closet',
+        'closetUrl' => '',
+        'source' => 'toxic',
     ];
+}
+
+function sanitizeClothingName(string $name, string $code): string
+{
+    $clean = normalizeText($name);
+    $clean = preg_replace(
+        '/\s*[-–|]\s*(?:Habbo\s+(?:Guarda[- ]Roupa|Closet).*|Habbo\s*Widgets(?:\.com)?.*)$/iu',
+        '',
+        $clean
+    ) ?? $clean;
+    $clean = preg_replace('/\s*Habbo\s*Widgets(?:\.com)?\s*/iu', ' ', $clean) ?? $clean;
+    $clean = normalizeText($clean);
+    if (
+        $clean === ''
+        || preg_match('/^(?:de|from)\s+(?:rosto\s*&\s*corpo|face\s*&\s*body|cabelo|hair|roupas?|clothes?)$/iu', $clean)
+    ) {
+        return $code;
+    }
+    return $clean;
 }
 
 function clothingSlotName(string $slot, string $hotel): string
@@ -2345,9 +2447,8 @@ function clothingRarity(string $code, string $name, string $iconUrl): string
 
 function rarityIconUrl(string $rarity): string
 {
-    // O HabboWidgets expõe apenas kld1 (comum) e kld2 (especial/raro).
-    // NFT mantém sua classificação própria, mas reutiliza o indicador especial.
-    return HABBOWIDGETS_BASE . '/images/' . ($rarity === 'generic' ? 'kld1.gif' : 'kld2.gif');
+    $type = in_array($rarity, ['generic', 'rare', 'nft'], true) ? $rarity : 'generic';
+    return 'https://atoxic.com.br/api.php/rarity-icon/' . $type;
 }
 
 function localeKeyForHotel(string $hotel): string
@@ -2503,29 +2604,24 @@ function mergeCurrentAndHistoricalData(
     $motto = firstString($officialUser, ['motto', 'mission'])
         ?: firstString($widget, ['motto', 'mission']);
 
-    $officialVisible = firstBool(
+    $officialVisible = firstNullableBool(
         $officialUser,
-        ['profileVisible', 'isProfileVisible', 'visible'],
-        true
+        ['profileVisible', 'isProfileVisible', 'visible']
     );
-    $widgetVisible = firstBool(
+    if ($officialVisible === null) {
+        $officialVisible = firstNullableBool(
+            $officialProfile,
+            ['profileVisible', 'isProfileVisible', 'visible']
+        );
+    }
+    $widgetVisible = firstNullableBool(
         $widget,
-        ['profileVisible', 'isProfileVisible', 'visible'],
-        true
+        ['profileVisible', 'isProfileVisible', 'visible']
     );
-    $visible = $officialVisible && $widgetVisible;
-    $banned = firstBool(
-        $officialUser,
-        ['isBanned', 'banned', 'ban', 'is_banned'],
-        false
-    ) || firstBool(
-        $widget,
-        ['isBanned', 'banned', 'ban', 'is_banned'],
-        false
-    );
+    $visible = $officialVisible ?? $widgetVisible ?? true;
 
     $officialSelected = normalizeOfficialBadges(
-        extractArrayFromKeys($officialUser, ['selectedBadges', 'badges'])
+        extractArrayFromKeys($officialUser, ['selectedBadges'])
     );
     $widgetSelected = extractArrayFromKeys($widget, ['selectedBadges']);
     $selectedBadges = mergeLists($officialSelected, $widgetSelected, ['code']);
@@ -2583,8 +2679,8 @@ function mergeCurrentAndHistoricalData(
     if ($starGems === '') {
         $starGems = firstString($widget, ['starGemCount', 'starGems']);
     }
-    $widgetCounts = is_array($widget['habbowidgetsCounts'] ?? null)
-        ? $widget['habbowidgetsCounts']
+    $widgetCounts = is_array($widget['sourceCounts'] ?? null)
+        ? $widget['sourceCounts']
         : [];
 
     return [
@@ -2607,8 +2703,6 @@ function mergeCurrentAndHistoricalData(
         'isProfileVisible' => $visible,
         'visible' => $visible,
         'privateProfile' => !$visible,
-        'isBanned' => $banned,
-        'banned' => $banned,
         'memberSince' => firstString(
             $officialUser,
             ['memberSince', 'creationTime', 'createdAt', 'registeredAt']
@@ -2650,7 +2744,7 @@ function mergeCurrentAndHistoricalData(
         'photos' => $photos,
         'ticker' => extractArrayFromKeys($widget, ['ticker']),
         'clothing' => extractArrayFromKeys($widget, ['clothing']),
-        'habbowidgetsCounts' => $widgetCounts,
+        'sourceCounts' => $widgetCounts,
     ];
 }
 
@@ -2851,6 +2945,11 @@ function firstString(array $data, array $keys): string
 
 function firstBool(array $data, array $keys, bool $fallback): bool
 {
+    return firstNullableBool($data, $keys) ?? $fallback;
+}
+
+function firstNullableBool(array $data, array $keys): ?bool
+{
     foreach ($keys as $key) {
         if (!array_key_exists($key, $data)) {
             continue;
@@ -2869,7 +2968,7 @@ function firstBool(array $data, array $keys, bool $fallback): bool
             }
         }
     }
-    return $fallback;
+    return null;
 }
 
 function mergeRecord(array $primary, array $secondary): array
@@ -3243,7 +3342,9 @@ function filterHabbowidgetsRecords(array $items): array
                 return false;
             }
             $source = strtolower(firstString($item, ['source']));
-            return $source === '' || str_contains($source, 'habbowidgets');
+            return $source === ''
+                || $source === 'toxic-history'
+                || str_contains($source, 'habbowidgets');
         }
     ));
 }
@@ -3362,6 +3463,9 @@ function closetCacheFile(string $hotel, string $code): string
 
 function saveClosetMetadata(string $hotel, array $item): void
 {
+    if (!ENABLE_API_CACHE) {
+        return;
+    }
     $code = firstString($item, ['code', 'classname', 'id']);
     if ($code === '') {
         return;
@@ -3374,6 +3478,9 @@ function saveClosetMetadata(string $hotel, array $item): void
 
 function readClosetMetadata(string $hotel, string $code): ?array
 {
+    if (!ENABLE_API_CACHE) {
+        return null;
+    }
     $record = readJsonFile(closetCacheFile($hotel, $code));
     if (
         !is_array($record)
@@ -3432,7 +3539,7 @@ function clothingFromFigure(string $figure, string $hotel): array
     $payload['items'] = $result;
     $payload['total'] = count($result);
     $payload['meta'] = [
-        'provider' => 'habbowidgets-closet',
+        'provider' => 'toxic',
         'figureString' => $figure,
         'hotel' => $hotel,
         'rarityIcons' => [
@@ -3440,7 +3547,7 @@ function clothingFromFigure(string $figure, string $hotel): array
             'rare' => rarityIconUrl('rare'),
             'nft' => rarityIconUrl('nft'),
         ],
-        'note' => 'NFT usa o indicador especial do HabboWidgets; a classificação permanece nft.',
+        'note' => 'Os indicadores distinguem item genérico, raro e NFT.',
     ];
     return [$payload, $allFromCache];
 }
@@ -3495,6 +3602,7 @@ function parseClosetMetadataHtml(
     if (preg_match('/^' . preg_quote($code, '/') . '\s+from\s+/i', $name)) {
         $name = $code;
     }
+    $name = sanitizeClothingName($name, $code);
     $category = '';
     if (preg_match('/\bfrom\s+(.+?)\s+-\s+Habbo Closet/i', $pageTitle, $match)) {
         $category = normalizeText($match[1]);
@@ -3520,9 +3628,9 @@ function suggestProfiles(string $query, string $hotel): array
     $queryKey = normalizeKey($query);
     $items = [];
     $seen = [];
-    $cacheHit = true;
+    $cacheHit = false;
 
-    $files = glob(CACHE_ROOT . '/profiles/*.json') ?: [];
+    $files = ENABLE_API_CACHE ? (glob(CACHE_ROOT . '/profiles/*.json') ?: []) : [];
     $checked = 0;
     foreach ($files as $file) {
         if ($checked++ >= 1_000) {

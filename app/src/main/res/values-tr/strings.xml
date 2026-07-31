@@ -43,10 +43,8 @@
     <string name="item_name">Görünüm adı</string>
     <string name="collection">Koleksiyon</string>
     <string name="image">Görsel</string>
-    <string name="thumbnail">Küçük resim</string>
     <string name="disclaimer1">Bu uygulama Sulake Corporation Oy veya bağlı kuruluşlarıyla ilişkili değildir; onlar tarafından onaylanmaz, desteklenmez veya özellikle onaylanmış değildir.</string>
     <string name="profile_private">Gizli</string>
-    <string name="banned">Banlı</string>
     <string name="status">Durum</string>
     <string name="online">Çevrimiçi</string>
     <string name="offline">Çevrimdışı</string>

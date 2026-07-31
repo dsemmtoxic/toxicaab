@@ -43,10 +43,8 @@
     <string name="item_name">Nome del look</string>
     <string name="collection">Collezione</string>
     <string name="image">Immagine</string>
-    <string name="thumbnail">Miniatura</string>
     <string name="disclaimer1">Questa applicazione non è affiliata, approvata, sponsorizzata o specificamente approvata da Sulake Corporation Oy o dalle sue affiliate.</string>
     <string name="profile_private">Privato</string>
-    <string name="banned">Bannato</string>
     <string name="status">Stato</string>
     <string name="online">Online</string>
     <string name="offline">Offline</string>

@@ -43,10 +43,8 @@
     <string name="item_name">Naam van de look</string>
     <string name="collection">Collectie</string>
     <string name="image">Afbeelding</string>
-    <string name="thumbnail">Miniatuur</string>
     <string name="disclaimer1">Deze applicatie is niet verbonden met, onderschreven door, gesponsord door of specifiek goedgekeurd door Sulake Corporation Oy of haar gelieerde ondernemingen.</string>
     <string name="profile_private">Privé</string>
-    <string name="banned">Verbannen</string>
     <string name="status">Status</string>
     <string name="online">Online</string>
     <string name="offline">Offline</string>

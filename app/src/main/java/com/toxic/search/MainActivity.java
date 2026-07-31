@@ -52,7 +52,7 @@ import java.util.concurrent.*;
 
 public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
-    private static final String GENERIC_CLOTHING_ICON = "https://www.habbowidgets.com/images/kld1.gif";
+    private static final String GENERIC_CLOTHING_ICON = PROFILE_API + "/rarity-icon/generic";
     private final ExecutorService executor = Executors.newFixedThreadPool(10);
     private FrameLayout screen;
     private LinearLayout root, resultWrap;
@@ -80,9 +80,6 @@ public class MainActivity extends Activity {
     private String currentLoadedNick = "";
     private int inlineProgressPct = 0;
     private String inlineProgressMessage = "";
-    private final ConcurrentHashMap<String, ProfileResult> profileCache = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, Long> profileCacheTimes = new ConcurrentHashMap<>();
-    private static final long SESSION_CACHE_TTL_MS = 5L * 60L * 1000L;
     private ProfileResult activeRenderedProfile = null;
     private final ArrayDeque<ProfileResult> profileHistory = new ArrayDeque<>();
     private static final int PROFILE_HISTORY_LIMIT = 25;
@@ -310,6 +307,7 @@ public class MainActivity extends Activity {
             currentHotelKey = defaultHotelForDeviceLocale();
             getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PREF_HOTEL, currentHotelKey).apply();
         }
+        clearLegacyApiProfileCache();
         try {
             habboFont = Typeface.createFromAsset(getAssets(), "fonts/ubuntu_habbo.ttf");
         } catch (Exception e) {
@@ -2407,13 +2405,7 @@ public class MainActivity extends Activity {
                 ProfileResult fresh = loadProfile(nick, false, token);
                 if (!isActiveToken(token)) return;
 
-                // Nunca reutiliza cache por nick em pesquisa manual: nicks podem ser reutilizados
-                // por contas diferentes (ativa/banida). O cache seguro é por uniqueId.
-                String resolvedCacheKey = !normalizeNickKey(fresh.uniqueId).isEmpty() ? normalizeNickKey(fresh.uniqueId) : nickKey;
-                ProfileResult cached = getCachedProfile(resolvedCacheKey);
-                final ProfileResult r = mergeFreshIntoCachedSafely(cached, fresh);
-                putProfileCache(r, resolvedCacheKey);
-                saveProfileCache(r, resolvedCacheKey);
+                final ProfileResult r = fresh;
 
                 runOnUiThread(() -> {
                     if (!isActiveToken(token)) return;
@@ -2422,10 +2414,6 @@ public class MainActivity extends Activity {
                 });
 
                 completeProfileSections(r, token);
-
-                if (!isActiveToken(token)) return;
-                putProfileCache(r, resolvedCacheKey);
-                saveProfileCache(r, resolvedCacheKey);
 
                 runOnUiThread(() -> {
                     if (!isActiveToken(token)) return;
@@ -2536,10 +2524,7 @@ public class MainActivity extends Activity {
                 ProfileResult fresh = loadProfileByUniqueId(id, shownNick, false, token);
                 if (!isActiveToken(token)) return;
 
-                ProfileResult cached = getCachedProfile(idKey);
-                final ProfileResult r = mergeFreshIntoCachedSafely(cached, fresh);
-                putProfileCache(r, idKey);
-                saveProfileCache(r, idKey);
+                final ProfileResult r = fresh;
 
                 runOnUiThread(() -> {
                     if (!isActiveToken(token)) return;
@@ -2548,10 +2533,6 @@ public class MainActivity extends Activity {
                 });
 
                 completeProfileSections(r, token);
-
-                if (!isActiveToken(token)) return;
-                putProfileCache(r, idKey);
-                saveProfileCache(r, idKey);
 
                 runOnUiThread(() -> {
                     if (!isActiveToken(token)) return;
@@ -2596,11 +2577,11 @@ public class MainActivity extends Activity {
         r.uniqueId = uniqueId == null ? "" : uniqueId.trim();
         r.hotelKey = currentHotelKey;
 
-        JSONObject dexProfile = r.uniqueId.isEmpty() ? null : validProfileObject(unwrap(tryJson(habbodexProfileByUniqueUrl(r.uniqueId))));
-        if (dexProfile != null && !isSameProfileId(r.uniqueId, dexProfile)) dexProfile = null;
         JSONObject officialProfile = r.uniqueId.isEmpty() ? null : tryJson(habboApiUrl("/api/public/users/" + enc(r.uniqueId) + "/profile"));
         JSONObject officialUser = officialProfile == null ? null : officialProfile.optJSONObject("user");
-        JSONObject base = firstObject(validProfileObject(dexProfile), validProfileObject(officialUser), validProfileObject(officialProfile));
+        JSONObject dexProfile = r.uniqueId.isEmpty() ? null : validProfileObject(unwrap(tryJson(habbodexProfileByUniqueUrl(r.uniqueId))));
+        if (dexProfile != null && !isSameProfileId(r.uniqueId, dexProfile)) dexProfile = null;
+        JSONObject base = firstObject(validProfileObject(officialUser), validProfileObject(officialProfile), validProfileObject(dexProfile));
         if (base == null) throw new ProfileNotFoundException(r.searchedNick, new ArrayList<>());
 
         if (r.uniqueId.isEmpty()) r.uniqueId = firstText(base, "uniqueId", "id", "habboId");
@@ -2608,26 +2589,29 @@ public class MainActivity extends Activity {
         if (r.name.isEmpty()) r.name = r.searchedNick;
         r.figure = firstText(base, "figureString", "figure", "figure_string");
         if (r.figure.isEmpty() && officialUser != null) r.figure = firstText(officialUser, "figureString", "figure", "figure_string");
+        if (r.figure.isEmpty()) r.figure = firstText(dexProfile, "figureString", "figure", "figure_string");
         if (!r.figure.isEmpty()) updateLoadingProfileFigureHint(r.figure, token);
         if (r.figure.isEmpty()) r.figure = "hd-180-1";
         r.motto = firstText(base, "motto", "mission");
         if (r.motto.isEmpty() && officialUser != null) r.motto = firstText(officialUser, "motto", "mission");
+        if (r.motto.isEmpty()) r.motto = firstText(dexProfile, "motto", "mission");
         r.online = optBoolAny(base, false, "online", "isOnline");
         if (officialUser != null && officialUser.has("online")) r.online = officialUser.optBoolean("online", r.online);
-        r.privateProfile = !optBoolAny(base, true, "profileVisible", "isProfileVisible", "visible");
-        if (officialUser != null && officialUser.has("profileVisible")) r.privateProfile = !officialUser.optBoolean("profileVisible", true);
-        if (officialProfile == null && !r.uniqueId.isEmpty()) r.privateProfile = true;
-        if (isPrivateProfileFromSources(base, dexProfile, officialProfile, officialUser)) r.privateProfile = true;
-        r.banned = optBoolTrue(base, "isBanned", "banned", "ban", "is_banned") || isBannedProfileFromSources(base, dexProfile, officialProfile, officialUser);
+        r.privateProfile = resolveProfilePrivate(officialUser, officialProfile, dexProfile, null);
         r.memberSince = firstText(base, "memberSince", "creationTime", "createdAt", "registeredAt", "created_at", "registerDate", "registrationDate");
         if (r.memberSince.isEmpty() && officialUser != null) r.memberSince = firstText(officialUser, "memberSince", "creationTime", "createdAt", "registeredAt", "created_at", "registerDate", "registrationDate");
+        if (r.memberSince.isEmpty()) r.memberSince = firstText(dexProfile, "memberSince", "creationTime", "createdAt", "registeredAt", "created_at", "registerDate", "registrationDate");
         r.lastAccess = firstText(base, "lastAccessTime", "lastLoginTime", "lastOnline", "lastVisit");
         if (r.lastAccess.isEmpty() && officialUser != null) r.lastAccess = firstText(officialUser, "lastAccessTime", "lastLoginTime", "lastOnline", "lastVisit");
+        if (r.lastAccess.isEmpty()) r.lastAccess = firstText(dexProfile, "lastAccessTime", "lastLoginTime", "lastOnline", "lastVisit");
         r.level = firstText(base, "currentLevel", "level");
+        if (r.level.isEmpty()) r.level = firstText(dexProfile, "currentLevel", "level");
         r.starGems = firstText(base, "starGemCount", "starGems");
+        if (r.starGems.isEmpty()) r.starGems = firstText(dexProfile, "starGemCount", "starGems");
         r.totalBadges = firstText(base, "totalBadges", "badgeCount", "badgesCount", "badgesTotal");
+        if (r.totalBadges.isEmpty()) r.totalBadges = firstText(dexProfile, "totalBadges", "badgeCount", "badgesCount", "badgesTotal");
         r.previousNames = extractList(dexProfile, "previousNames");
-        r.selectedBadges = extractListFromKeys(dexProfile, "selectedBadges", "badges");
+        r.selectedBadges = mergeLists(extractList(officialUser, "selectedBadges"), extractList(dexProfile, "selectedBadges"));
         r.dexProfile = dexProfile;
         r.officialProfile = officialProfile;
         if (officialProfile != null) {
@@ -2651,9 +2635,8 @@ public class MainActivity extends Activity {
         JSONObject dexByName = validProfileObject(dexByNameRaw);
         JSONObject suggest = unwrap(tryJson(habbodexSuggestUrl(nick)));
 
-        // Se a API oficial achou uma conta, ela define a identidade correta da busca por nick.
-        // Habbodex por nome pode devolver outra conta com o mesmo nick/case antigo (ex.: ativa + banida).
-        // Só use dados do Habbodex por nome quando o uniqueId for o mesmo.
+        // A API oficial define a identidade da busca. A API da Toxic apenas
+        // complementa os campos e históricos quando pertence ao mesmo uniqueId.
         if (habboPublic != null && dexByName != null && !isSameProfileObject(habboPublic, dexByName)) {
             dexByName = null;
         }
@@ -2674,10 +2657,7 @@ public class MainActivity extends Activity {
         if (r.motto.isEmpty() && habboPublic != null) r.motto = habboPublic.optString("motto", "");
         r.online = optBoolAny(base, false, "online", "isOnline");
         if (habboPublic != null && habboPublic.has("online")) r.online = habboPublic.optBoolean("online", r.online);
-        r.privateProfile = !optBoolAny(base, true, "profileVisible", "isProfileVisible", "visible");
-        if (habboPublic != null && habboPublic.has("profileVisible")) r.privateProfile = !habboPublic.optBoolean("profileVisible", true);
-        if (isPrivateProfileFromSources(base, habboPublic, dexByName)) r.privateProfile = true;
-        r.banned = isSameProfileObject(base, habboPublic) ? false : (optBoolTrue(base, "isBanned", "banned", "ban", "is_banned") || isBannedProfileFromSources(base, dexByName));
+        r.privateProfile = resolveProfilePrivate(habboPublic, null, dexByName, null);
         r.memberSince = firstText(base, "memberSince", "creationTime", "createdAt", "registeredAt", "created_at", "registerDate", "registrationDate");
         if (r.memberSince.isEmpty() && habboPublic != null) r.memberSince = habboPublic.optString("memberSince", "");
         r.lastAccess = firstText(base, "lastAccessTime", "lastLoginTime", "lastOnline", "lastVisit");
@@ -2685,15 +2665,13 @@ public class MainActivity extends Activity {
         r.starGems = firstText(base, "starGemCount", "starGems");
         r.totalBadges = firstText(base, "totalBadges", "badgeCount", "badgesCount", "badgesTotal");
         r.previousNames = mergeLists(extractList(dexByName, "previousNames"), extractPreviousNamesFromSuggest(suggest, r.name));
-        r.selectedBadges = extractListFromKeys(dexByName, "selectedBadges", "badges");
+        r.selectedBadges = extractList(dexByName, "selectedBadges");
 
         if (!r.uniqueId.isEmpty()) {
             JSONObject dexProfile = validProfileObject(unwrap(tryJson(habbodexProfileByUniqueUrl(r.uniqueId))));
             if (dexProfile != null && !isSameProfileId(r.uniqueId, dexProfile)) dexProfile = null;
             if (dexProfile != null) {
                 r.dexProfile = dexProfile;
-                if (isPrivateProfileFromSources(dexProfile)) r.privateProfile = true;
-                if (isBannedProfileFromSources(dexProfile)) r.banned = true;
                 if (r.motto.isEmpty()) r.motto = firstText(dexProfile, "motto", "mission");
                 if (r.memberSince.isEmpty()) r.memberSince = firstText(dexProfile, "memberSince", "creationTime", "createdAt", "registeredAt", "created_at", "registerDate", "registrationDate");
                 if (r.lastAccess.isEmpty()) r.lastAccess = firstText(dexProfile, "lastAccessTime", "lastLoginTime", "lastOnline");
@@ -2702,30 +2680,28 @@ public class MainActivity extends Activity {
                 if (r.starGems.isEmpty()) r.starGems = firstText(dexProfile, "starGemCount", "starGems");
                 if (r.totalBadges.isEmpty()) r.totalBadges = firstText(dexProfile, "totalBadges", "badgeCount", "badgesCount", "badgesTotal");
                 r.previousNames = mergeLists(r.previousNames, extractList(dexProfile, "previousNames"));
-                r.selectedBadges = mergeLists(r.selectedBadges, extractListFromKeys(dexProfile, "selectedBadges", "badges"));
+                r.selectedBadges = mergeLists(r.selectedBadges, extractList(dexProfile, "selectedBadges"));
             }
 
             JSONObject officialProfile = tryJson(habboApiUrl("/api/public/users/" + enc(r.uniqueId) + "/profile"));
             r.officialProfile = officialProfile;
-            if (officialProfile == null && !r.uniqueId.isEmpty()) r.privateProfile = true;
-            if (officialProfile != null && isPrivateProfileFromSources(officialProfile)) r.privateProfile = true;
             if (officialProfile != null) {
                 JSONObject user = officialProfile.optJSONObject("user");
                 if (user != null) {
-                    if (isPrivateProfileFromSources(user)) r.privateProfile = true;
-                    if (isBannedProfileFromSources(user)) r.banned = true;
                     if (r.level.isEmpty()) r.level = firstText(user, "currentLevel", "level");
                     if (r.starGems.isEmpty()) r.starGems = firstText(user, "starGemCount", "starGems");
                     if (r.totalBadges.isEmpty()) r.totalBadges = firstText(user, "totalBadges", "badgeCount", "badgesCount", "badgesTotal");
                     if (r.memberSince.isEmpty()) r.memberSince = firstText(user, "memberSince", "creationTime", "createdAt", "registeredAt", "created_at", "registerDate", "registrationDate");
                     if (r.lastAccess.isEmpty()) r.lastAccess = firstText(user, "lastAccessTime", "lastLoginTime", "lastOnline");
                     r.online = optBoolAny(user, r.online, "online", "isOnline");
-                    r.selectedBadges = mergeLists(r.selectedBadges, extractListFromKeys(user, "selectedBadges", "badges"));
+                    r.selectedBadges = mergeLists(extractList(user, "selectedBadges"), r.selectedBadges);
                 }
                 r.friends = mergeLists(r.friends, extractList(officialProfile, "friends"));
                 r.rooms = mergeLists(r.rooms, extractList(officialProfile, "rooms"));
                 r.groups = mergeLists(r.groups, extractList(officialProfile, "groups"));
             }
+            JSONObject officialUser = officialProfile == null ? null : officialProfile.optJSONObject("user");
+            r.privateProfile = resolveProfilePrivate(habboPublic, officialUser, r.dexProfile, dexByName);
             if (includeSections) {
                 completeProfileSections(r, activeSearchToken);
             }
@@ -2741,8 +2717,6 @@ public class MainActivity extends Activity {
         if (photosPage != null) applyPhotosPage(r, photosPage, true);
         try { enrichPhotoRoomInfo(r); } catch(Exception ignored) {}
         if (!isActiveToken(token)) return;
-        putProfileCache(r, activeSearchNick);
-        saveProfileCache(r, activeSearchNick);
         runOnUiThread(() -> {
             if (!isActiveToken(token)) return;
             showInlineLoading(t(R.string.loading_history));
@@ -2753,8 +2727,6 @@ public class MainActivity extends Activity {
         try { mottos = fetchAll(r.uniqueId, "previous-mottos", null, 100, 3); } catch(Exception ignored) {}
         if (mottos != null) r.previousMottos = mottos;
         if (!isActiveToken(token)) return;
-        putProfileCache(r, activeSearchNick);
-        saveProfileCache(r, activeSearchNick);
         runOnUiThread(() -> {
             if (!isActiveToken(token)) return;
             showInlineLoading(t(R.string.loading_styles_friends));
@@ -2763,7 +2735,9 @@ public class MainActivity extends Activity {
 
         PageResult badgesPage = null;
         try { badgesPage = fetchPage(r.uniqueId, "selected-badges", null, 1, 20); } catch(Exception ignored) {}
-        if (badgesPage != null && badgesPage.items != null && !badgesPage.items.isEmpty()) r.selectedBadges = mergeLists(badgesPage.items, r.selectedBadges);
+        if (badgesPage != null && badgesPage.items != null && !badgesPage.items.isEmpty()) {
+            r.selectedBadges = new ArrayList<>(badgesPage.items);
+        }
 
         PageResult allBadgesPage = null;
         try { allBadgesPage = fetchAllBadges(r.uniqueId, true, 100, 25); } catch(Exception ignored) {}
@@ -2794,8 +2768,6 @@ public class MainActivity extends Activity {
         try { removedFriends = fetchAll(r.uniqueId, "previous-friends", null, 100, 50); } catch(Exception ignored) {}
         if (removedFriends != null) r.oldFriends = removedFriends;
         if (!isActiveToken(token)) return;
-        putProfileCache(r, activeSearchNick);
-        saveProfileCache(r, activeSearchNick);
         runOnUiThread(() -> {
             if (!isActiveToken(token)) return;
             showInlineLoading(t(R.string.loading_rooms_groups));
@@ -2818,8 +2790,6 @@ public class MainActivity extends Activity {
         if (!isActiveToken(token)) return;
 
         try { enrichPhotoRoomInfo(r); } catch(Exception ignored) {}
-        putProfileCache(r, activeSearchNick);
-        saveProfileCache(r, activeSearchNick);
     }
 
     private PageResult fetchBadgesPage(String uniqueId, int page, int limit, boolean hideAchievements) {
@@ -3060,8 +3030,6 @@ public class MainActivity extends Activity {
                 if (!isActiveToken(token)) return;
                 applyPhotosPage(r, next, false);
                 try { enrichPhotoRoomInfo(r); } catch(Exception ignored) {}
-                putProfileCache(r, activeSearchNick);
-                saveProfileCache(r, activeSearchNick);
             } catch (Exception ignored) {
             } finally {
                 r.photosLoading = false;
@@ -3085,8 +3053,6 @@ public class MainActivity extends Activity {
                 PageResult next = fetchPageChunk(r.uniqueId, "previous-styles", null, page, PAGE_CHUNK, PAGE_CHUNK);
                 if (!isActiveToken(token)) return;
                 applyStylesPage(r, next, false);
-                putProfileCache(r, activeSearchNick);
-                saveProfileCache(r, activeSearchNick);
             } catch (Exception ignored) {
             } finally {
                 r.stylesLoading = false;
@@ -3120,7 +3086,7 @@ public class MainActivity extends Activity {
         normalizeProfileState(r);
         activeRenderedProfile = r;
         rememberOpenedProfile(r);
-        currentProfilePrivate = r != null && (r.privateProfile || r.banned);
+        currentProfilePrivate = r != null && r.privateProfile;
         profileAvatarTutorialTarget = null;
         profileFavoriteTutorialTarget = null;
         profileFriendTutorialTarget = null;
@@ -3182,7 +3148,6 @@ public class MainActivity extends Activity {
         badges.setOrientation(LinearLayout.HORIZONTAL);
         profile.addView(badges, lp(-1, -2, 0, 0, 0, 6));
         if (r.privateProfile) badges.addView(profileBadge(t(R.string.profile_private), "lock", red));
-        if (r.banned) { LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-2, -2); p.leftMargin=dp(8); badges.addView(profileBadge(t(R.string.banned), "banned", red), p); }
 
         addSelectedBadges(r.selectedBadges);
         addPreviousNames(r.previousNames);
@@ -3202,16 +3167,7 @@ public class MainActivity extends Activity {
         row.setGravity(Gravity.CENTER);
         row.setPadding(dp(8), dp(5), dp(10), dp(5));
         row.setBackground(round(adjustAlpha(color, 0.32f), dp(999), adjustAlpha(color, 0.55f), 1));
-        View badgeIcon;
-        if ("banned".equals(icon)) {
-            TextView bannedChar = habboText("ª", 10, true);
-            bannedChar.setGravity(Gravity.CENTER);
-            bannedChar.setIncludeFontPadding(false);
-            bannedChar.setTextColor(Color.WHITE);
-            badgeIcon = bannedChar;
-        } else {
-            badgeIcon = new IconView(this, icon);
-        }
+        View badgeIcon = new IconView(this, icon);
         row.addView(badgeIcon, new LinearLayout.LayoutParams(dp(14), dp(14)));
         TextView tv = text(label, 13, Color.WHITE, true);
         tv.setTextColor(Color.WHITE);
@@ -3591,7 +3547,16 @@ public class MainActivity extends Activity {
     private String clothingName(JSONObject o, String fallback) {
         String n = pickLocalizedValue(o == null ? null : o.optJSONObject("localeNames"), fallback);
         if (n.isEmpty()) n = firstText(o, "name", "publicName", "furniName", "classname", "className", "code");
+        n = sanitizeClothingLabel(n);
         return n.isEmpty() ? fallback : n;
+    }
+
+    private String sanitizeClothingLabel(String value) {
+        String clean = value == null ? "" : value.trim();
+        if (clean.isEmpty()) return "";
+        clean = clean.replaceAll("(?iu)\\s*[-–|]\\s*(?:Habbo\\s+(?:Guarda[- ]Roupa|Closet)|[^-–|]*Habbo\\s*Widgets(?:\\.com)?).*?$", "");
+        clean = clean.replaceAll("(?iu)\\s*Habbo\\s*Widgets(?:\\.com)?\\s*", " ");
+        return clean.trim();
     }
 
     private String clothingLineName(JSONObject o, String fallback) {
@@ -3948,9 +3913,7 @@ public class MainActivity extends Activity {
     }
 
     private String getPhotoTimestamp(JSONObject photo) {
-        String formatted = firstText(photo, "formatted_time", "formattedTime");
-        if (!formatted.isEmpty()) return formatted;
-        return niceDate(firstText(photo, "creationTime", "time"));
+        return niceDateOnly(firstText(photo, "creationTime", "time", "createdAt", "formatted_time", "formattedTime"));
     }
 
     private int getPhotoLikesCount(JSONObject photo) {
@@ -4282,7 +4245,7 @@ public class MainActivity extends Activity {
         name.setEllipsize(TextUtils.TruncateAt.END);
         card.addView(name, lp(-1,-2,0,2,0,6));
 
-        TextView d = text(niceDate(date), 12, Color.argb(185,255,255,255), false);
+        TextView d = text(niceDateOnly(date), 12, Color.argb(185,255,255,255), false);
         d.setGravity(Gravity.CENTER);
         card.addView(d, lp(-1,-2,0,0,0,0));
 
@@ -4965,11 +4928,7 @@ private int loadingProgressFor(String message) {
         walker.setScaleType(ImageView.ScaleType.FIT_CENTER);
         walker.setPadding(dp(20), dp(10), dp(20), dp(84));
         avatar.addView(walker, new FrameLayout.LayoutParams(-1, -1));
-        String nick = searchInput == null ? "" : searchInput.getText().toString().trim();
         String cachedFigure = loadingProfileFigureHint == null ? "" : loadingProfileFigureHint.trim();
-        String lookupKey = loadingProfileUniqueIdHint == null || loadingProfileUniqueIdHint.trim().isEmpty() ? nick : loadingProfileUniqueIdHint.trim();
-        ProfileResult cachedProfile = getCachedProfile(lookupKey);
-        if ((cachedFigure == null || cachedFigure.trim().isEmpty()) && cachedProfile != null) cachedFigure = cachedProfile.figure;
         if (cachedFigure == null || cachedFigure.trim().isEmpty()) {
             // Figure neutra usada somente durante o loader quando ainda não sabemos a figure real.
             cachedFigure = "hd-6295";
@@ -5072,7 +5031,7 @@ private int loadingProgressFor(String message) {
         return PROFILE_API + "/habboinfo/habbos?name=" + enc(name) + "&includePreviousNames=true&hotel=" + enc(habbodexHotelCode(currentHotelKey));
     }
 
-    private Object getJsonAny(String u) throws Exception { HttpURLConnection c = (HttpURLConnection)new URL(u).openConnection(); c.setConnectTimeout(12000); c.setReadTimeout(24000); c.setRequestProperty("Accept", "application/json, text/plain, */*"); c.setRequestProperty("User-Agent", "ToxicSearchTool/1.2.8 Android (+https://atoxic.com.br)"); c.setRequestProperty("X-Toxic-App", "1.2.8"); int code = c.getResponseCode(); InputStream is = code >= 200 && code < 300 ? c.getInputStream() : c.getErrorStream(); String body = readAll(is); if (code < 200 || code >= 300 || body == null || body.trim().isEmpty()) throw new IOException("HTTP " + code); String clean = body.trim(); return clean.startsWith("[") ? new JSONArray(clean) : new JSONObject(clean); }
+    private Object getJsonAny(String u) throws Exception { HttpURLConnection c = (HttpURLConnection)new URL(u).openConnection(); c.setUseCaches(false); c.setDefaultUseCaches(false); c.setConnectTimeout(12000); c.setReadTimeout(24000); c.setRequestProperty("Accept", "application/json, text/plain, */*"); c.setRequestProperty("Cache-Control", "no-cache, no-store"); c.setRequestProperty("Pragma", "no-cache"); c.setRequestProperty("User-Agent", "ToxicSearchTool/1.2.9 Android (+https://atoxic.com.br)"); c.setRequestProperty("X-Toxic-App", "1.2.9"); int code = c.getResponseCode(); InputStream is = code >= 200 && code < 300 ? c.getInputStream() : c.getErrorStream(); String body = readAll(is); if (code < 200 || code >= 300 || body == null || body.trim().isEmpty()) throw new IOException("HTTP " + code); String clean = body.trim(); return clean.startsWith("[") ? new JSONArray(clean) : new JSONObject(clean); }
     private JSONObject getJson(String u) throws Exception { Object any = getJsonAny(u); if (any instanceof JSONObject) return (JSONObject)any; JSONObject wrap = new JSONObject(); wrap.put("data", any); return wrap; }
     private JSONObject tryJson(String u) { try { return getJson(u); } catch (Exception e) { return null; } }
     private String readAll(InputStream is) throws IOException {
@@ -5120,10 +5079,15 @@ private int loadingProgressFor(String message) {
             final String finalHotel = hotel;
             executor.execute(() -> {
                 try {
-                    JSONObject dex = unwrap(tryJson(habbodexProfileByUniqueUrlForHotel(id, finalHotel)));
-                    String fetchedFigure = firstText(dex, "figureString", "figure", "figure_string");
+                    JSONObject officialProfile = tryJson("https://" + hotelDomain(finalHotel) + "/api/public/users/" + enc(id) + "/profile");
+                    JSONObject officialUser = officialProfile == null ? null : officialProfile.optJSONObject("user");
+                    String fetchedFigure = firstText(officialUser, "figureString", "figure", "figure_string");
+                    if (fetchedFigure.isEmpty()) fetchedFigure = firstText(officialProfile, "figureString", "figure", "figure_string");
                     if (!fetchedFigure.isEmpty()) {
-                        runOnUiThread(() -> loadHeadImage(view, avatarHead(fetchedFigure)));
+                        final String resolvedFigure = fetchedFigure;
+                        runOnUiThread(() -> loadHeadImage(view, avatarHead(resolvedFigure)));
+                    } else if (fallbackNick != null && !fallbackNick.trim().isEmpty()) {
+                        runOnUiThread(() -> loadHeadImage(view, avatarHeadByNameForHotel(fallbackNick.trim(), finalHotel)));
                     }
                 } catch(Exception ignored) {}
             });
@@ -5185,7 +5149,6 @@ private int loadingProgressFor(String message) {
     private JSONObject firstObject(JSONObject... objects) { for (JSONObject o : objects) if (o != null && o.length() > 0) return o; return null; }
     private JSONObject firstFromList(JSONObject obj) { ArrayList<JSONObject> list = extractList(obj, null); return list.isEmpty() ? null : list.get(0); }
     private ArrayList<JSONObject> extractPreviousNamesFromSuggest(JSONObject suggest, String currentName) { ArrayList<JSONObject> out = new ArrayList<>(); ArrayList<JSONObject> users = extractList(suggest, null); String low = currentName == null ? "" : currentName.toLowerCase(Locale.ROOT); for (JSONObject user : users) { String uname = firstText(user, "name", "username").toLowerCase(Locale.ROOT); if (!low.isEmpty() && !uname.equals(low)) continue; out.addAll(extractList(user, "previousNames")); } return out; }
-    private ArrayList<JSONObject> extractListFromKeys(JSONObject obj, String... keys) { ArrayList<JSONObject> out = new ArrayList<>(); if (obj == null) return out; for (String k : keys) out = mergeLists(out, extractList(obj, k)); return out; }
     private ArrayList<JSONObject> extractList(JSONObject data, String primaryKey) { ArrayList<JSONObject> out = new ArrayList<>(); if (data == null) return out; JSONArray arr = null; if (primaryKey != null && !primaryKey.isEmpty()) arr = data.optJSONArray(primaryKey); if (arr == null) arr = data.optJSONArray("result"); if (arr == null) arr = data.optJSONArray("results"); if (arr == null) arr = data.optJSONArray("data"); if (arr == null) arr = data.optJSONArray("items"); JSONObject d = data.optJSONObject("data"); if (arr == null && d != null) { if (primaryKey != null && !primaryKey.isEmpty()) arr = d.optJSONArray(primaryKey); if (arr == null) arr = d.optJSONArray("result"); if (arr == null) arr = d.optJSONArray("results"); if (arr == null) arr = d.optJSONArray("items"); } if (arr != null) for (int i=0; i<arr.length(); i++) { JSONObject o = arr.optJSONObject(i); if (o != null) out.add(o); } return out; }
     private ArrayList<JSONObject> mergeLists(ArrayList<JSONObject> a, ArrayList<JSONObject> b) { ArrayList<JSONObject> out = new ArrayList<>(); HashSet<String> seen = new HashSet<>(); if (a != null) addUnique(out, seen, a); if (b != null) addUnique(out, seen, b); return out; }
     private void addUnique(ArrayList<JSONObject> out, HashSet<String> seen, ArrayList<JSONObject> src) { for (JSONObject o : src) { String key = stableItemKey(o); if (seen.add(key)) out.add(o); } }
@@ -5201,8 +5164,6 @@ private int loadingProgressFor(String message) {
         return String.valueOf(o.toString().hashCode());
     }
     private String firstText(JSONObject o, String... keys) { if (o == null) return ""; for (String k : keys) { Object v = o.opt(k); if (v == null || v == JSONObject.NULL) continue; String s = String.valueOf(v).trim(); if (!s.isEmpty() && !"null".equalsIgnoreCase(s)) return s; } return ""; }
-    private boolean optBoolTrue(JSONObject o, String... keys) { if (o == null) return false; for (String k : keys) { if (!o.has(k)) continue; Object v = o.opt(k); if (v instanceof Boolean) return ((Boolean)v); String s = String.valueOf(v).trim().toLowerCase(Locale.ROOT); if (s.equals("true") || s.equals("1") || s.equals("yes")) return true; } return false; }
-
     private boolean optBoolAny(JSONObject o, boolean fallback, String... keys) { if (o == null) return fallback; for (String k : keys) if (o.has(k)) return o.optBoolean(k, fallback); return fallback; }
 
     private Boolean optBoolNullable(JSONObject o, String... keys) {
@@ -5239,33 +5200,34 @@ private int loadingProgressFor(String message) {
         return null;
     }
 
-    private boolean isPrivateProfileFromSources(JSONObject... sources) {
-        if (sources == null) return false;
+    private Boolean explicitProfileVisibility(JSONObject... sources) {
+        if (sources == null) return null;
         for (JSONObject source : sources) {
             if (source == null) continue;
             Boolean visible = optBoolNullableDeep(source, "profileVisible", "isProfileVisible", "visible");
-            if (visible != null && !visible) return true;
-            Boolean priv = optBoolNullableDeep(source, "privateProfile", "profilePrivate", "isPrivate", "isProfilePrivate", "private");
-            if (priv != null && priv) return true;
+            if (visible != null) return visible;
+            Boolean privateProfile = optBoolNullableDeep(source, "privateProfile", "profilePrivate", "isPrivate", "isProfilePrivate", "private");
+            if (privateProfile != null) return !privateProfile;
         }
-        return false;
+        return null;
     }
 
-    private boolean isBannedProfileFromSources(JSONObject... sources) {
-        if (sources == null) return false;
-        for (JSONObject source : sources) {
-            if (source == null) continue;
-            Boolean banned = optBoolNullableDeep(source, "isBanned", "banned", "ban", "is_banned");
-            if (banned != null && banned) return true;
-        }
-        return false;
+    private boolean resolveProfilePrivate(
+            JSONObject officialPrimary,
+            JSONObject officialSecondary,
+            JSONObject complementPrimary,
+            JSONObject complementSecondary
+    ) {
+        Boolean officialVisibility = explicitProfileVisibility(officialPrimary, officialSecondary);
+        if (officialVisibility != null) return !officialVisibility;
+        Boolean complementVisibility = explicitProfileVisibility(complementPrimary, complementSecondary);
+        return complementVisibility != null && !complementVisibility;
     }
 
     private void normalizeProfileState(ProfileResult r) {
         if (r == null) return;
         JSONObject officialUser = r.officialProfile == null ? null : r.officialProfile.optJSONObject("user");
-        if (isPrivateProfileFromSources(r.habboPublic, r.dex, r.dexProfile, r.officialProfile, officialUser)) r.privateProfile = true;
-        if (isBannedProfileFromSources(r.habboPublic, r.dex, r.dexProfile, r.officialProfile, officialUser)) r.banned = true;
+        r.privateProfile = resolveProfilePrivate(r.habboPublic, officialUser != null ? officialUser : r.officialProfile, r.dexProfile, r.dex);
     }
 
     private String avatarFull(String figure) { return avatarFull(figure, 2); }
@@ -5394,8 +5356,22 @@ private int loadingProgressFor(String message) {
         if (in == null || in.trim().isEmpty() || "null".equalsIgnoreCase(in.trim())) return "—";
         Date d = parseHabboDate(in);
         if (d == null) return in;
-        String pattern = "com".equals(normalizeHotelKey(currentHotelKey)) ? "MM/dd/yyyy" : "dd/MM/yyyy";
-        return new SimpleDateFormat(pattern, Locale.ROOT).format(d);
+        return DateFormat.getDateInstance(DateFormat.MEDIUM, hotelDateLocale()).format(d);
+    }
+
+    private Locale hotelDateLocale() {
+        switch (normalizeHotelKey(currentHotelKey)) {
+            case "com": return Locale.US;
+            case "br": return new Locale("pt", "BR");
+            case "es": return new Locale("es", "ES");
+            case "de": return Locale.GERMANY;
+            case "fr": return Locale.FRANCE;
+            case "fi": return new Locale("fi", "FI");
+            case "it": return Locale.ITALY;
+            case "nl": return new Locale("nl", "NL");
+            case "tr": return new Locale("tr", "TR");
+            default: return Locale.getDefault();
+        }
     }
 
     private String timeAgoText(String in) {
@@ -5460,143 +5436,11 @@ private int loadingProgressFor(String message) {
     }
 
 
-    private String profileCacheKey(String raw, String hotelKey) {
-        String key = normalizeNickKey(raw);
-        if (key.isEmpty()) return "";
-        String hotel = normalizeHotelKey(hotelKey);
-        if (hotel.isEmpty()) hotel = currentHotelKey;
-        return hotel + ":" + key;
-    }
-
-    private ProfileResult getCachedProfile(String nickKey) {
-        String key = profileCacheKey(nickKey, currentHotelKey);
-        if (key.isEmpty()) return null;
-        ProfileResult cached = profileCache.get(key);
-        Long cachedAt = profileCacheTimes.get(key);
-        if (cached == null || cachedAt == null) return null;
-        if (System.currentTimeMillis() - cachedAt > SESSION_CACHE_TTL_MS) {
-            profileCache.remove(key);
-            profileCacheTimes.remove(key);
-            return null;
-        }
-        return cached;
-    }
-
-    private void putProfileCache(ProfileResult r, String aliasKey) {
-        if (r == null) return;
-        cleanupSessionProfileCache();
-        String hotel = normalizeHotelKey(r.hotelKey);
-        if (hotel.isEmpty()) hotel = currentHotelKey;
-        long now = System.currentTimeMillis();
-
-        // Cache por nick é inseguro no Habbo porque o mesmo nick pode existir/reaparecer em outra conta
-        // enquanto outra conta antiga com o mesmo nick está banida. Cacheie por uniqueId e, no máximo,
-        // pelo alias quando o alias já é o próprio uniqueId.
-        String idKey = profileCacheKey(r.uniqueId, hotel);
-        if (!idKey.isEmpty()) {
-            profileCache.put(idKey, r);
-            profileCacheTimes.put(idKey, now);
-        }
-
-        String aliasRaw = normalizeNickKey(aliasKey);
-        String idRaw = normalizeNickKey(r.uniqueId);
-        if (!aliasRaw.isEmpty() && (idRaw.isEmpty() || aliasRaw.equals(idRaw))) {
-            String alias = profileCacheKey(aliasRaw, hotel);
-            if (!alias.isEmpty()) {
-                profileCache.put(alias, r);
-                profileCacheTimes.put(alias, now);
-            }
-        }
-    }
-
-    private void cleanupSessionProfileCache() {
-        long now = System.currentTimeMillis();
-        ArrayList<String> expired = new ArrayList<>();
-        for (Map.Entry<String, Long> e : profileCacheTimes.entrySet()) {
-            if (now - e.getValue() > SESSION_CACHE_TTL_MS) expired.add(e.getKey());
-        }
-        for (String k : expired) {
-            profileCache.remove(k);
-            profileCacheTimes.remove(k);
-        }
-    }
-
-    private File profileCacheDir() {
-        File dir = new File(getFilesDir(), "profile_cache");
-        if (!dir.exists()) dir.mkdirs();
-        return dir;
-    }
-
-    private File profileCacheFile(String key) {
-        String safe = normalizeNickKey(key).replaceAll("[^a-z0-9._-]", "_");
-        if (safe.isEmpty()) safe = "profile";
-        return new File(profileCacheDir(), safe + ".json");
-    }
-
-    private ProfileResult loadProfileCache(String key) {
+    private void clearLegacyApiProfileCache() {
         try {
-            File f = profileCacheFile(key);
-            if (!f.isFile()) return null;
-            int days = getCacheDaysSetting();
-            if (days > 0) {
-                long age = System.currentTimeMillis() - f.lastModified();
-                if (age > days * 86400000L) {
-                    f.delete();
-                    return null;
-                }
-            }
-            String raw = readFile(f);
-            if (raw == null || raw.trim().isEmpty()) return null;
-            return profileFromJson(new JSONObject(raw));
-        } catch (Exception ignored) { return null; }
-    }
-
-    private void saveProfileCache(ProfileResult r, String aliasKey) {
-        // Cache apenas de sessão: gravar em disco foi removido para evitar dados pesados/desatualizados.
-    }
-
-    private void cleanupProfileCache() {
-        try {
-            File[] files = profileCacheDir().listFiles();
-            if (files == null || files.length == 0) return;
-            long now = System.currentTimeMillis();
-            int days = getCacheDaysSetting();
-            for (File f : files) {
-                if (f.isFile() && days > 0 && now - f.lastModified() > days * 86400000L) f.delete();
-            }
-            files = profileCacheDir().listFiles();
-            if (files == null) return;
-            Arrays.sort(files, (a,b) -> Long.compare(b.lastModified(), a.lastModified()));
-            int maxProfiles = getMaxProfilesSetting();
-            for (int i = maxProfiles; i < files.length; i++) if (files[i].isFile()) files[i].delete();
-            int maxMb = getMaxCacheMbSetting();
-            if (maxMb > 0) {
-                long maxBytes = maxMb * 1024L * 1024L;
-                files = profileCacheDir().listFiles();
-                if (files == null) return;
-                Arrays.sort(files, (a,b) -> Long.compare(b.lastModified(), a.lastModified()));
-                long total = cacheDirSize(profileCacheDir());
-                for (int i = files.length - 1; i >= 0 && total > maxBytes; i--) {
-                    if (files[i].isFile()) {
-                        long len = files[i].length();
-                        if (files[i].delete()) total -= len;
-                    }
-                }
-            }
+            File legacy = new File(getFilesDir(), "profile_cache");
+            deleteContents(legacy, true);
         } catch(Exception ignored) {}
-    }
-
-
-    private int getMaxProfilesSetting() {
-        return 50;
-    }
-
-    private int getCacheDaysSetting() {
-        return 1;
-    }
-
-    private int getMaxCacheMbSetting() {
-        return 0;
     }
 
     private long cacheDirSize(File dir) {
@@ -5618,21 +5462,6 @@ private int loadingProgressFor(String message) {
         return tr(R.string.megabytes_format, mb);
     }
 
-
-    private int sessionProfileCount() {
-        cleanupSessionProfileCache();
-        HashSet<String> seen = new HashSet<>();
-        for (ProfileResult r : profileCache.values()) {
-            if (r == null) continue;
-            String key = "";
-            if (r.uniqueId != null && !r.uniqueId.trim().isEmpty()) key = "id:" + r.uniqueId.trim().toLowerCase(Locale.ROOT);
-            else if (r.name != null && !r.name.trim().isEmpty()) key = "name:" + normalizeHotelKey(r.hotelKey) + "|" + normalizeNickKey(r.name);
-            else if (r.searchedNick != null && !r.searchedNick.trim().isEmpty()) key = "searched:" + normalizeHotelKey(r.hotelKey) + "|" + normalizeNickKey(r.searchedNick);
-            if (!key.isEmpty()) seen.add(key);
-        }
-        return seen.size();
-    }
-
     private long fileSize(File file) {
         try { return file != null && file.isFile() ? Math.max(0L, file.length()) : 0L; } catch(Exception ignored) { return 0L; }
     }
@@ -5641,7 +5470,6 @@ private int loadingProgressFor(String message) {
         ArrayList<File> dirs = new ArrayList<>();
         addClearableCacheDir(dirs, getCacheDir());
         try { addClearableCacheDir(dirs, getExternalCacheDir()); } catch(Exception ignored) {}
-        addClearableCacheDir(dirs, profileCacheDir());
         return dirs;
     }
 
@@ -5702,7 +5530,6 @@ private int loadingProgressFor(String message) {
     }
 
     private String cacheStatsText() {
-        cleanupSessionProfileCache();
         return t(R.string.app_cache) + ": " + formatBytes(clearableCacheBytes());
     }
 
@@ -5727,8 +5554,6 @@ private int loadingProgressFor(String message) {
     }
 
     private void clearProfileCache(Runnable done) {
-        profileCache.clear();
-        profileCacheTimes.clear();
         visualFigureDataCache = null;
         visualFigureDataLoadedAt = 0L;
         visualEditorCachedFigure = DEFAULT_VISUAL_FIGURE;
@@ -5755,12 +5580,8 @@ private int loadingProgressFor(String message) {
             // Usa a mesma lista usada em clearableCacheBytes(), para o tamanho mostrado
             // em Configurações bater com o que o botão realmente remove.
             ArrayList<File> dirs = clearableCacheDirs();
-            File profileRoot = null;
-            try { profileRoot = profileCacheDir().getCanonicalFile(); } catch(Exception ignored) { profileRoot = profileCacheDir(); }
             for (File dir : dirs) {
-                boolean deleteRoot = false;
-                try { deleteRoot = profileRoot != null && dir != null && dir.getCanonicalFile().equals(profileRoot); } catch(Exception ignored) {}
-                deleteContents(dir, deleteRoot);
+                deleteContents(dir, false);
             }
             for (File file : clearableCacheFiles()) {
                 if (!isInsideAnyDir(file, dirs)) {
@@ -5769,11 +5590,8 @@ private int loadingProgressFor(String message) {
             }
 
             // Não apagamos codeCacheDir aqui para evitar travamentos/descompilações desnecessárias.
-            try { profileCacheDir().mkdirs(); } catch(Exception ignored) {}
 
             runOnUiThread(() -> {
-                profileCache.clear();
-                profileCacheTimes.clear();
                 if (done != null) done.run();
             });
         });
@@ -7513,12 +7331,25 @@ private int loadingProgressFor(String message) {
         scroll.addView(wrap, new ScrollView.LayoutParams(-1, -2));
         dialog.setContentView(scroll);
 
+        LinearLayout previewLine = new LinearLayout(this);
+        previewLine.setOrientation(LinearLayout.HORIZONTAL);
+        previewLine.setGravity(Gravity.CENTER_VERTICAL);
+        wrap.addView(previewLine, lp(-1, dp(150), 0, 0, 0, 12));
+
         ImageView avatarImage = new ImageView(this);
         avatarImage.setAdjustViewBounds(true);
         avatarImage.setScaleType(ImageView.ScaleType.FIT_CENTER);
         avatarImage.setBackground(round(lightTheme ? Color.rgb(248,248,248) : Color.argb(22,255,255,255), dp(18), lightTheme ? Color.rgb(220,220,220) : Color.argb(35,255,255,255), 1));
-        wrap.addView(avatarImage, lp(-1, dp(150), 0, 0, 0, 12));
+        previewLine.addView(avatarImage, new LinearLayout.LayoutParams(0, -1, 1));
         loadAvatarImageKeepingCurrent(avatarImage, avatarFull(previewFigure, 2));
+
+        ImageView rarityThumbnail = new ImageView(this);
+        rarityThumbnail.setAdjustViewBounds(true);
+        rarityThumbnail.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        rarityThumbnail.setVisibility(View.INVISIBLE);
+        LinearLayout.LayoutParams rarityLp = new LinearLayout.LayoutParams(dp(46), dp(46));
+        rarityLp.leftMargin = dp(12);
+        previewLine.addView(rarityThumbnail, rarityLp);
 
         LinearLayout info = new LinearLayout(this);
         info.setOrientation(LinearLayout.VERTICAL);
@@ -7560,34 +7391,17 @@ private int loadingProgressFor(String message) {
                 String code = firstText(itemInfo, "code", "classname", "className", "id");
                 String name = clothingName(itemInfo, code.isEmpty() ? (type + "-" + itemId) : code);
                 String collection = clothingLineName(itemInfo, "");
-                String icon = firstText(itemInfo, "iconUrl", "imageUrl", "url", "thumbnail");
-                if (icon.isEmpty() && !code.isEmpty()) icon = GENERIC_CLOTHING_ICON;
+                String icon = firstText(itemInfo, "rarityIconUrl", "iconUrl", "imageUrl", "url", "thumbnail");
+                if (icon.isEmpty()) icon = GENERIC_CLOTHING_ICON;
 
                 info.addView(visualItemInfoRow(t(R.string.item_name), name.isEmpty() ? (type + "-" + itemId) : name));
                 info.addView(visualItemInfoRow(t(R.string.collection), collection.isEmpty() ? "-" : collection));
-                info.addView(visualItemThumbnailBlock(t(R.string.thumbnail), icon));
+                if (!icon.isEmpty()) {
+                    rarityThumbnail.setVisibility(View.VISIBLE);
+                    Glide.with(MainActivity.this).load(icon).into(rarityThumbnail);
+                }
             });
         });
-    }
-
-    private LinearLayout visualItemThumbnailBlock(String label, String icon) {
-        LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.VERTICAL);
-        row.setPadding(dp(12), dp(9), dp(12), dp(9));
-        row.setBackground(round(lightTheme ? Color.rgb(250,250,250) : Color.argb(22,255,255,255), dp(14), lightTheme ? Color.rgb(222,222,222) : Color.argb(30,255,255,255), 1));
-        row.setLayoutParams(lp(-1, -2, 0, 0, 0, 8));
-
-        TextView l = text(label, 12, themeMutedColor(), true);
-        l.setGravity(Gravity.LEFT);
-        row.addView(l, lp(-1, -2, 0, 0, 0, 8));
-
-        ImageView img = new ImageView(this);
-        img.setAdjustViewBounds(true);
-        img.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        img.setBackground(round(lightTheme ? Color.rgb(244,244,244) : Color.argb(18,255,255,255), dp(12), Color.TRANSPARENT, 0));
-        row.addView(img, lp(-1, dp(54), 0, 0, 0, 0));
-        if (icon != null && !icon.isEmpty()) Glide.with(MainActivity.this).load(icon).into(img);
-        return row;
     }
 
     private LinearLayout visualItemInfoRow(String label, String value) {
@@ -8843,7 +8657,7 @@ private int loadingProgressFor(String message) {
         ProfileResult c = new ProfileResult();
         if (src == null) return c;
         c.searchedNick = src.searchedNick; c.uniqueId = src.uniqueId; c.name = src.name; c.motto = src.motto; c.figure = src.figure; c.memberSince = src.memberSince; c.lastAccess = src.lastAccess; c.level = src.level; c.starGems = src.starGems; c.hotelKey = src.hotelKey;
-        c.online = src.online; c.privateProfile = src.privateProfile; c.banned = src.banned;
+        c.online = src.online; c.privateProfile = src.privateProfile;
         c.habboPublic = src.habboPublic; c.dex = src.dex; c.suggest = src.suggest; c.dexProfile = src.dexProfile; c.officialProfile = src.officialProfile;
         c.previousNames = new ArrayList<>(src.previousNames); c.previousMottos = new ArrayList<>(src.previousMottos); c.previousStyles = new ArrayList<>(src.previousStyles); c.photos = new ArrayList<>(src.photos); c.friends = new ArrayList<>(src.friends); c.oldFriends = new ArrayList<>(src.oldFriends); c.rooms = new ArrayList<>(src.rooms); c.oldRooms = new ArrayList<>(src.oldRooms); c.groups = new ArrayList<>(src.groups); c.badges = new ArrayList<>(src.badges); c.badgesWithAchievements = new ArrayList<>(src.badgesWithAchievements); c.totalBadges = src.totalBadges; c.selectedBadges = new ArrayList<>(src.selectedBadges);
         c.photosNextPage = src.photosNextPage; c.stylesNextPage = src.stylesNextPage; c.photosTotal = src.photosTotal; c.stylesTotal = src.stylesTotal;
@@ -8877,93 +8691,6 @@ private int loadingProgressFor(String message) {
             return;
         }
         super.onBackPressed();
-    }
-
-    private ProfileResult mergeFreshIntoCachedSafely(ProfileResult cached, ProfileResult fresh) {
-        if (fresh == null) return cached;
-        if (cached == null) return fresh;
-
-        String freshId = normalizeNickKey(fresh.uniqueId);
-        String cachedId = normalizeNickKey(cached.uniqueId);
-        if (!freshId.isEmpty() && !cachedId.isEmpty() && !freshId.equals(cachedId)) {
-            return fresh;
-        }
-
-        ProfileResult merged = mergeFreshIntoCached(cached, fresh);
-
-        // Fotos e visuais antigos são carregados por página. Não reaproveite estes blocos
-        // do cache, para evitar mostrar histórico antigo antes da primeira página atual.
-        merged.photos.clear();
-        merged.previousStyles.clear();
-        merged.photosNextPage = 0;
-        merged.stylesNextPage = 0;
-        merged.photosTotal = 0;
-        merged.stylesTotal = 0;
-        merged.photosHasMore = false;
-        merged.stylesHasMore = false;
-        merged.photosLoading = false;
-        merged.stylesLoading = false;
-        return merged;
-    }
-
-    private ProfileResult mergeFreshIntoCached(ProfileResult cached, ProfileResult fresh) {
-        if (cached == null) return fresh;
-        if (fresh == null) return cached;
-
-        cached.searchedNick = pickText(fresh.searchedNick, cached.searchedNick);
-        cached.uniqueId = pickText(fresh.uniqueId, cached.uniqueId);
-        cached.name = pickText(fresh.name, cached.name);
-        cached.motto = pickText(fresh.motto, cached.motto);
-        cached.figure = pickText(fresh.figure, cached.figure);
-        cached.memberSince = pickText(fresh.memberSince, cached.memberSince);
-        cached.lastAccess = pickText(fresh.lastAccess, cached.lastAccess);
-        cached.level = pickText(fresh.level, cached.level);
-        cached.starGems = pickText(fresh.starGems, cached.starGems);
-        cached.hotelKey = pickText(fresh.hotelKey, cached.hotelKey);
-        cached.online = fresh.online;
-        cached.privateProfile = fresh.privateProfile;
-        cached.banned = fresh.banned;
-
-        if (fresh.habboPublic != null) cached.habboPublic = fresh.habboPublic;
-        if (fresh.dex != null) cached.dex = fresh.dex;
-        if (fresh.suggest != null) cached.suggest = fresh.suggest;
-        if (fresh.dexProfile != null) cached.dexProfile = fresh.dexProfile;
-        if (fresh.officialProfile != null) cached.officialProfile = fresh.officialProfile;
-
-        cached.previousNames = mergeLists(fresh.previousNames, cached.previousNames);
-        cached.previousMottos = mergeLists(fresh.previousMottos, cached.previousMottos);
-        cached.previousStyles = mergeLists(fresh.previousStyles, cached.previousStyles);
-        cached.photos = mergeLists(fresh.photos, cached.photos);
-        cached.friends = mergeLists(fresh.friends, cached.friends);
-        cached.oldFriends = mergeLists(fresh.oldFriends, cached.oldFriends);
-        cached.rooms = mergeLists(fresh.rooms, cached.rooms);
-        cached.oldRooms = mergeLists(fresh.oldRooms, cached.oldRooms);
-        cached.groups = mergeLists(fresh.groups, cached.groups); cached.badges = mergeLists(fresh.badges, cached.badges); cached.badgesWithAchievements = mergeLists(fresh.badgesWithAchievements, cached.badgesWithAchievements); if (!fresh.totalBadges.isEmpty()) cached.totalBadges = fresh.totalBadges;
-        cached.selectedBadges = mergeLists(fresh.selectedBadges, cached.selectedBadges);
-        return cached;
-    }
-
-    private String pickText(String fresh, String old) {
-        if (fresh != null && !fresh.trim().isEmpty() && !"null".equalsIgnoreCase(fresh.trim())) return fresh;
-        return old == null ? "" : old;
-    }
-
-    private String readFile(File file) throws IOException {
-        if (file == null || !file.isFile()) return "";
-        StringBuilder sb = new StringBuilder();
-        BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(file), "UTF-8"));
-        try {
-            String line;
-            while ((line = br.readLine()) != null) sb.append(line).append('\n');
-        } finally {
-            try { br.close(); } catch(Exception ignored) {}
-        }
-        return sb.toString();
-    }
-
-    private ProfileResult profileFromJson(JSONObject json) {
-        // Cache em disco está desativado nesta versão; este parser mínimo existe apenas para compatibilidade de compilação.
-        return null;
     }
 
     private TextView dialogButton(String label) {
@@ -9983,13 +9710,8 @@ private int loadingProgressFor(String message) {
 
                     badges.removeAllViews();
                     if (data.privateProfile) badges.addView(profileBadge(t(R.string.profile_private), "lock", red));
-                    if (data.banned) {
-                        LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(-2, -2);
-                        bp.leftMargin = dp(8);
-                        badges.addView(profileBadge(t(R.string.banned), "banned", red), bp);
-                    }
 
-                    boolean redBorder = data.privateProfile || data.banned;
+                    boolean redBorder = data.privateProfile;
                     stats.removeAllViews();
                     stats.addView(miniStatRow(data.online ? "status_online" : "status_offline", t(R.string.status), data.online ? t(R.string.online) : t(R.string.offline), "", redBorder));
                     stats.addView(miniStatRow("clock", t(R.string.last_login), niceDate(data.lastAccess), timeAgoText(data.lastAccess), redBorder));
@@ -10065,11 +9787,18 @@ private int loadingProgressFor(String message) {
         out.hotelKey = normalizeHotelKey(hotelKey);
         if (out.hotelKey.isEmpty()) out.hotelKey = currentHotelKey;
         try {
-            JSONObject dexById = out.uniqueId.isEmpty() ? null : unwrap(tryJson(habbodexProfileByUniqueUrlForHotel(out.uniqueId, out.hotelKey)));
-            JSONObject publicObj = tryJson("https://" + hotelDomain(out.hotelKey) + "/api/public/users?name=" + enc(out.nick));
-            publicObj = validProfileObject(publicObj);
-            JSONObject dexObj = unwrap(tryJson(habbodexProfileByNameUrl(out.nick)));
-            JSONObject base = firstObject(validProfileObject(dexById), validProfileObject(publicObj), validProfileObject(dexObj));
+            String lookupName = out.nick;
+            JSONObject publicObj = lookupName.isEmpty()
+                    ? null
+                    : validProfileObject(tryJson("https://" + hotelDomain(out.hotelKey) + "/api/public/users?name=" + enc(lookupName)));
+            if (publicObj != null && !out.uniqueId.isEmpty() && !isSameProfileId(out.uniqueId, publicObj)) {
+                publicObj = null;
+            }
+            JSONObject officialProfile = publicObj == null && !out.uniqueId.isEmpty()
+                    ? tryJson("https://" + hotelDomain(out.hotelKey) + "/api/public/users/" + enc(out.uniqueId) + "/profile")
+                    : null;
+            JSONObject officialUser = officialProfile == null ? null : officialProfile.optJSONObject("user");
+            JSONObject base = firstObject(validProfileObject(publicObj), validProfileObject(officialUser), validProfileObject(officialProfile));
             if (base == null) return out;
 
             String realId = firstText(base, "uniqueId", "id", "habboId");
@@ -10090,8 +9819,7 @@ private int loadingProgressFor(String message) {
 
             out.privateProfile = !optBoolAny(base, true, "profileVisible", "isProfileVisible", "visible");
             if (publicObj != null && publicObj.has("profileVisible")) out.privateProfile = !publicObj.optBoolean("profileVisible", true);
-
-            out.banned = publicObj != null && isSameProfileObject(base, publicObj) ? false : optBoolTrue(base, "isBanned", "banned", "ban", "is_banned");
+            out.privateProfile = resolveProfilePrivate(publicObj, officialUser != null ? officialUser : officialProfile, null, null);
 
             out.memberSince = firstText(base, "memberSince", "creationTime", "createdAt", "registeredAt", "created_at", "registerDate", "registrationDate");
             if (out.memberSince.isEmpty() && publicObj != null) out.memberSince = firstText(publicObj, "memberSince", "creationTime", "createdAt", "registeredAt", "created_at", "registerDate", "registrationDate");
@@ -10143,7 +9871,7 @@ private int loadingProgressFor(String message) {
 
     private static class MiniProfilePreview {
         String nick = "", figure = "", uniqueId = "", hotelKey = "br", motto = "", lastAccess = "", memberSince = "";
-        boolean online = false, privateProfile = false, banned = false;
+        boolean online = false, privateProfile = false;
     }
 
     private static class FavoriteStatus {
@@ -10169,7 +9897,7 @@ private int loadingProgressFor(String message) {
 
     private static class ProfileResult {
         String searchedNick = "", uniqueId = "", name = "", motto = "", figure = "", memberSince = "", lastAccess = "", level = "", starGems = "", totalBadges = "", hotelKey = "br";
-        boolean online = false, privateProfile = false, banned = false;
+        boolean online = false, privateProfile = false;
         JSONObject habboPublic, dex, suggest, dexProfile, officialProfile;
         ArrayList<JSONObject> previousNames = new ArrayList<>(), previousMottos = new ArrayList<>(), previousStyles = new ArrayList<>(), photos = new ArrayList<>(), friends = new ArrayList<>(), oldFriends = new ArrayList<>(), rooms = new ArrayList<>(), oldRooms = new ArrayList<>(), groups = new ArrayList<>(), selectedBadges = new ArrayList<>(), badges = new ArrayList<>(), badgesWithAchievements = new ArrayList<>();
         int photosNextPage = 0, stylesNextPage = 0, photosTotal = 0, stylesTotal = 0;
@@ -10249,10 +9977,14 @@ private int loadingProgressFor(String message) {
                 if (!safeId.isEmpty()) u = new URL("https://" + hotelDomainStatic(hotel) + "/api/public/users/" + URLEncoder.encode(safeId, "UTF-8") + "/profile");
                 else u = new URL("https://" + hotelDomainStatic(hotel) + "/api/public/users?name=" + URLEncoder.encode(nick, "UTF-8"));
                 c = (HttpURLConnection)u.openConnection();
+                c.setUseCaches(false);
+                c.setDefaultUseCaches(false);
                 c.setConnectTimeout(12000);
                 c.setReadTimeout(18000);
                 c.setRequestProperty("Accept", "application/json, text/plain, */*");
-                c.setRequestProperty("User-Agent", "ToxicSearchTool/1.0 Android");
+                c.setRequestProperty("Cache-Control", "no-cache, no-store");
+                c.setRequestProperty("Pragma", "no-cache");
+                c.setRequestProperty("User-Agent", "ToxicSearchTool/1.2.9 Android");
                 int code = c.getResponseCode();
                 InputStream is = code >= 200 && code < 400 ? c.getInputStream() : c.getErrorStream();
                 String body = readAllStatic(is);
