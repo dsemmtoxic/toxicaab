@@ -17,15 +17,17 @@ declare(strict_types=1);
  *   - /api.php?path=habboinfo%2F...&query=... (gateway legado)
  *   - o formato antigo por query string documentado no projeto.
  *
- * Requisitos: PHP 8.0+, cURL, DOM e permissão para criar ./cache.
+ * Requisitos: PHP 8.0+, cURL e DOM. Não precisa de permissão de escrita.
  * Dados atuais vêm da API pública oficial; a fonte histórica é usada somente
  * como complemento. Datas históricas são datas de detecção.
  */
 
-const TOXIC_API_VERSION = '1.1.0';
-const TOXIC_USER_AGENT = 'ToxicSearchTool/1.2.9 (+https://atoxic.com.br)';
+const TOXIC_API_VERSION = '1.3.0';
+const TOXIC_USER_AGENT = 'ToxicSearchTool/1.3.0 (+https://atoxic.com.br)';
 const HABBOWIDGETS_BASE = 'https://www.habbowidgets.com';
 const CACHE_ROOT = __DIR__ . '/cache/habbowidgets_api';
+// A API opera de forma totalmente stateless. Não altere para true em hospedagens
+// com pouco espaço: nenhum perfil, histórico, resposta ou lock é persistido.
 const ENABLE_API_CACHE = false;
 const PROFILE_CACHE_TTL = 600;
 const HTTP_CACHE_TTL = 600;
@@ -71,8 +73,7 @@ function main(): void
 
     $gatewayMode = isset($_GET['path']);
     try {
-        ensureCacheDirectories();
-        purgeDisabledApiCache();
+        purgeLegacyStorage();
         [$path, $params, $gatewayMode] = parseIncomingRequest();
         if (preg_match('#^rarity-icon/(generic|rare|nft)$#i', $path, $iconMatch)) {
             sendRarityIcon(strtolower($iconMatch[1]));
@@ -300,6 +301,7 @@ function dispatch(string $path, array $params): array
             'provider' => 'toxic',
             'examples' => [
                 '/api.php/habboinfo/br/habbo?name=Refresh',
+                '/api.php/habboinfo/hhbr-...?hotel=br&complementOnly=true',
                 '/api.php/habboinfo/hhbr-.../friends?hotel=br&page=1&limit=100',
                 '/api.php/furnidex/furni/from-figure-string?figureString=hr-828-1346.hd-209-28&hotel=br',
             ],
@@ -323,7 +325,13 @@ function dispatch(string $path, array $params): array
     if (preg_match('#^habboinfo/([^/]+)/habbo$#i', $path, $match)) {
         $hotel = normalizeHotel($match[1]);
         $name = validateName((string) ($params['name'] ?? ''));
-        $loaded = loadProfile($hotel, $name, '');
+        $complementOnly = filter_var(
+            $params['complementOnly'] ?? false,
+            FILTER_VALIDATE_BOOLEAN
+        );
+        $loaded = $complementOnly
+            ? loadComplementProfile($hotel, $name, '')
+            : loadProfile($hotel, $name, '');
         return [publicProfilePayload($loaded['profile']), (bool) $loaded['cacheHit']];
     }
 
@@ -333,7 +341,13 @@ function dispatch(string $path, array $params): array
             (string) ($params['hotel'] ?? inferHotelFromUniqueId($uniqueId))
         );
         $endpoint = strtolower(trim((string) ($match[2] ?? '')));
-        $loaded = loadProfile($hotel, '', $uniqueId);
+        $complementOnly = filter_var(
+            $params['complementOnly'] ?? false,
+            FILTER_VALIDATE_BOOLEAN
+        );
+        $loaded = $complementOnly
+            ? loadComplementProfile($hotel, '', $uniqueId)
+            : loadProfile($hotel, '', $uniqueId);
         $profile = $loaded['profile'];
 
         if ($endpoint === '') {
@@ -554,30 +568,17 @@ function mbSubstrSafe(string $value, int $start, int $length): string
 
 function ensureCacheDirectories(): void
 {
-    $directories = ENABLE_API_CACHE
-        ? ['http', 'profiles', 'history', 'closet', 'locks']
-        : ['history', 'locks'];
-    foreach ($directories as $child) {
-        $directory = CACHE_ROOT . '/' . $child;
-        if (!is_dir($directory) && !@mkdir($directory, 0775, true) && !is_dir($directory)) {
-            throw new ApiProblem(
-                500,
-                'cache_not_writable',
-                'O PHP não conseguiu criar a pasta de cache.',
-                ['directory' => './cache/toxic_profile_api/' . $child]
-            );
-        }
-    }
+    // Compatibilidade com instalações anteriores: não cria diretórios.
+    purgeLegacyStorage();
 }
 
-function purgeDisabledApiCache(): void
+function purgeLegacyStorage(): void
 {
     if (ENABLE_API_CACHE) {
         return;
     }
-    foreach (['http', 'profiles', 'closet'] as $child) {
-        deleteCacheTree(CACHE_ROOT . '/' . $child);
-    }
+    // Remove cache, histórico e locks deixados por versões anteriores.
+    deleteCacheTree(CACHE_ROOT);
 }
 
 function deleteCacheTree(string $path): void
@@ -614,89 +615,54 @@ function readProfileCache(
     string $identifier,
     bool $freshOnly
 ): ?array {
-    if (!ENABLE_API_CACHE) {
-        return null;
-    }
-    if ($identifier === '') {
-        return null;
-    }
-    $file = profileCacheFile($hotel, $identifier);
-    $record = readJsonFile($file);
-    if (!is_array($record) || !is_array($record['profile'] ?? null)) {
-        return null;
-    }
-    $age = time() - (int) ($record['savedAt'] ?? 0);
-    if ($freshOnly && $age > PROFILE_CACHE_TTL) {
-        return null;
-    }
-    if (!$freshOnly && $age > PROFILE_STALE_TTL) {
-        return null;
-    }
-    return $record;
+    return null;
 }
 
 function writeProfileCache(string $hotel, string $identifier, array $profile): void
 {
-    if (!ENABLE_API_CACHE || $identifier === '') {
-        return;
-    }
-    writeJsonAtomic(profileCacheFile($hotel, $identifier), [
-        'savedAt' => time(),
-        'profile' => $profile,
-    ]);
+    // API stateless: mantida somente para compatibilidade interna.
 }
 
 function loadProfile(string $hotel, string $name, string $uniqueId): array
 {
     $hotel = normalizeHotel($hotel);
-    $identifier = $uniqueId !== '' ? $uniqueId : strtolower($name);
-    $fresh = readProfileCache($hotel, $identifier, true);
-    if ($fresh !== null) {
-        $profile = $fresh['profile'];
-        $profile['_meta']['cacheHit'] = true;
-        return ['profile' => $profile, 'cacheHit' => true];
+    $profile = buildProfile($hotel, $name, $uniqueId);
+    $profile['_meta']['cacheHit'] = false;
+    return ['profile' => $profile, 'cacheHit' => false];
+}
+
+function loadComplementProfile(string $hotel, string $name, string $uniqueId): array
+{
+    $hotel = normalizeHotel($hotel);
+    $result = fetchAndParseHabbowidgetsProfile(
+        hotelConfig($hotel),
+        $name,
+        $uniqueId
+    );
+    if (($result['valid'] ?? false) !== true || !is_array($result['profile'] ?? null)) {
+        throw new ApiProblem(404, 'profile_not_found', 'Perfil complementar não encontrado.');
     }
 
-    $stale = readProfileCache($hotel, $identifier, false);
-    $lockPath = CACHE_ROOT . '/locks/profile_' . hash('sha256', $hotel . '|' . $identifier) . '.lock';
-    $lock = @fopen($lockPath, 'c+');
-    if (!is_resource($lock)) {
-        throw new ApiProblem(500, 'cache_lock_failed', 'Não foi possível bloquear o cache.');
-    }
-
-    try {
-        if (!flock($lock, LOCK_EX)) {
-            throw new ApiProblem(500, 'cache_lock_failed', 'Não foi possível bloquear o cache.');
-        }
-
-        $fresh = readProfileCache($hotel, $identifier, true);
-        if ($fresh !== null) {
-            $profile = $fresh['profile'];
-            $profile['_meta']['cacheHit'] = true;
-            return ['profile' => $profile, 'cacheHit' => true];
-        }
-
-        try {
-            $profile = buildProfile($hotel, $name, $uniqueId);
-            $profile['_meta']['cacheHit'] = false;
-            writeProfileCache($hotel, $identifier, $profile);
-            writeProfileCache($hotel, (string) ($profile['uniqueId'] ?? ''), $profile);
-            writeProfileCache($hotel, strtolower((string) ($profile['name'] ?? '')), $profile);
-            return ['profile' => $profile, 'cacheHit' => false];
-        } catch (Throwable $error) {
-            if ($stale !== null) {
-                $profile = $stale['profile'];
-                $profile['_meta']['cacheHit'] = true;
-                $profile['_meta']['stale'] = true;
-                $profile['_meta']['warnings'][] = 'Foi usado cache antigo porque a atualização falhou.';
-                return ['profile' => $profile, 'cacheHit' => true];
-            }
-            throw $error;
-        }
-    } finally {
-        @flock($lock, LOCK_UN);
-        @fclose($lock);
-    }
+    $profile = $result['profile'];
+    $profile['hotel'] = $hotel;
+    $profile['privateProfile'] = !firstBool(
+        $profile,
+        ['profileVisible', 'isProfileVisible', 'visible'],
+        true
+    );
+    $profile['_meta'] = [
+        'provider' => 'toxic-complement',
+        'apiVersion' => TOXIC_API_VERSION,
+        'hotel' => $hotel,
+        'sources' => ['toxic-history'],
+        'sourceUrl' => '',
+        'fetchedAt' => gmdate('c'),
+        'datesAreDetectionDates' => true,
+        'stale' => false,
+        'warnings' => [],
+    ];
+    sortProfileLists($profile);
+    return ['profile' => $profile, 'cacheHit' => false];
 }
 
 function buildProfile(string $hotel, string $requestedName, string $requestedId): array
@@ -842,11 +808,11 @@ function buildProfile(string $hotel, string $requestedName, string $requestedId)
         'stale' => (bool) ($widgetResult['stale'] ?? false),
         'warnings' => array_values(array_unique($warnings)),
         'availability' => [
-            'previousFriends' => 'fonte histórica + observações futuras desta API',
-            'previousRooms' => 'bloco histórico de removidos + observações futuras desta API',
+            'previousFriends' => 'fonte histórica disponível na consulta atual',
+            'previousRooms' => 'bloco histórico de removidos disponível na consulta atual',
             'previousBadges' => 'bloco histórico de emblemas removidos',
             'previousGroups' => 'bloco histórico de grupos removidos',
-            'previousNames' => 'resolução histórica + observações após a primeira consulta',
+            'previousNames' => 'fonte histórica disponível na consulta atual',
             'previousStyles' => 'fonte histórica',
             'previousMottos' => 'fonte histórica',
             'photos' => 'fonte histórica + API pública oficial do Habbo quando disponível',
@@ -979,148 +945,89 @@ function cachedHttpRequest(
     string $language
 ): array {
     assertAllowedUpstreamUrl($url);
-
     $method = strtoupper($method);
-    $cacheKey = hash('sha256', $method . '|' . $url . '|' . encodeJson($form));
-    $bodyFile = CACHE_ROOT . '/http/' . $cacheKey . '.body';
-    $metaFile = CACHE_ROOT . '/http/' . $cacheKey . '.json';
-    $cached = readHttpCache($bodyFile, $metaFile);
-    if ($cached !== null && $cached['age'] <= $ttl) {
-        return [
-            'body' => $cached['body'],
-            'status' => (int) ($cached['meta']['status'] ?? 200),
-            'effectiveUrl' => (string) ($cached['meta']['effectiveUrl'] ?? $url),
-            'cacheHit' => true,
-            'stale' => false,
-        ];
+    if (!function_exists('curl_init')) {
+        throw new ApiProblem(
+            500,
+            'curl_missing',
+            'A extensão cURL não está habilitada no servidor.'
+        );
     }
 
-    $lockFile = CACHE_ROOT . '/locks/http_' . $cacheKey . '.lock';
-    $lock = @fopen($lockFile, 'c+');
-    if (!is_resource($lock) || !flock($lock, LOCK_EX)) {
-        throw new ApiProblem(500, 'cache_lock_failed', 'Não foi possível bloquear o cache HTTP.');
+    politeThrottle((string) parse_url($url, PHP_URL_HOST));
+    $body = '';
+    $tooLarge = false;
+    $ch = curl_init($url);
+    $options = [
+        CURLOPT_FOLLOWLOCATION => true,
+        CURLOPT_MAXREDIRS => 5,
+        CURLOPT_CONNECTTIMEOUT => 12,
+        CURLOPT_TIMEOUT => 35,
+        CURLOPT_ENCODING => '',
+        CURLOPT_USERAGENT => TOXIC_USER_AGENT,
+        CURLOPT_HTTPHEADER => [
+            'Accept: text/html,application/json;q=0.9,*/*;q=0.7',
+            'Accept-Language: ' . $language,
+            'Referer: ' . HABBOWIDGETS_BASE . '/',
+            'X-Toxic-App: 1.3.0',
+        ],
+        CURLOPT_WRITEFUNCTION => static function ($curl, string $chunk) use (
+            &$body,
+            &$tooLarge,
+            $maxBytes
+        ): int {
+            if (strlen($body) + strlen($chunk) > $maxBytes) {
+                $tooLarge = true;
+                return 0;
+            }
+            $body .= $chunk;
+            return strlen($chunk);
+        },
+    ];
+    if (defined('CURLOPT_PROTOCOLS') && defined('CURLPROTO_HTTPS')) {
+        $options[CURLOPT_PROTOCOLS] = CURLPROTO_HTTPS;
+    }
+    if (defined('CURLOPT_REDIR_PROTOCOLS') && defined('CURLPROTO_HTTPS')) {
+        $options[CURLOPT_REDIR_PROTOCOLS] = CURLPROTO_HTTPS;
+    }
+    if ($method === 'POST') {
+        $options[CURLOPT_POST] = true;
+        $options[CURLOPT_POSTFIELDS] = http_build_query($form, '', '&', PHP_QUERY_RFC3986);
+        $options[CURLOPT_HTTPHEADER][] = 'Content-Type: application/x-www-form-urlencoded';
+    }
+    curl_setopt_array($ch, $options);
+    $ok = curl_exec($ch);
+    $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+    $effectiveUrl = (string) curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
+    $curlError = curl_error($ch);
+    curl_close($ch);
+
+    if ($tooLarge) {
+        throw new ApiProblem(
+            502,
+            'upstream_too_large',
+            'A resposta externa excedeu o limite seguro.'
+        );
+    }
+    if ($ok === false || $status < 200 || $status >= 300 || $body === '') {
+        throw new ApiProblem(
+            in_array($status, [408, 425, 429], true) || $status >= 500 ? 503 : 502,
+            'upstream_failed',
+            'O serviço externo recusou ou não concluiu a consulta.',
+            [
+                'upstreamStatus' => $status,
+                'detail' => mbSubstrSafe($curlError ?: strip_tags($body), 0, 180),
+            ]
+        );
     }
 
-    try {
-        $cached = readHttpCache($bodyFile, $metaFile);
-        if ($cached !== null && $cached['age'] <= $ttl) {
-            return [
-                'body' => $cached['body'],
-                'status' => (int) ($cached['meta']['status'] ?? 200),
-                'effectiveUrl' => (string) ($cached['meta']['effectiveUrl'] ?? $url),
-                'cacheHit' => true,
-                'stale' => false,
-            ];
-        }
-
-        try {
-            if (!function_exists('curl_init')) {
-                throw new ApiProblem(
-                    500,
-                    'curl_missing',
-                    'A extensão cURL não está habilitada no servidor.'
-                );
-            }
-            politeThrottle((string) parse_url($url, PHP_URL_HOST));
-            $body = '';
-            $tooLarge = false;
-            $ch = curl_init($url);
-            $options = [
-                CURLOPT_FOLLOWLOCATION => true,
-                CURLOPT_MAXREDIRS => 5,
-                CURLOPT_CONNECTTIMEOUT => 12,
-                CURLOPT_TIMEOUT => 35,
-                CURLOPT_ENCODING => '',
-                CURLOPT_USERAGENT => TOXIC_USER_AGENT,
-                CURLOPT_HTTPHEADER => [
-                    'Accept: text/html,application/json;q=0.9,*/*;q=0.7',
-                    'Accept-Language: ' . $language,
-                    'Referer: ' . HABBOWIDGETS_BASE . '/',
-                    'X-Toxic-App: 1.2.9',
-                ],
-                CURLOPT_WRITEFUNCTION => static function ($curl, string $chunk) use (
-                    &$body,
-                    &$tooLarge,
-                    $maxBytes
-                ): int {
-                    if (strlen($body) + strlen($chunk) > $maxBytes) {
-                        $tooLarge = true;
-                        return 0;
-                    }
-                    $body .= $chunk;
-                    return strlen($chunk);
-                },
-            ];
-            if (defined('CURLOPT_PROTOCOLS') && defined('CURLPROTO_HTTPS')) {
-                $options[CURLOPT_PROTOCOLS] = CURLPROTO_HTTPS;
-            }
-            if (defined('CURLOPT_REDIR_PROTOCOLS') && defined('CURLPROTO_HTTPS')) {
-                $options[CURLOPT_REDIR_PROTOCOLS] = CURLPROTO_HTTPS;
-            }
-            if ($method === 'POST') {
-                $options[CURLOPT_POST] = true;
-                $options[CURLOPT_POSTFIELDS] = http_build_query($form, '', '&', PHP_QUERY_RFC3986);
-                $options[CURLOPT_HTTPHEADER][] = 'Content-Type: application/x-www-form-urlencoded';
-            }
-            curl_setopt_array($ch, $options);
-            $ok = curl_exec($ch);
-            $status = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
-            $effectiveUrl = (string) curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
-            $curlError = curl_error($ch);
-            curl_close($ch);
-
-            if ($tooLarge) {
-                throw new ApiProblem(
-                    502,
-                    'upstream_too_large',
-                    'A resposta externa excedeu o limite seguro.'
-                );
-            }
-            if ($ok === false || $status < 200 || $status >= 300 || $body === '') {
-                throw new ApiProblem(
-                    in_array($status, [408, 425, 429], true) || $status >= 500 ? 503 : 502,
-                    'upstream_failed',
-                    'O serviço externo recusou ou não concluiu a consulta.',
-                    [
-                        'upstreamStatus' => $status,
-                        'detail' => mbSubstrSafe($curlError ?: strip_tags($body), 0, 180),
-                    ]
-                );
-            }
-
-            if (ENABLE_API_CACHE) {
-                writeFileAtomic($bodyFile, $body);
-                writeJsonAtomic($metaFile, [
-                    'savedAt' => time(),
-                    'status' => $status,
-                    'effectiveUrl' => $effectiveUrl !== '' ? $effectiveUrl : $url,
-                ]);
-            }
-
-            return [
-                'body' => $body,
-                'status' => $status,
-                'effectiveUrl' => $effectiveUrl !== '' ? $effectiveUrl : $url,
-                'cacheHit' => false,
-                'stale' => false,
-            ];
-        } catch (Throwable $error) {
-            $cached = readHttpCache($bodyFile, $metaFile);
-            if ($cached !== null && $cached['age'] <= HTTP_STALE_TTL) {
-                return [
-                    'body' => $cached['body'],
-                    'status' => (int) ($cached['meta']['status'] ?? 200),
-                    'effectiveUrl' => (string) ($cached['meta']['effectiveUrl'] ?? $url),
-                    'cacheHit' => true,
-                    'stale' => true,
-                ];
-            }
-            throw $error;
-        }
-    } finally {
-        @flock($lock, LOCK_UN);
-        @fclose($lock);
-    }
+    return [
+        'body' => $body,
+        'status' => $status,
+        'effectiveUrl' => $effectiveUrl !== '' ? $effectiveUrl : $url,
+        'cacheHit' => false,
+        'stale' => false,
+    ];
 }
 
 function assertAllowedUpstreamUrl(string $url): void
@@ -1146,47 +1053,21 @@ function assertAllowedUpstreamUrl(string $url): void
 
 function readHttpCache(string $bodyFile, string $metaFile): ?array
 {
-    if (!ENABLE_API_CACHE) {
-        return null;
-    }
-    if (!is_file($bodyFile) || !is_file($metaFile)) {
-        return null;
-    }
-    $body = @file_get_contents($bodyFile);
-    $meta = readJsonFile($metaFile);
-    if (!is_string($body) || $body === '' || !is_array($meta)) {
-        return null;
-    }
-    return [
-        'body' => $body,
-        'meta' => $meta,
-        'age' => max(0, time() - (int) ($meta['savedAt'] ?? 0)),
-    ];
+    return null;
 }
 
 function politeThrottle(string $host): void
 {
-    $file = CACHE_ROOT . '/locks/throttle_' . hash('sha256', strtolower($host)) . '.lock';
-    $handle = @fopen($file, 'c+');
-    if (!is_resource($handle) || !flock($handle, LOCK_EX)) {
-        return;
+    // Limite somente na memória da requisição atual; não cria lock em disco.
+    static $lastRequestByHost = [];
+    $key = strtolower($host);
+    $now = microtime(true);
+    $last = (float) ($lastRequestByHost[$key] ?? 0.0);
+    $wait = (UPSTREAM_MIN_INTERVAL_MS / 1000) - ($now - $last);
+    if ($wait > 0) {
+        usleep((int) ceil($wait * 1_000_000));
     }
-    try {
-        rewind($handle);
-        $last = (float) trim((string) stream_get_contents($handle));
-        $now = microtime(true);
-        $wait = (UPSTREAM_MIN_INTERVAL_MS / 1000) - ($now - $last);
-        if ($wait > 0) {
-            usleep((int) ceil($wait * 1_000_000));
-        }
-        ftruncate($handle, 0);
-        rewind($handle);
-        fwrite($handle, sprintf('%.6f', microtime(true)));
-        fflush($handle);
-    } finally {
-        flock($handle, LOCK_UN);
-        fclose($handle);
-    }
+    $lastRequestByHost[$key] = microtime(true);
 }
 
 function parseHabbowidgetsHtml(
@@ -3102,235 +2983,8 @@ function isListArray(array $array): bool
 
 function updateObservedHistory(array $profile, array $reliability): array
 {
-    $identity = firstString($profile, ['uniqueId', 'id']);
-    if ($identity === '') {
-        $identity = normalizeKey(firstString($profile, ['hotel']) . '|' . firstString($profile, ['name']));
-    }
-    if ($identity === '') {
-        return $profile;
-    }
-
-    $file = CACHE_ROOT . '/history/' . hash('sha256', $identity) . '.json';
-    $lockFile = CACHE_ROOT . '/locks/history_' . hash('sha256', $identity) . '.lock';
-    $lock = @fopen($lockFile, 'c+');
-    if (!is_resource($lock) || !flock($lock, LOCK_EX)) {
-        $profile['_meta']['warnings'][] = 'Não foi possível atualizar o histórico observacional.';
-        return $profile;
-    }
-
-    try {
-        $history = readJsonFile($file);
-        if (!is_array($history)) {
-            $history = [];
-        }
-        foreach ([
-            'previousNames',
-            'previousMottos',
-            'previousStyles',
-            'previousFriends',
-            'previousRooms',
-            'previousBadges',
-            'previousGroups',
-        ] as $key) {
-            if (!is_array($history[$key] ?? null)) {
-                $history[$key] = [];
-            }
-            $history[$key] = mergeHistoricalLists(
-                $key,
-                $history[$key],
-                is_array($profile[$key] ?? null) ? $profile[$key] : []
-            );
-        }
-
-        $now = gmdate('c');
-        $oldCurrent = is_array($history['current'] ?? null) ? $history['current'] : [];
-        $oldName = firstString($oldCurrent, ['name']);
-        $newName = firstString($profile, ['name']);
-        if ($oldName !== '' && $newName !== '' && normalizeKey($oldName) !== normalizeKey($newName)) {
-            $history['previousNames'] = mergeHistoricalLists('previousNames', [[
-                'name' => $oldName,
-                'changedAt' => $now,
-                'source' => 'atoxic-observation',
-                'datePrecision' => 'observed',
-            ]], $history['previousNames']);
-        }
-
-        $oldMotto = firstString($oldCurrent, ['motto']);
-        $newMotto = firstString($profile, ['motto']);
-        if ($oldMotto !== '' && $oldMotto !== $newMotto) {
-            $history['previousMottos'] = mergeHistoricalLists('previousMottos', [[
-                'text' => $oldMotto,
-                'motto' => $oldMotto,
-                'changedAt' => $now,
-                'date' => $now,
-                'source' => 'atoxic-observation',
-                'datePrecision' => 'observed',
-            ]], $history['previousMottos']);
-        }
-
-        $oldFigure = firstString($oldCurrent, ['figureString']);
-        $newFigure = firstString($profile, ['figureString']);
-        if ($oldFigure !== '' && $oldFigure !== $newFigure) {
-            $history['previousStyles'] = mergeHistoricalLists('previousStyles', [[
-                'figureString' => $oldFigure,
-                'figure' => $oldFigure,
-                'look' => $oldFigure,
-                'changedAt' => $now,
-                'date' => $now,
-                'source' => 'atoxic-observation',
-                'datePrecision' => 'observed',
-            ]], $history['previousStyles']);
-        }
-
-        $oldRooms = is_array($oldCurrent['rooms'] ?? null) ? $oldCurrent['rooms'] : [];
-        $newRooms = $oldRooms;
-        if (($reliability['rooms'] ?? false)) {
-            $newRooms = mapObservedRecords(
-                filterHabbowidgetsRecords(
-                    is_array($profile['rooms'] ?? null) ? $profile['rooms'] : []
-                ),
-                ['id', 'roomId', 'name']
-            );
-        }
-        if (($reliability['rooms'] ?? false) && $oldRooms !== []) {
-            foreach ($oldRooms as $key => $room) {
-                if (isset($newRooms[$key]) || !is_array($room)) {
-                    continue;
-                }
-                $room['removedAt'] = $now;
-                $room['date'] = $now;
-                $room['source'] = 'atoxic-observation';
-                $room['datePrecision'] = 'observed';
-                $history['previousRooms'] = mergeHistoricalLists(
-                    'previousRooms',
-                    [$room],
-                    $history['previousRooms']
-                );
-            }
-        }
-
-        $oldFriends = is_array($oldCurrent['friends'] ?? null) ? $oldCurrent['friends'] : [];
-        $newFriends = $oldFriends;
-        if (($reliability['friends'] ?? false)) {
-            $newFriends = mapObservedRecords(
-                filterHabbowidgetsRecords(
-                    is_array($profile['friends'] ?? null) ? $profile['friends'] : []
-                ),
-                ['uniqueId', 'id', 'name']
-            );
-        }
-        if (($reliability['friends'] ?? false) && $oldFriends !== []) {
-            foreach ($oldFriends as $key => $friend) {
-                if (isset($newFriends[$key]) || !is_array($friend)) {
-                    continue;
-                }
-                $friend['removedAt'] = $now;
-                $friend['date'] = $now;
-                $friend['source'] = 'atoxic-observation';
-                $friend['datePrecision'] = 'observed';
-                $history['previousFriends'] = mergeHistoricalLists(
-                    'previousFriends',
-                    [$friend],
-                    $history['previousFriends']
-                );
-            }
-        }
-
-        $oldBadges = is_array($oldCurrent['badges'] ?? null) ? $oldCurrent['badges'] : [];
-        $newBadges = $oldBadges;
-        if (($reliability['badges'] ?? false)) {
-            $newBadges = mapObservedRecords(
-                filterHabbowidgetsRecords(
-                    is_array($profile['badges'] ?? null) ? $profile['badges'] : []
-                ),
-                ['code', 'badgeCode']
-            );
-        }
-        if (($reliability['badges'] ?? false) && $oldBadges !== []) {
-            foreach ($oldBadges as $key => $badge) {
-                if (isset($newBadges[$key]) || !is_array($badge)) {
-                    continue;
-                }
-                $badge['removedAt'] = $now;
-                $badge['date'] = $now;
-                $badge['removed'] = true;
-                $badge['source'] = 'atoxic-observation';
-                $badge['datePrecision'] = 'observed';
-                $history['previousBadges'] = mergeHistoricalLists(
-                    'previousBadges',
-                    [$badge],
-                    $history['previousBadges']
-                );
-            }
-        }
-
-        $oldGroups = is_array($oldCurrent['groups'] ?? null) ? $oldCurrent['groups'] : [];
-        $newGroups = $oldGroups;
-        if (($reliability['groups'] ?? false)) {
-            $newGroups = mapObservedRecords(
-                filterHabbowidgetsRecords(
-                    is_array($profile['groups'] ?? null) ? $profile['groups'] : []
-                ),
-                ['id', 'groupId', 'badgeCode', 'name']
-            );
-        }
-        if (($reliability['groups'] ?? false) && $oldGroups !== []) {
-            foreach ($oldGroups as $key => $group) {
-                if (isset($newGroups[$key]) || !is_array($group)) {
-                    continue;
-                }
-                $group['leftAt'] = $now;
-                $group['removedAt'] = $now;
-                $group['date'] = $now;
-                $group['removed'] = true;
-                $group['source'] = 'atoxic-observation';
-                $group['datePrecision'] = 'observed';
-                $history['previousGroups'] = mergeHistoricalLists(
-                    'previousGroups',
-                    [$group],
-                    $history['previousGroups']
-                );
-            }
-        }
-
-        $history['current'] = [
-            'name' => $newName,
-            'motto' => $newMotto,
-            'figureString' => $newFigure,
-            'rooms' => $newRooms,
-            'friends' => $newFriends,
-            'badges' => $newBadges,
-            'groups' => $newGroups,
-            'seenAt' => $now,
-        ];
-        $history['updatedAt'] = $now;
-
-        foreach ([
-            'previousNames',
-            'previousMottos',
-            'previousStyles',
-            'previousFriends',
-            'previousRooms',
-            'previousBadges',
-            'previousGroups',
-        ] as $key) {
-            $history[$key] = array_slice(
-                array_values($history[$key]),
-                0,
-                MAX_HISTORY_ITEMS
-            );
-            $profile[$key] = mergeHistoricalLists(
-                $key,
-                is_array($profile[$key] ?? null) ? $profile[$key] : [],
-                $history[$key]
-            );
-        }
-        writeJsonAtomic($file, $history);
-        return $profile;
-    } finally {
-        flock($lock, LOCK_UN);
-        fclose($lock);
-    }
+    // Preserva somente o histórico recebido na consulta atual.
+    return $profile;
 }
 
 function filterHabbowidgetsRecords(array $items): array
@@ -3463,33 +3117,12 @@ function closetCacheFile(string $hotel, string $code): string
 
 function saveClosetMetadata(string $hotel, array $item): void
 {
-    if (!ENABLE_API_CACHE) {
-        return;
-    }
-    $code = firstString($item, ['code', 'classname', 'id']);
-    if ($code === '') {
-        return;
-    }
-    writeJsonAtomic(closetCacheFile($hotel, $code), [
-        'savedAt' => time(),
-        'item' => $item,
-    ]);
+    // API stateless: metadados do visual não são salvos.
 }
 
 function readClosetMetadata(string $hotel, string $code): ?array
 {
-    if (!ENABLE_API_CACHE) {
-        return null;
-    }
-    $record = readJsonFile(closetCacheFile($hotel, $code));
-    if (
-        !is_array($record)
-        || !is_array($record['item'] ?? null)
-        || time() - (int) ($record['savedAt'] ?? 0) > CLOSET_CACHE_TTL
-    ) {
-        return null;
-    }
-    return $record['item'];
+    return null;
 }
 
 function clothingFromFigure(string $figure, string $hotel): array
@@ -3630,7 +3263,7 @@ function suggestProfiles(string $query, string $hotel): array
     $seen = [];
     $cacheHit = false;
 
-    $files = ENABLE_API_CACHE ? (glob(CACHE_ROOT . '/profiles/*.json') ?: []) : [];
+    $files = [];
     $checked = 0;
     foreach ($files as $file) {
         if ($checked++ >= 1_000) {
@@ -3716,30 +3349,12 @@ function readJsonFile(string $file): ?array
 
 function writeJsonAtomic(string $file, array $value): void
 {
-    writeFileAtomic($file, encodeJson($value));
+    // API stateless: nenhuma gravação em arquivo é permitida.
 }
 
 function writeFileAtomic(string $file, string $contents): void
 {
-    $directory = dirname($file);
-    if (!is_dir($directory) && !@mkdir($directory, 0775, true) && !is_dir($directory)) {
-        return;
-    }
-    $temporary = @tempnam($directory, '.toxic_');
-    if (!is_string($temporary) || $temporary === '') {
-        return;
-    }
-    try {
-        if (@file_put_contents($temporary, $contents, LOCK_EX) === false) {
-            return;
-        }
-        @chmod($temporary, 0664);
-        @rename($temporary, $file);
-    } finally {
-        if (is_file($temporary)) {
-            @unlink($temporary);
-        }
-    }
+    // API stateless: nenhuma gravação em arquivo é permitida.
 }
 
 if (!defined('TOXIC_API_NO_MAIN')) {
