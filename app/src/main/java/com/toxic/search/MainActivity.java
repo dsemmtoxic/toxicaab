@@ -52,8 +52,9 @@ import java.util.concurrent.*;
 
 public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
-    private static final String APP_VERSION = "1.3.0";
-    private static final String GENERIC_CLOTHING_ICON = PROFILE_API + "/rarity-icon/generic";
+    private static final String APP_VERSION = "1.3.1";
+    private static final String HABBOWIDGETS_KLD1_ICON = "https://www.habbowidgets.com/images/kld1.gif";
+    private static final String HABBOWIDGETS_KLD2_ICON = "https://www.habbowidgets.com/images/kld2.gif";
     private final ExecutorService executor = Executors.newFixedThreadPool(10);
     private FrameLayout screen;
     private LinearLayout root, resultWrap;
@@ -3589,7 +3590,7 @@ public class MainActivity extends Activity {
         LinearLayout texts = new LinearLayout(this); texts.setOrientation(LinearLayout.VERTICAL);
         LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, -2, 1); tp.leftMargin = dp(9); row.addView(texts, tp);
         texts.addView(text(label, 11, Color.argb(190,255,255,255), false));
-        texts.addView(text(value == null || value.isEmpty() || "null".equalsIgnoreCase(value) ? "—" : value, 14, Color.WHITE, true));
+        texts.addView(text(value == null || value.isEmpty() || "null".equalsIgnoreCase(value) ? "" : value, 14, Color.WHITE, true));
         if (tooltip != null && !tooltip.trim().isEmpty() && !"—".equals(tooltip.trim())) {
             row.setOnClickListener(v -> toast(tooltip));
         }
@@ -3741,7 +3742,8 @@ public class MainActivity extends Activity {
         rootDialog.setBackground(round(dialogFillColor(), dp(22), dialogStrokeColor(), 1));
         dialog.setContentView(rootDialog);
 
-        TextView title = text(t(R.string.looks) + " — " + (date == null ? "" : date), 18, lightTheme ? Color.rgb(33,33,33) : Color.WHITE, true);
+        String cleanDate = date == null ? "" : date.trim();
+        TextView title = text(t(R.string.looks) + (cleanDate.isEmpty() ? "" : " — " + cleanDate), 18, lightTheme ? Color.rgb(33,33,33) : Color.WHITE, true);
         title.setGravity(Gravity.CENTER);
         rootDialog.addView(title, lp(-1,-2,0,0,0,12));
 
@@ -3823,8 +3825,8 @@ public class MainActivity extends Activity {
         row.setLayoutParams(lp(-1, -2, 0, 0, 0, 10));
         ImageView img = new ImageView(this); img.setScaleType(ImageView.ScaleType.FIT_CENTER); row.addView(img, new LinearLayout.LayoutParams(dp(40), dp(40)));
         String code = firstText(o, "code", "classname", "className", "id");
-        String icon = firstText(o, "iconUrl", "imageUrl", "url", "thumbnail");
-        if (icon.isEmpty() && !code.isEmpty()) icon = GENERIC_CLOTHING_ICON;
+        String rarity = clothingRarity(o);
+        String icon = clothingRarityIconUrl(o, rarity);
         if (!icon.isEmpty()) loadImage(img, icon);
         LinearLayout txt = new LinearLayout(this); txt.setOrientation(LinearLayout.VERTICAL); LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, -2, 1); tp.leftMargin = dp(12); row.addView(txt,tp);
         String name = clothingName(o, code);
@@ -3870,6 +3872,14 @@ public class MainActivity extends Activity {
         if (combined.contains("nft") || combined.contains("kld3")) return "nft";
         if (combined.contains("kld2")) return "rare";
         return "generic";
+    }
+
+    private String clothingRarityIconUrl(JSONObject item, String rarity) {
+        String provided = firstText(item, "rarityIconUrl", "iconUrl", "imageUrl", "url", "thumbnail");
+        String lower = provided == null ? "" : provided.trim().toLowerCase(Locale.ROOT);
+        if (lower.contains("/images/kld1.gif")) return HABBOWIDGETS_KLD1_ICON;
+        if (lower.contains("/images/kld2.gif")) return HABBOWIDGETS_KLD2_ICON;
+        return "generic".equals(rarity) ? HABBOWIDGETS_KLD1_ICON : HABBOWIDGETS_KLD2_ICON;
     }
 
     private String clothingName(JSONObject o, String fallback) {
@@ -4424,7 +4434,7 @@ public class MainActivity extends Activity {
 
         TextView lb = text(label, 12, Color.argb(185,255,255,255), false);
         texts.addView(lb);
-        TextView val = habboText(value == null || value.isEmpty() ? "—" : value, 15, true);
+        TextView val = habboText(value == null || value.isEmpty() ? "" : value, 15, true);
         val.setTextColor(lightTheme ? Color.rgb(33,33,33) : Color.WHITE);
         val.setMaxLines(2);
         val.setEllipsize(TextUtils.TruncateAt.END);
@@ -4710,8 +4720,12 @@ public class MainActivity extends Activity {
         if (!image.isEmpty()) Glide.with(this).load(image).error(R.drawable.quarto).into(img); else img.setImageResource(R.drawable.quarto);
         LinearLayout txt = new LinearLayout(this); txt.setOrientation(LinearLayout.VERTICAL); LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0,-2,1); tp.leftMargin=dp(12); row.addView(txt,tp);
         TextView roomName = habboText(firstText(room,"name","roomName","caption","title").isEmpty()?t(R.string.room):firstText(room,"name","roomName","caption","title"), 16, true); roomName.setMaxLines(1); roomName.setEllipsize(TextUtils.TruncateAt.END); txt.addView(roomName);
-        String score = firstText(room,"score","rating"); String date = niceDate(firstText(room,"createdAt","creationTime","date"));
-        TextView meta = habboText("•  " + emptyDash(score) + "   " + date, 13, false);
+        String score = emptyDash(firstText(room,"score","rating"));
+        String date = niceDate(firstText(room,"createdAt","creationTime","date"));
+        ArrayList<String> roomMetaParts = new ArrayList<>();
+        if (!score.isEmpty()) roomMetaParts.add("•  " + score);
+        if (!date.isEmpty()) roomMetaParts.add(date);
+        TextView meta = habboText(TextUtils.join("   ", roomMetaParts), 13, false);
         meta.setTextColor(lightTheme ? Color.rgb(97,97,97) : Color.argb(215,255,255,255));
         txt.addView(meta);
         String desc = firstText(room,"description","desc"); if(!desc.isEmpty()) { TextView rd = habboText(desc, 13, false); rd.setTextColor(Color.argb(210,255,255,255)); rd.setMaxLines(1); rd.setEllipsize(TextUtils.TruncateAt.END); txt.addView(rd); }
@@ -4736,7 +4750,7 @@ public class MainActivity extends Activity {
         sv.addView(inner, new ScrollView.LayoutParams(-1, -2));
         c.addView(sv, lp(-1, dp(Math.min(430, Math.max(120, 98 * Math.min(list.size(), 4)))), 0, 0, 0, 0));
 
-        for (int i=0; i<Math.min(list.size(), 60); i++) {
+        for (int i=0; i<list.size(); i++) {
             inner.addView(groupRow(list.get(i)));
         }
     }
@@ -5693,7 +5707,7 @@ private int loadingProgressFor(String message) {
     private void openUrl(String url){ try { startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url))); } catch(Exception ignored){} }
     private String normalizeUrl(String url) { String s = url == null ? "" : url.trim(); if (s.startsWith("//")) return "https:" + s; if (s.startsWith("/")) return "https://atoxic.com.br" + s; return s; }
 
-    private String emptyDash(String s) { return s == null || s.trim().isEmpty() ? "—" : s.trim(); }
+    private String emptyDash(String s) { return s == null || s.trim().isEmpty() ? "" : s.trim(); }
 
     private Date parseHabboDate(String in) {
         if (in == null || in.trim().isEmpty()) return null;
@@ -5723,7 +5737,7 @@ private int loadingProgressFor(String message) {
     }
 
     private String niceDate(String in) {
-        if (in == null || in.trim().isEmpty() || "null".equalsIgnoreCase(in.trim())) return "—";
+        if (in == null || in.trim().isEmpty() || "null".equalsIgnoreCase(in.trim())) return "";
         Date d = parseHabboDate(in);
         if (d == null) return in;
         String pattern = "com".equals(normalizeHotelKey(currentHotelKey)) ? "MM/dd/yyyy HH:mm" : "dd/MM/yyyy HH:mm";
@@ -5731,7 +5745,7 @@ private int loadingProgressFor(String message) {
     }
 
     private String niceDateOnly(String in) {
-        if (in == null || in.trim().isEmpty() || "null".equalsIgnoreCase(in.trim())) return "—";
+        if (in == null || in.trim().isEmpty() || "null".equalsIgnoreCase(in.trim())) return "";
         Date d = parseHabboDate(in);
         if (d == null) return in;
         return DateFormat.getDateInstance(DateFormat.MEDIUM, hotelDateLocale()).format(d);
@@ -7770,21 +7784,19 @@ private int loadingProgressFor(String message) {
                 String name = clothingName(itemInfo, code.isEmpty() ? (type + "-" + itemId) : code);
                 String collection = clothingLineName(itemInfo, "");
                 String rarity = clothingRarity(itemInfo);
-                String icon = firstText(itemInfo, "rarityIconUrl", "iconUrl", "imageUrl", "url", "thumbnail");
-                if (icon.isEmpty()) icon = PROFILE_API + "/rarity-icon/" + rarity;
+                String icon = clothingRarityIconUrl(itemInfo, rarity);
 
-                info.addView(visualItemInfoRow(t(R.string.item_name), name.isEmpty() ? (type + "-" + itemId) : name));
-                info.addView(visualItemInfoRow(t(R.string.collection), collection.isEmpty() ? "-" : collection));
-                Drawable rarityFallback = new ClothingRarityDrawable(rarity);
-                rarityThumbnail.setImageDrawable(rarityFallback);
+                info.addView(visualItemInfoRow(t(R.string.item_name), name.isEmpty() ? "" : name));
+                info.addView(visualItemInfoRow(t(R.string.collection), collection));
+                rarityThumbnail.setImageDrawable(null);
                 rarityThumbnail.setVisibility(View.VISIBLE);
-                if (!icon.isEmpty()) {
-                    Glide.with(MainActivity.this)
-                            .load(icon)
-                            .placeholder(rarityFallback)
-                            .error(rarityFallback)
-                            .into(rarityThumbnail);
-                }
+                Glide.with(MainActivity.this)
+                        .asGif()
+                        .load(icon)
+                        .diskCacheStrategy(DiskCacheStrategy.AUTOMATIC)
+                        .placeholder(new ColorDrawable(Color.TRANSPARENT))
+                        .error(new ColorDrawable(Color.TRANSPARENT))
+                        .into(rarityThumbnail);
             });
         });
     }
@@ -8986,7 +8998,7 @@ private int loadingProgressFor(String message) {
         wrap.addView(infoGrid, lp(-1, -2, 0, 0, 0, 0));
         infoGrid.addView(photoInfoCard(t(R.string.name), name, "", ""));
         infoGrid.addView(photoInfoCard(t(R.string.description), desc, "", ""));
-        infoGrid.addView(photoInfoCard(t(R.string.obtained), created.isEmpty() ? "—" : niceDateOnly(created), "", ""));
+        infoGrid.addView(photoInfoCard(t(R.string.obtained), created.isEmpty() ? "" : niceDateOnly(created), "", ""));
         if (!owners.isEmpty()) infoGrid.addView(photoInfoCard(t(R.string.total_owners), owners, "", ""));
         infoGrid.addView(photoInfoCard(t(R.string.code), code, "", ""));
 
@@ -10034,9 +10046,9 @@ private int loadingProgressFor(String message) {
         stats.setOrientation(LinearLayout.VERTICAL);
         rootDialog.addView(stats, lp(-1, -2, 0, 0, 0, 12));
 
-        stats.addView(miniStatRow("status_offline", t(R.string.status), "—", "", false));
-        stats.addView(miniStatRow("clock", t(R.string.last_login), "—", "", false));
-        stats.addView(miniStatRow("calendar", t(R.string.creation), "—", "", false));
+        stats.addView(miniStatRow("status_offline", t(R.string.status), "", "", false));
+        stats.addView(miniStatRow("clock", t(R.string.last_login), "", "", false));
+        stats.addView(miniStatRow("calendar", t(R.string.creation), "", "", false));
 
         final MiniProfilePreview[] loaded = new MiniProfilePreview[1];
 
@@ -10133,7 +10145,7 @@ private int loadingProgressFor(String message) {
         tp.leftMargin = dp(9);
         row.addView(texts, tp);
         texts.addView(text(label, 11, Color.argb(190,255,255,255), false));
-        texts.addView(text(value == null || value.isEmpty() || "null".equalsIgnoreCase(value) ? "—" : value, 14, Color.WHITE, true));
+        texts.addView(text(value == null || value.isEmpty() || "null".equalsIgnoreCase(value) ? "" : value, 14, Color.WHITE, true));
 
         if (tooltip != null && !tooltip.trim().isEmpty() && !"—".equals(tooltip.trim())) {
             row.setOnClickListener(v -> toast(tooltip));
@@ -11046,60 +11058,6 @@ private int loadingProgressFor(String message) {
             p.setColor(Color.rgb(255,107,122)); c.drawRect(ox+sw*.36f, oy+sh*.84f, ox+sw*.64f, oy+sh*.91f, p);
         }
         @Override public void setAlpha(int a){p.setAlpha(a);} @Override public void setColorFilter(android.graphics.ColorFilter f){p.setColorFilter(f);} @Override public int getOpacity(){return PixelFormat.TRANSLUCENT;}
-    }
-
-    public class ClothingRarityDrawable extends Drawable {
-        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final String rarity;
-
-        ClothingRarityDrawable(String rarity) {
-            String normalized = rarity == null ? "generic" : rarity.trim().toLowerCase(Locale.ROOT);
-            this.rarity = ("rare".equals(normalized) || "nft".equals(normalized)) ? normalized : "generic";
-        }
-
-        @Override public void draw(Canvas canvas) {
-            Rect bounds = getBounds();
-            float size = Math.min(bounds.width(), bounds.height());
-            float left = bounds.centerX() - size / 2f;
-            float top = bounds.centerY() - size / 2f;
-            RectF box = new RectF(left + dp(1), top + dp(1), left + size - dp(1), top + size - dp(1));
-
-            int background = "nft".equals(rarity)
-                    ? Color.rgb(8, 125, 134)
-                    : ("rare".equals(rarity) ? Color.rgb(123, 67, 198) : Color.rgb(104, 115, 134));
-            int foreground = "nft".equals(rarity)
-                    ? Color.rgb(98, 240, 220)
-                    : ("rare".equals(rarity) ? Color.rgb(243, 211, 93) : Color.rgb(215, 222, 234));
-            String letter = "nft".equals(rarity) ? "N" : ("rare".equals(rarity) ? "R" : "G");
-
-            paint.setShader(null);
-            paint.setStyle(Paint.Style.FILL);
-            paint.setColor(background);
-            canvas.drawRoundRect(box, size * .23f, size * .23f, paint);
-
-            paint.setStyle(Paint.Style.STROKE);
-            paint.setStrokeWidth(Math.max(dp(1), size * .055f));
-            paint.setColor(foreground);
-            canvas.drawRoundRect(box, size * .23f, size * .23f, paint);
-            RectF inner = new RectF(box.left + size * .22f, box.top + size * .22f, box.right - size * .22f, box.bottom - size * .22f);
-            paint.setStrokeWidth(Math.max(dp(1), size * .035f));
-            paint.setAlpha(155);
-            canvas.drawRect(inner, paint);
-            paint.setAlpha(255);
-
-            paint.setStyle(Paint.Style.FILL);
-            paint.setTypeface(Typeface.create(Typeface.DEFAULT, Typeface.BOLD));
-            paint.setTextAlign(Paint.Align.CENTER);
-            paint.setTextSize(size * .39f);
-            paint.setColor(foreground);
-            Paint.FontMetrics fm = paint.getFontMetrics();
-            float baseline = bounds.centerY() - (fm.ascent + fm.descent) / 2f;
-            canvas.drawText(letter, bounds.centerX(), baseline, paint);
-        }
-
-        @Override public void setAlpha(int alpha) { paint.setAlpha(alpha); }
-        @Override public void setColorFilter(android.graphics.ColorFilter filter) { paint.setColorFilter(filter); }
-        @Override public int getOpacity() { return PixelFormat.TRANSLUCENT; }
     }
 
     public class PlaceholderDrawable extends Drawable {
