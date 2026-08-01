@@ -52,7 +52,7 @@ import java.util.concurrent.*;
 
 public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
-    private static final String APP_VERSION = "1.3.5";
+    private static final String APP_VERSION = "1.3.6";
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
     // os ícones nunca desapareçam por bloqueio de rede ou cache externo.
@@ -66,6 +66,7 @@ public class MainActivity extends Activity {
     private LinearLayout suggestionsBox;
     private ScrollView suggestionsScroll;
     private int suggestionRequestId = 0;
+    private Runnable suggestionDebounceTask;
     private boolean suppressSuggestions = false;
     private boolean programmaticSearchTextChange = false;
     private Handler uiHandler = new Handler(Looper.getMainLooper());
@@ -1503,6 +1504,7 @@ public class MainActivity extends Activity {
     @Override protected void onDestroy() {
         saveAdFreeUntil();
         cancelTutorialPulseAnimation();
+        if (suggestionDebounceTask != null) uiHandler.removeCallbacks(suggestionDebounceTask);
         uiHandler.removeCallbacks(adFreeTicker);
         cancelInterstitialAdRetry();
         cancelRewardedAdRetry();
@@ -1708,7 +1710,10 @@ public class MainActivity extends Activity {
         if (!openingSplashShownThisSession) {
             showOpeningSplashOverlay();
         } else {
-            addBottomNavigation(screen, 0, null);
+            bindBottomNavigationAutoHide(
+                    mainScroll,
+                    addBottomNavigation(screen, 0, null)
+            );
         }
         maybeShowFirstRunTutorial();
     }
@@ -1758,7 +1763,10 @@ public class MainActivity extends Activity {
                     .setDuration(260)
                     .withEndAction(() -> {
                         try { screen.removeView(splash); } catch (Exception ignored) {}
-                        addBottomNavigation(screen, 0, null);
+                        bindBottomNavigationAutoHide(
+                                mainScroll,
+                                addBottomNavigation(screen, 0, null)
+                        );
                     })
                     .start();
         }, 2000L);
@@ -2968,6 +2976,14 @@ public class MainActivity extends Activity {
                 profile.rooms,
                 "creationTime", "createdAt", "date", "updatedAt"
         );
+        sortJsonNewestFirst(
+                profile.badges,
+                "obtainedAt", "acquiredAt", "creationTime", "createdAt", "date"
+        );
+        sortJsonNewestFirst(
+                profile.badgesWithAchievements,
+                "obtainedAt", "acquiredAt", "creationTime", "createdAt", "date"
+        );
     }
 
     private void sortJsonNewestFirst(ArrayList<JSONObject> items, String... dateKeys) {
@@ -2981,7 +2997,13 @@ public class MainActivity extends Activity {
 
     private long jsonDateMillis(JSONObject item, String... dateKeys) {
         if (item == null) return 0L;
-        return parseHabboTimestampMsStatic(firstText(item, dateKeys));
+        if (dateKeys != null) {
+            for (String key : dateKeys) {
+                Date parsed = parseHabboDate(item.optString(key, ""));
+                if (parsed != null) return parsed.getTime();
+            }
+        }
+        return 0L;
     }
 
     private void applyOfficialPhotosData(
@@ -4956,27 +4978,14 @@ public class MainActivity extends Activity {
 
 
     private boolean isTodayCreationTime(String raw) {
-        if (raw == null) return false;
-        String s = raw.trim();
-        if (s.isEmpty()) return false;
-        String today = new SimpleDateFormat("yyyy-MM-dd", Locale.ROOT).format(new Date());
-        if (s.length() >= 10 && s.substring(0, 10).equals(today)) return true;
+        return isToday(raw);
+    }
 
-        String[] patterns = new String[]{
-                "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
-                "yyyy-MM-dd'T'HH:mm:ss'Z'",
-                "yyyy-MM-dd HH:mm:ss",
-                "yyyy-MM-dd"
-        };
-        for (String pattern : patterns) {
-            try {
-                SimpleDateFormat fmt = new SimpleDateFormat(pattern, Locale.ROOT);
-                if (pattern.endsWith("'Z'")) fmt.setTimeZone(TimeZone.getTimeZone("UTC"));
-                Date d = fmt.parse(s);
-                if (d != null && new SimpleDateFormat("yyyy-MM-dd", Locale.ROOT).format(d).equals(today)) return true;
-            } catch(Exception ignored) {}
-        }
-        return false;
+    private String badgeObtainedDate(JSONObject badge) {
+        return firstText(
+                badge,
+                "obtainedAt", "acquiredAt", "creationTime", "createdAt", "date"
+        );
     }
 
     private void renderBadgePage(LinearLayout content, ArrayList<JSONObject> list, int page, int per) {
@@ -5012,7 +5021,7 @@ public class MainActivity extends Activity {
             cell.addView(img, new FrameLayout.LayoutParams(dp(50), dp(50), Gravity.CENTER));
             if (!code.isEmpty()) loadImage(img, badgeImageUrl(code));
 
-            if (isTodayCreationTime(firstText(badgeObj, "creationTime", "createdAt", "date"))) {
+            if (isTodayCreationTime(badgeObtainedDate(badgeObj))) {
                 TextView newBadge = text(newBadgeLabel(), 8, Color.WHITE, true);
                 newBadge.setGravity(Gravity.CENTER);
                 newBadge.setPadding(dp(5), 0, dp(5), 0);
@@ -5129,6 +5138,10 @@ public class MainActivity extends Activity {
 
     private void scheduleSuggestions(String raw) {
         final String q = raw == null ? "" : raw.trim();
+        if (suggestionDebounceTask != null) {
+            uiHandler.removeCallbacks(suggestionDebounceTask);
+            suggestionDebounceTask = null;
+        }
         suggestionRequestId++;
         final int requestId = suggestionRequestId;
         suggestionsBox.removeAllViews();
@@ -5139,12 +5152,15 @@ public class MainActivity extends Activity {
 
         showSuggestionsLoading();
 
-        executor.execute(() -> {
+        suggestionDebounceTask = () -> executor.execute(() -> {
             ArrayList<JSONObject> suggestions = fetchLiveNickSuggestions(q);
             runOnUiThread(() -> {
-                if (requestId == suggestionRequestId && !suppressSuggestions && !searchInProgress && searchInput != null && searchInput.hasFocus()) renderLiveSuggestions(q, suggestions);
+                if (requestId == suggestionRequestId && !suppressSuggestions && !searchInProgress && searchInput != null && searchInput.hasFocus()) {
+                    renderLiveSuggestions(q, suggestions);
+                }
             });
         });
+        uiHandler.postDelayed(suggestionDebounceTask, 180L);
     }
 
     private void showSuggestionsLoading() {
@@ -5190,44 +5206,13 @@ public class MainActivity extends Activity {
     }
 
     private ArrayList<JSONObject> fetchLiveNickSuggestions(String query) {
-        try {
-            JSONObject payload = unwrap(getJson(habbodexSuggestUrl(query)));
-            return filterLiveNickSuggestions(payload, query);
-        } catch(Exception e) { return new ArrayList<>(); }
-    }
-
-    private ArrayList<JSONObject> filterLiveNickSuggestions(JSONObject suggest, String query) {
         ArrayList<JSONObject> out = new ArrayList<>();
-        HashSet<String> seen = new HashSet<>();
-        String q = normalizeNickKey(query);
-        if (q.length() < 2 || suggest == null) return out;
-
-        ArrayList<JSONObject> users = extractList(suggest, null);
-
-        // 1) Primeiro, nicks atuais parecidos com o digitado.
-        for (JSONObject user : users) {
-            String current = firstText(user, "name", "username", "habboName");
-            String currentKey = normalizeNickKey(current);
-            if (currentKey.isEmpty()) continue;
-            if (currentKey.startsWith(q)) {
-                String id = stableSuggestionKey(user);
-                if (seen.add(id)) out.add(user);
-            }
-            if (out.size() >= 8) return out;
-        }
-
-        // 2) Depois, apenas se o texto digitado for 100% igual a um nick antigo.
-        for (JSONObject user : users) {
-            String current = firstText(user, "name", "username", "habboName");
-            String currentKey = normalizeNickKey(current);
-            if (currentKey.isEmpty() || currentKey.equals(q)) continue;
-            if (hasExactPreviousNick(user, q)) {
-                String id = stableSuggestionKey(user);
-                if (seen.add(id)) out.add(user);
-            }
-            if (out.size() >= 8) break;
-        }
-
+        String q = query == null ? "" : query.trim();
+        if (q.length() < 2) return out;
+        JSONObject official = validProfileObject(
+                tryJson(habboApiUrl("/api/public/users?name=" + enc(q)))
+        );
+        if (official != null) out.add(official);
         return out;
     }
 
@@ -5855,7 +5840,10 @@ private int loadingProgressFor(String message) {
         try {
             if (s.matches("^\\d{4}-\\d{2}-\\d{2}$")) {
                 SimpleDateFormat only = new SimpleDateFormat("yyyy-MM-dd", Locale.US);
-                only.setTimeZone(TimeZone.getTimeZone("UTC"));
+                only.setLenient(false);
+                // Datas sem horário representam o dia civil informado pela API.
+                // Tratá-las como UTC poderia recuar um dia em fusos negativos.
+                only.setTimeZone(TimeZone.getDefault());
                 return only.parse(s);
             }
             if (s.matches("^\\d{10,13}$")) {
@@ -5868,8 +5856,21 @@ private int loadingProgressFor(String message) {
             for (String pattern : patterns) {
                 try {
                     SimpleDateFormat f = new SimpleDateFormat(pattern, Locale.US);
+                    f.setLenient(false);
                     f.setTimeZone(TimeZone.getTimeZone("UTC"));
                     return f.parse(iso);
+                } catch(Exception ignored) {}
+            }
+            boolean usOrder = "com".equals(normalizeHotelKey(currentHotelKey));
+            String[] numericPatterns = usOrder
+                    ? new String[] {"MM/dd/yyyy HH:mm:ss", "MM/dd/yyyy HH:mm", "MM/dd/yyyy", "dd/MM/yyyy HH:mm:ss", "dd/MM/yyyy HH:mm", "dd/MM/yyyy"}
+                    : new String[] {"dd/MM/yyyy HH:mm:ss", "dd/MM/yyyy HH:mm", "dd/MM/yyyy", "MM/dd/yyyy HH:mm:ss", "MM/dd/yyyy HH:mm", "MM/dd/yyyy"};
+            for (String pattern : numericPatterns) {
+                try {
+                    SimpleDateFormat f = new SimpleDateFormat(pattern, Locale.US);
+                    f.setLenient(false);
+                    f.setTimeZone(TimeZone.getDefault());
+                    return f.parse(s);
                 } catch(Exception ignored) {}
             }
         } catch(Exception ignored) {}
@@ -5888,22 +5889,10 @@ private int loadingProgressFor(String message) {
         if (in == null || in.trim().isEmpty() || "null".equalsIgnoreCase(in.trim())) return "";
         Date d = parseHabboDate(in);
         if (d == null) return in;
-        return DateFormat.getDateInstance(DateFormat.MEDIUM, hotelDateLocale()).format(d);
-    }
-
-    private Locale hotelDateLocale() {
-        switch (normalizeHotelKey(currentHotelKey)) {
-            case "com": return Locale.US;
-            case "br": return new Locale("pt", "BR");
-            case "es": return new Locale("es", "ES");
-            case "de": return Locale.GERMANY;
-            case "fr": return Locale.FRANCE;
-            case "fi": return new Locale("fi", "FI");
-            case "it": return Locale.ITALY;
-            case "nl": return new Locale("nl", "NL");
-            case "tr": return new Locale("tr", "TR");
-            default: return Locale.getDefault();
-        }
+        String pattern = "com".equals(normalizeHotelKey(currentHotelKey))
+                ? "MM/dd/yyyy"
+                : "dd/MM/yyyy";
+        return new SimpleDateFormat(pattern, Locale.ROOT).format(d);
     }
 
     private String timeAgoText(String in) {
@@ -5922,7 +5911,16 @@ private int loadingProgressFor(String message) {
         return tr(R.string.time_ago, value, t(unitResource));
     }
 
-    private boolean isToday(String in) { if (in == null || in.trim().isEmpty()) return false; String d = niceDate(in); String today = new SimpleDateFormat("dd/MM/yyyy", new Locale("pt","BR")).format(new Date()); return d.startsWith(today); }
+    private boolean isToday(String in) {
+        Date value = parseHabboDate(in);
+        if (value == null) return false;
+        Calendar now = Calendar.getInstance();
+        Calendar date = Calendar.getInstance();
+        date.setTime(value);
+        return now.get(Calendar.ERA) == date.get(Calendar.ERA)
+                && now.get(Calendar.YEAR) == date.get(Calendar.YEAR)
+                && now.get(Calendar.DAY_OF_YEAR) == date.get(Calendar.DAY_OF_YEAR);
+    }
 
 
     private String findImageUrlDeep(Object obj) {
@@ -6193,8 +6191,8 @@ private int loadingProgressFor(String message) {
         return new BottomNavBarDrawable();
     }
 
-    private void addBottomNavigation(FrameLayout host, int selectedTab, Dialog activeDialog) {
-        if (host == null) return;
+    private FrameLayout addBottomNavigation(FrameLayout host, int selectedTab, Dialog activeDialog) {
+        if (host == null) return null;
 
         FrameLayout navWrap = new FrameLayout(this);
         navWrap.setBackground(bottomNavBackground());
@@ -6220,9 +6218,8 @@ private int loadingProgressFor(String message) {
 
         View searchNavItem = bottomNavItem("home", selectedTab == 0, () -> {
             if (activeDialog != null) activeDialog.dismiss();
-            else if (selectedTab == 0) scrollMainToTop(false);
         });
-        if (selectedTab == 0 && activeDialog == null) bindSearchNavigationHold(searchNavItem);
+        if (selectedTab == 0 && activeDialog == null) bindSearchNavigationGestures(searchNavItem);
         nav.addView(searchNavItem, new LinearLayout.LayoutParams(0, -1, 1));
 
         nav.addView(bottomNavItem("visuals", selectedTab == 1, () -> {
@@ -6249,6 +6246,7 @@ private int loadingProgressFor(String message) {
                 try { activeDialog.dismiss(); } catch (Exception ignored) {}
             }, 120L);
         }), new LinearLayout.LayoutParams(0, -1, 1));
+        return navWrap;
     }
 
     private View bottomNavItem(String icon, boolean selected, final Runnable action) {
@@ -6306,33 +6304,93 @@ private int loadingProgressFor(String message) {
         }, 280L);
     }
 
-    private void bindSearchNavigationHold(View target) {
+    private void bindSearchNavigationGestures(View target) {
         if (target == null) return;
         final Runnable[] holdTask = new Runnable[1];
         final float[] downX = {0f};
         final float[] downY = {0f};
+        final long[] lastTapAt = {0L};
+        final boolean[] holdTriggered = {false};
+        final boolean[] moved = {false};
         target.setOnTouchListener((v, event) -> {
             int action = event.getActionMasked();
             if (action == MotionEvent.ACTION_DOWN) {
                 downX[0] = event.getX();
                 downY[0] = event.getY();
+                holdTriggered[0] = false;
+                moved[0] = false;
                 holdTask[0] = () -> {
+                    holdTriggered[0] = true;
                     try { v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS); } catch (Exception ignored) {}
                     scrollMainToTop(true);
                 };
                 uiHandler.postDelayed(holdTask[0], 2000L);
-                return false;
+                return true;
             }
             if (action == MotionEvent.ACTION_MOVE) {
                 if (Math.abs(event.getX() - downX[0]) > dp(12) || Math.abs(event.getY() - downY[0]) > dp(12)) {
+                    moved[0] = true;
                     if (holdTask[0] != null) uiHandler.removeCallbacks(holdTask[0]);
                 }
-                return false;
+                return true;
             }
-            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL || action == MotionEvent.ACTION_OUTSIDE) {
+            if (action == MotionEvent.ACTION_UP) {
                 if (holdTask[0] != null) uiHandler.removeCallbacks(holdTask[0]);
+                if (!holdTriggered[0] && !moved[0]) {
+                    long now = SystemClock.uptimeMillis();
+                    if (now - lastTapAt[0] <= 360L) {
+                        lastTapAt[0] = 0L;
+                        scrollMainToTop(false);
+                    } else {
+                        lastTapAt[0] = now;
+                    }
+                }
+                return true;
             }
-            return false;
+            if (action == MotionEvent.ACTION_CANCEL || action == MotionEvent.ACTION_OUTSIDE) {
+                if (holdTask[0] != null) uiHandler.removeCallbacks(holdTask[0]);
+                return true;
+            }
+            return true;
+        });
+    }
+
+    private void bindBottomNavigationAutoHide(ScrollView scrollSource, View navigation) {
+        if (scrollSource == null || navigation == null) return;
+        final boolean[] hidden = {false};
+        final int[] directionDistance = {0};
+        navigation.setTranslationY(0f);
+        scrollSource.setOnScrollChangeListener((v, scrollX, scrollY, oldScrollX, oldScrollY) -> {
+            int delta = scrollY - oldScrollY;
+            if (scrollY <= dp(4)) {
+                directionDistance[0] = 0;
+                if (hidden[0]) {
+                    hidden[0] = false;
+                    navigation.animate().cancel();
+                    navigation.animate().translationY(0f).setDuration(170L).start();
+                }
+                return;
+            }
+            if (delta > 0) {
+                directionDistance[0] = Math.max(0, directionDistance[0]) + delta;
+                if (!hidden[0] && directionDistance[0] >= dp(12)) {
+                    hidden[0] = true;
+                    directionDistance[0] = 0;
+                    navigation.animate().cancel();
+                    navigation.animate()
+                            .translationY(Math.max(navigation.getHeight(), dp(56)) + dp(4))
+                            .setDuration(180L)
+                            .start();
+                }
+            } else if (delta < 0) {
+                directionDistance[0] = Math.min(0, directionDistance[0]) + delta;
+                if (hidden[0] && -directionDistance[0] >= dp(8)) {
+                    hidden[0] = false;
+                    directionDistance[0] = 0;
+                    navigation.animate().cancel();
+                    navigation.animate().translationY(0f).setDuration(170L).start();
+                }
+            }
         });
     }
 
@@ -6529,7 +6587,10 @@ private int loadingProgressFor(String message) {
         wrap.setBackgroundColor(Color.TRANSPARENT);
         visualScroll.addView(wrap, new ScrollView.LayoutParams(-1, -2));
 
-        addBottomNavigation(full, 1, dialog);
+        bindBottomNavigationAutoHide(
+                visualScroll,
+                addBottomNavigation(full, 1, dialog)
+        );
         dialog.setContentView(full);
 
         LinearLayout nickRow = new LinearLayout(this);
@@ -8596,7 +8657,10 @@ private int loadingProgressFor(String message) {
         dialogScroll.addView(wrap, new ScrollView.LayoutParams(-1, -1));
         full.addView(dialogScroll, new FrameLayout.LayoutParams(-1, -1));
 
-        addBottomNavigation(full, 3, dialog);
+        bindBottomNavigationAutoHide(
+                dialogScroll,
+                addBottomNavigation(full, 3, dialog)
+        );
         dialog.setContentView(full);
 
         TextView title = habboText(t(R.string.settings), 24, true);
@@ -9120,7 +9184,7 @@ private int loadingProgressFor(String message) {
         if (name.isEmpty()) name = code;
         String desc = firstText(badge, "description", "desc");
         if (desc.isEmpty()) desc = t(R.string.no_description);
-        String created = firstText(badge, "creationTime", "createdAt", "date");
+        String created = badgeObtainedDate(badge);
         String owners = firstText(badge, "totalOwners", "owners", "ownerCount", "count");
 
         final Dialog dialog = new Dialog(this);
@@ -9763,7 +9827,7 @@ private int loadingProgressFor(String message) {
         wrap.setBackgroundColor(Color.TRANSPARENT);
         full.addView(wrap, new FrameLayout.LayoutParams(-1, -1));
 
-        addBottomNavigation(full, 2, dialog);
+        FrameLayout favoritesBottomNavigation = addBottomNavigation(full, 2, dialog);
         dialog.setContentView(full);
 
         TextView title = habboText(t(R.string.favorites), 24, true);
@@ -9779,6 +9843,7 @@ private int loadingProgressFor(String message) {
         sv.addView(list, new ScrollView.LayoutParams(-1, -2));
         LinearLayout.LayoutParams svLp = new LinearLayout.LayoutParams(-1, 0, 1);
         wrap.addView(sv, svLp);
+        bindBottomNavigationAutoHide(sv, favoritesBottomNavigation);
 
         Runnable[] render = new Runnable[1];
         render[0] = () -> {
