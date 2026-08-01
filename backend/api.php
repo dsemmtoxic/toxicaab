@@ -17,19 +17,27 @@ declare(strict_types=1);
  *   - /api.php?path=habboinfo%2F...&query=... (gateway legado)
  *   - o formato antigo por query string documentado no projeto.
  *
- * Requisitos: PHP 8.0+, cURL e DOM. Não precisa de permissão de escrita.
+ * Requisitos: PHP 8.0+, cURL e DOM. O diretório deste arquivo precisa aceitar
+ * a criação de cache/habbonews_rarity para o índice técnico de raridades.
  * Dados atuais vêm da API pública oficial; a fonte histórica é usada somente
- * como complemento. Datas históricas são datas de detecção.
+ * como complemento. Datas históricas são datas de detecção. Nenhum nome de
+ * roupa do HabboNews é usado: os nomes localizados continuam no HabboWidgets.
  */
 
-const TOXIC_API_VERSION = '1.3.4';
-const TOXIC_USER_AGENT = 'ToxicSearchTool/1.3.4 (+https://atoxic.com.br)';
+const TOXIC_API_VERSION = '1.3.5';
+const TOXIC_USER_AGENT = 'ToxicSearchTool/1.3.5 (+https://atoxic.com.br)';
 const HABBOWIDGETS_BASE = 'https://www.habbowidgets.com';
-const HABBOWIDGETS_KLD1_ICON = HABBOWIDGETS_BASE . '/images/kld1.gif';
-const HABBOWIDGETS_KLD2_ICON = HABBOWIDGETS_BASE . '/images/kld2.gif';
 const CACHE_ROOT = __DIR__ . '/cache/habbowidgets_api';
-// A API opera de forma totalmente stateless. Não altere para true em hospedagens
-// com pouco espaço: nenhum perfil, histórico, resposta ou lock é persistido.
+const HABBONEWS_IFRAME_URL = 'https://lite.habbonews.net/iframes/iframe-clothing2-temp.php?nick=&direcao=2&genero=3&tutorial=3';
+const HABBONEWS_RARITY_CACHE_ROOT = __DIR__ . '/cache/habbonews_rarity';
+const HABBONEWS_RARITY_CACHE_FILE = HABBONEWS_RARITY_CACHE_ROOT . '/index.json';
+const HABBONEWS_RARITY_LOCK_FILE = HABBONEWS_RARITY_CACHE_ROOT . '/refresh.lock';
+const HABBONEWS_RARITY_CACHE_TTL = 21_600;
+const HABBONEWS_RARITY_MIN_ITEMS = 2_500;
+const HABBONEWS_TRANSPARENT_ICON = 'OuxYRCz';
+const HABBONEWS_RARITY_SEED_GZIP_BASE64 = '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';
+// Perfis e históricos continuam stateless. Somente o pequeno índice técnico de
+// raridades do HabboNews é persistido no cache separado definido acima.
 const ENABLE_API_CACHE = false;
 const PROFILE_CACHE_TTL = 600;
 const HTTP_CACHE_TTL = 600;
@@ -37,6 +45,7 @@ const HTTP_STALE_TTL = 2_592_000;
 const PROFILE_STALE_TTL = 7_776_000;
 const CLOSET_CACHE_TTL = 2_592_000;
 const MAX_HTML_BYTES = 24_000_000;
+const MAX_HABBONEWS_HTML_BYTES = 2_000_000;
 const MAX_JSON_BYTES = 8_000_000;
 const MAX_HISTORY_ITEMS = 1_000;
 const UPSTREAM_MIN_INTERVAL_MS = 300;
@@ -77,12 +86,6 @@ function main(): void
     try {
         purgeLegacyStorage();
         [$path, $params, $gatewayMode] = parseIncomingRequest();
-        if (preg_match('#^rarity-icon/(?:level/)?(\d{1,2})$#i', $path, $iconMatch)) {
-            sendRarityIcon((int) $iconMatch[1]);
-        }
-        if (preg_match('#^rarity-icon/(generic|rare|nft)$#i', $path, $iconMatch)) {
-            sendRarityIcon(strtolower($iconMatch[1]));
-        }
         [$payload, $cacheHit] = dispatch($path, $params);
         sendSuccess($payload, $gatewayMode, $cacheHit);
     } catch (ApiProblem $problem) {
@@ -182,52 +185,6 @@ function sanitizePublicPayload(mixed $value, string $key = ''): mixed
     return trim($clean);
 }
 
-function sendRarityIcon(string|int $rarity): void
-{
-    $level = is_int($rarity)
-        ? $rarity
-        : rarityLevelFromLegacy((string) $rarity);
-    $level = max(1, min(14, $level));
-    $encoded = rarityIconPngBase64($level);
-    if ($encoded === '') {
-        throw new ApiProblem(404, 'rarity_icon_not_found', 'Ícone de raridade não encontrado.');
-    }
-    $binary = base64_decode($encoded, true);
-    if (!is_string($binary)) {
-        throw new ApiProblem(500, 'rarity_icon_invalid', 'Ícone de raridade inválido.');
-    }
-
-    header_remove('Content-Type');
-    header('Content-Type: image/png');
-    header('Cache-Control: public, max-age=604800, immutable');
-    header('Content-Length: ' . strlen($binary));
-    echo $binary;
-    exit;
-}
-
-function rarityIconPngBase64(int $level): string
-{
-    // Cores alinhadas à legenda de cabides usada por fã-sites. Alguns níveis
-    // compartilham o mesmo cabide e são diferenciados pelo nível e tooltip.
-    $icons = [
-        1 => 'iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAwUlEQVR42p2TwQ3DIAxFTVQ1e7QHRsgAVRboGBmoY7AAygCMkEOyB7m4hwJ1iA0olnIx5ufxPyg0DrhS7wHzHhqnuNmuVaDYz0noIG7Tv//4iEQsCRXY1/kk2HScWPs6Qz8uUKubtEDxKVGVhE0kHIMS5XOdtOCtBtymROCtFgNQaNyh4a2G+/N18ITr0aQUACCXCGcoFaOeJZEokBtaij/OJhH6l5aitMnYflyKMRbvT7j2ePVD434k0uusehP2fQHxBn4QmxntRgAAAABJRU5ErkJggg==',
-        2 => 'iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAvUlEQVR42pVTuxHDIAwVviyQXlu4SJsNdM6gcN7ALQVb0DOCUsTidPzz7lRYyI/He2DYemjBfF5c9th605rdVgmG/VKJHkxEuf88z66iphJNcIVQES4dR3CFAEeMMMOjt6Dla0VTJS3j5BhaUTm39RYcIiSirMAh9pO602Eph8iJiBMRO8RuT4qtB3N/VIm0DHWI8N73yrNMIgSloaP4ZTaT6F1WoNVmY48YhzEO709p7L/F1v+U9F7nDPLfF/u0h6Qbz1rBAAAAAElFTkSuQmCC',
-        3 => 'iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAwUlEQVR42p2TwQ3DIAxFTVQ1e7QHRsgAVRboGBmoY7AAygCMkEOyB7m4hwJ1iA0olnIx5ufxPyg0DrhS7wHzHhqnuNmuVaDYz0noIG7Tv//4iEQsCRXY1/kk2HScWPs6Qz8uUKubtEDxKVGVhE0kHIMS5XOdtOCtBtymROCtFgNQaNyh4a2G+/N18ITr0aQUACCXCGcoFaOeJZEokBtaij/OJhH6l5aitMnYflyKMRbvT7j2ePVD434k0uusehP2fQHxBn4QmxntRgAAAABJRU5ErkJggg==',
-        4 => 'iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAvUlEQVR42pVTuxHDIAwVviyQXlu4SJsNdM6gcN7ALQVb0DOCUsTidPzz7lRYyI/He2DYemjBfF5c9th605rdVgmG/VKJHkxEuf88z66iphJNcIVQES4dR3CFAEeMMMOjt6Dla0VTJS3j5BhaUTm39RYcIiSirMAh9pO602Eph8iJiBMRO8RuT4qtB3N/VIm0DHWI8N73yrNMIgSloaP4ZTaT6F1WoNVmY48YhzEO709p7L/F1v+U9F7nDPLfF/u0h6Qbz1rBAAAAAElFTkSuQmCC',
-        5 => 'iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAwUlEQVR42pVTQQ6EIAwsxj+t4WL0CX6EhIds4kf6BIwXI6/qHta6DVBwm/RAaSfDTDGEEUphlhelNcJoSr3dU4BqPWUiG9H/Zpa3URkVmUiA/dwywEfP4djPDdZjhlb02oWkLxk1mZSE42dIRmlfp104GwA93QycDbpTlzvE6Wwg9EToiZwNao2TMIK5DpkjJUGdDTAOU6bZDcIAqaA1+7m3l+qPw1TdB82tW9j1mKs2VvcnFfbfJIxfJtrvbAXPfQDa+4yhxAKkSQAAAABJRU5ErkJggg==',
-        6 => 'iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAwUlEQVR42pVTQQ6EIAwsxj+t4WL0CX6EhIds4kf6BIwXI6/qHta6DVBwm/RAaSfDTDGEEUphlhelNcJoSr3dU4BqPWUiG9H/Zpa3URkVmUiA/dwywEfP4djPDdZjhlb02oWkLxk1mZSE42dIRmlfp104GwA93QycDbpTlzvE6Wwg9EToiZwNao2TMIK5DpkjJUGdDTAOU6bZDcIAqaA1+7m3l+qPw1TdB82tW9j1mKs2VvcnFfbfJIxfJtrvbAXPfQDa+4yhxAKkSQAAAABJRU5ErkJggg==',
-        7 => 'iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAwklEQVR42p1TMQ7DIAw0Ub6SJcyon2DKmCmvyCP6ik6MTPkEYk6WPMYdWpBDbYhqieUwp/OdUegDcKWmB5YY+qC43u4uQRUvldDG5Vwz/hqeoiJWCSWI8fghvDVOqhgP2OcNWtVLF1Q+VdRUwhmXxqCKyr5OutDOwnKuWYF2VgxAoQ8XQDsLxowXTziMJqUAALlEOEMpGfUskySC0tBa/Km3p+4bM1b3QUorG7vPWzXG6v581x7/PejDR4n0O1uV3r0BUXZ8+3RqTGMAAAAASUVORK5CYII=',
-        8 => 'iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAwElEQVR42pVTsQ3DIBAEy9OwQNooTpM2g9Ayg1sPQktjLLcs4HUuRQC/CA/OSy9Zx/l9f4clbBC1ku8bSgw2yBp3uDqgiZdKKBHanfjyYhVVldAB27r/DLy0Tqpt3cV0zKJXI3dA5VNFXSXVROIaVFHJG7gDr4yAdlmBV4ZPKqaD1F4ZQDtAO3hlWCx1SvcEGGLtAxSX8SHvXhraij9xR+r+43lv3gcurWzsdMzNGJv3pzT234YNXyXc39n1Jr73AQdPnpCnfIlyAAAAAElFTkSuQmCC',
-        9 => 'iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAv0lEQVR42pVT0QnDIBDVkAUcpnQD6UcDpVM4UqaQgPmQbiAZJiO8fjRnD+tpenAgz/N8955q+KRqoZ9XlBh80rXa4WyDJl4y4YU2fs+8blpkVGXCG2zL+tPw1DgU27KqfZ5UL0Zpg9PnjLpMasLRGJxRWTdIG8YFZSMyA+OC7NThDiiNC7ARsBEwLogYJbmbAamwdgHH9bHIs5eCtuyn2pGrf3ncm+9BcisLu89T08bm+ymF/Tfh04eJ9Dt7QefelkSbp3PJpcIAAAAASUVORK5CYII=',
-        10 => 'iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAvklEQVR42pVTMQ7DIAw0KBPfSaRO3Sqx9zN5A59hr5QtExL+TlZ3KFBKsEMtWUqOwzmfHUU+QC/U80YtRj6oHlePFpBwLREJbUmpUFdJLgAAgNv+8z7cTg7cdljWA65i4g7U/DoVHFLSnUhqo1bU8jR3EJ0BQlsURGf4SaU9oZzRGSK0RGgpOsNiOfOefQGG2PtAjav0UHpvDZXGn7lT7f78uIv7wE2rGLushzhGcX9aY/9N8uGjhPs7L71J997ASJ4cvt4KngAAAABJRU5ErkJggg==',
-        11 => 'iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAxUlEQVR42p2Tyw3EIAxEh5BWqCE9+GIpTaSNbYMmkLjQAyWkGu9hF+QlkM9a4jI4w2NMjISMXpl1kVaTkE2vd7prcKq3JLrRe1/1bduGRF0SbZBSOhjeuk6plBJijLiqebSh8TXRJUkvuHINTdT2TaMNZob3vhIw83AAcyswM4jokAkRgYh+NLMuIiEbA0B6E+kFqg/QmVWTYtAGejb+0ltN9Cl3StNaAC8A2Pcd1lo45x4ZlCeML81fS0L+jHj0d15V+e4NAfx6IlyulGUAAAAASUVORK5CYII=',
-        12 => 'iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAv0lEQVR42pVT0QnDIBDVkAUcpnQD6UcDpVM4UqaQgPmQbiAZJiO8fjRnD+tpenAgz/N8955q+KRqoZ9XlBh80rXa4WyDJl4y4YU2fs+8blpkVGXCG2zL+tPw1DgU27KqfZ5UL0Zpg9PnjLpMasLRGJxRWTdIG8YFZSMyA+OC7NThDiiNC7ARsBEwLogYJbmbAamwdgHH9bHIs5eCtuyn2pGrf3ncm+9BcisLu89T08bm+ymF/Tfh04eJ9Dt7QefelkSbp3PJpcIAAAAASUVORK5CYII=',
-        13 => 'iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAvUlEQVR42pVTuxHDIAwVviyQXlu4SJsNdM6gcN7ALQVb0DOCUsTidPzz7lRYyI/He2DYemjBfF5c9th605rdVgmG/VKJHkxEuf88z66iphJNcIVQES4dR3CFAEeMMMOjt6Dla0VTJS3j5BhaUTm39RYcIiSirMAh9pO602Eph8iJiBMRO8RuT4qtB3N/VIm0DHWI8N73yrNMIgSloaP4ZTaT6F1WoNVmY48YhzEO709p7L/F1v+U9F7nDPLfF/u0h6Qbz1rBAAAAAElFTkSuQmCC',
-        14 => 'iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAwElEQVR42p2TsRHDIBAED9mlkH7sEshdCwW4AGohpwRiulBKATiwYV74Ecg3o+R5nZa7kSo+QpJ6Pko/Kz4qaXdbNTid9yR80Vrb5s65IZFIwg1CCD+GS9epCiEgpYSZ7qMDjs+JpiRScPUanKjf20YHRARrbSMgomEBqvh4GBARjDGHTKQZb0oBKFIjUqDcjGfWTKpBH+hZ/XW3mfCvrIjT3gC8AGDfd+ScobW+ZFCDwZfmr6f4+Kl49HfOVN97A9vJfWF5JMoRAAAAAElFTkSuQmCC',
-    ];
-    return (string) ($icons[$level] ?? '');
-}
-
 function encodeJson(mixed $value): string
 {
     $json = json_encode(
@@ -246,6 +203,414 @@ function safeErrorDetail(Throwable $error): string
 {
     $message = trim($error->getMessage());
     return mbSubstrSafe($message, 0, 240);
+}
+
+/**
+ * Carrega o índice técnico usado somente para ligar "tipo-ID" ao ícone do
+ * HabboNews e identificar peças padrão. A primeira consulta após seis horas
+ * atualiza o cache; se a origem falhar, a última cópia válida permanece ativa.
+ */
+function habbonewsRarityIndex(): array
+{
+    static $memory = null;
+    if (is_array($memory)) {
+        return $memory;
+    }
+
+    $cached = readHabbonewsRarityCache();
+    if (
+        isValidHabbonewsRarityIndex($cached)
+        && (time() - (int) ($cached['updatedAt'] ?? 0)) < HABBONEWS_RARITY_CACHE_TTL
+    ) {
+        $memory = habbonewsRarityIndexWithMeta($cached, true, false, 'disk-cache');
+        return $memory;
+    }
+
+    $fallback = isValidHabbonewsRarityIndex($cached)
+        ? $cached
+        : embeddedHabbonewsRarityIndex();
+    $lockHandle = null;
+    $ownsLock = false;
+
+    if (ensureHabbonewsRarityCacheDirectory()) {
+        $lockHandle = @fopen(HABBONEWS_RARITY_LOCK_FILE, 'c+');
+        if (is_resource($lockHandle)) {
+            $ownsLock = @flock($lockHandle, LOCK_EX | LOCK_NB);
+            if (!$ownsLock && isValidHabbonewsRarityIndex($fallback)) {
+                @fclose($lockHandle);
+                $memory = habbonewsRarityIndexWithMeta(
+                    $fallback,
+                    true,
+                    true,
+                    isValidHabbonewsRarityIndex($cached) ? 'disk-cache' : 'embedded-seed'
+                );
+                return $memory;
+            }
+        }
+    }
+
+    try {
+        // Outro processo pode ter concluído a atualização enquanto este esperava.
+        if ($ownsLock) {
+            $newerCache = readHabbonewsRarityCache();
+            if (
+                isValidHabbonewsRarityIndex($newerCache)
+                && (time() - (int) ($newerCache['updatedAt'] ?? 0))
+                    < HABBONEWS_RARITY_CACHE_TTL
+            ) {
+                $memory = habbonewsRarityIndexWithMeta(
+                    $newerCache,
+                    true,
+                    false,
+                    'disk-cache'
+                );
+                return $memory;
+            }
+        }
+
+        $response = cachedHttpRequest(
+            'GET',
+            HABBONEWS_IFRAME_URL,
+            [],
+            0,
+            MAX_HABBONEWS_HTML_BYTES,
+            'pt-BR,pt;q=0.9,en;q=0.7'
+        );
+        $fresh = parseHabbonewsRarityIndex((string) $response['body']);
+        if (!isValidHabbonewsRarityIndex($fresh)) {
+            throw new ApiProblem(
+                502,
+                'rarity_index_invalid',
+                'O índice de raridades recebido é inválido.'
+            );
+        }
+        writeHabbonewsRarityCache($fresh);
+        $memory = habbonewsRarityIndexWithMeta($fresh, false, false, 'live-refresh');
+        return $memory;
+    } catch (Throwable $error) {
+        if (isValidHabbonewsRarityIndex($fallback)) {
+            $memory = habbonewsRarityIndexWithMeta(
+                $fallback,
+                isValidHabbonewsRarityIndex($cached),
+                true,
+                isValidHabbonewsRarityIndex($cached) ? 'disk-cache' : 'embedded-seed'
+            );
+            return $memory;
+        }
+        $memory = habbonewsRarityIndexWithMeta(
+            ['v' => 1, 'updatedAt' => 0, 'items' => []],
+            false,
+            true,
+            'unavailable'
+        );
+        return $memory;
+    } finally {
+        if (is_resource($lockHandle)) {
+            if ($ownsLock) {
+                @flock($lockHandle, LOCK_UN);
+            }
+            @fclose($lockHandle);
+        }
+    }
+}
+
+function readHabbonewsRarityCache(): ?array
+{
+    $decoded = readJsonFile(HABBONEWS_RARITY_CACHE_FILE);
+    return isValidHabbonewsRarityIndex($decoded) ? $decoded : null;
+}
+
+function isValidHabbonewsRarityIndex(mixed $index): bool
+{
+    return is_array($index)
+        && (int) ($index['v'] ?? 0) === 1
+        && is_array($index['items'] ?? null)
+        && count($index['items']) >= HABBONEWS_RARITY_MIN_ITEMS;
+}
+
+function embeddedHabbonewsRarityIndex(): ?array
+{
+    $compressed = base64_decode(HABBONEWS_RARITY_SEED_GZIP_BASE64, true);
+    if (!is_string($compressed) || !function_exists('gzdecode')) {
+        return null;
+    }
+    $json = @gzdecode($compressed);
+    if (!is_string($json) || $json === '') {
+        return null;
+    }
+    $decoded = json_decode($json, true);
+    return isValidHabbonewsRarityIndex($decoded) ? $decoded : null;
+}
+
+function habbonewsRarityIndexWithMeta(
+    array $index,
+    bool $cacheHit,
+    bool $stale,
+    string $loadedFrom
+): array {
+    $updatedAt = (int) ($index['updatedAt'] ?? 0);
+    $index['_meta'] = [
+        'provider' => 'habbonews-iframe',
+        'loadedFrom' => $loadedFrom,
+        'cacheHit' => $cacheHit,
+        'stale' => $stale,
+        'updatedAt' => $updatedAt > 0 ? gmdate('c', $updatedAt) : '',
+        'ageSeconds' => $updatedAt > 0 ? max(0, time() - $updatedAt) : null,
+        'refreshIntervalSeconds' => HABBONEWS_RARITY_CACHE_TTL,
+        'entries' => count($index['items'] ?? []),
+    ];
+    return $index;
+}
+
+function ensureHabbonewsRarityCacheDirectory(): bool
+{
+    if (is_dir(HABBONEWS_RARITY_CACHE_ROOT)) {
+        return is_writable(HABBONEWS_RARITY_CACHE_ROOT);
+    }
+    return @mkdir(HABBONEWS_RARITY_CACHE_ROOT, 0775, true)
+        && is_dir(HABBONEWS_RARITY_CACHE_ROOT);
+}
+
+function writeHabbonewsRarityCache(array $index): bool
+{
+    if (!isValidHabbonewsRarityIndex($index) || !ensureHabbonewsRarityCacheDirectory()) {
+        return false;
+    }
+    $json = encodeJson($index);
+    try {
+        $suffix = bin2hex(random_bytes(6));
+    } catch (Throwable $error) {
+        $suffix = str_replace('.', '', uniqid('', true));
+    }
+    $temporary = HABBONEWS_RARITY_CACHE_FILE . '.tmp-' . getmypid() . '-' . $suffix;
+    $written = @file_put_contents($temporary, $json, LOCK_EX);
+    if (!is_int($written) || $written !== strlen($json)) {
+        @unlink($temporary);
+        return false;
+    }
+    @chmod($temporary, 0664);
+    if (!@rename($temporary, HABBONEWS_RARITY_CACHE_FILE)) {
+        @unlink($temporary);
+        return false;
+    }
+    return true;
+}
+
+function parseHabbonewsRarityIndex(string $html): array
+{
+    $arraySource = extractJavascriptArrayAfter($html, 'var setsJSON');
+    $json = quoteJavascriptNumericObjectKeys($arraySource);
+    try {
+        $groups = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
+    } catch (JsonException $error) {
+        throw new ApiProblem(
+            502,
+            'rarity_index_parse_failed',
+            'Não foi possível interpretar o índice de raridades.'
+        );
+    }
+    if (!is_array($groups)) {
+        throw new ApiProblem(502, 'rarity_index_missing', 'Índice de raridades ausente.');
+    }
+
+    $items = [];
+    foreach ($groups as $group) {
+        if (!is_array($group)) {
+            continue;
+        }
+        $type = strtolower(trim((string) ($group['type'] ?? '')));
+        $sets = $group['sets'] ?? null;
+        if (preg_match('/^[a-z]{2}$/', $type) !== 1 || !is_array($sets)) {
+            continue;
+        }
+        foreach ($sets as $id => $metadata) {
+            $id = (string) $id;
+            if ($id === '9999' || preg_match('/^\d+$/', $id) !== 1 || !is_array($metadata)) {
+                continue;
+            }
+            $iconCode = trim((string) ($metadata['raridade'] ?? ''));
+            if (
+                $iconCode !== ''
+                && preg_match('/^[A-Za-z0-9]{5,12}$/', $iconCode) !== 1
+            ) {
+                $iconCode = '';
+            }
+            $sourceName = trim(html_entity_decode(
+                (string) ($metadata['mobi'] ?? ''),
+                ENT_QUOTES | ENT_HTML5,
+                'UTF-8'
+            ));
+            $hidden = $sourceName === '' && $iconCode === HABBONEWS_TRANSPARENT_ICON;
+            $code = $type . '-' . $id;
+            if ($hidden) {
+                $items[$code] = ['h' => 1];
+            } elseif ($iconCode !== '' && $iconCode !== HABBONEWS_TRANSPARENT_ICON) {
+                $items[$code] = ['i' => $iconCode];
+            } else {
+                // Registro conhecido, mas sem ícone visível. O nome não é salvo.
+                $items[$code] = ['i' => ''];
+            }
+        }
+    }
+    ksort($items, SORT_STRING);
+    if (count($items) < HABBONEWS_RARITY_MIN_ITEMS) {
+        throw new ApiProblem(
+            502,
+            'rarity_index_incomplete',
+            'O índice de raridades recebido está incompleto.'
+        );
+    }
+    return [
+        'v' => 1,
+        'updatedAt' => time(),
+        'generatedAt' => gmdate('c'),
+        'sourceHash' => hash('sha256', $arraySource),
+        'items' => $items,
+    ];
+}
+
+function extractJavascriptArrayAfter(string $source, string $marker): string
+{
+    $markerPosition = strpos($source, $marker);
+    if ($markerPosition === false) {
+        throw new ApiProblem(502, 'rarity_index_marker_missing', 'Marcador do índice ausente.');
+    }
+    $begin = strpos($source, '[', $markerPosition);
+    if ($begin === false) {
+        throw new ApiProblem(502, 'rarity_index_array_missing', 'Array do índice ausente.');
+    }
+
+    $depth = 0;
+    $quote = '';
+    $escaped = false;
+    $length = strlen($source);
+    for ($position = $begin; $position < $length; $position++) {
+        $character = $source[$position];
+        if ($quote !== '') {
+            if ($escaped) {
+                $escaped = false;
+            } elseif ($character === '\\') {
+                $escaped = true;
+            } elseif ($character === $quote) {
+                $quote = '';
+            }
+            continue;
+        }
+        if ($character === '"' || $character === "'") {
+            $quote = $character;
+            continue;
+        }
+        if ($character === '[') {
+            $depth++;
+        } elseif ($character === ']') {
+            $depth--;
+            if ($depth === 0) {
+                return substr($source, $begin, $position - $begin + 1);
+            }
+        }
+    }
+    throw new ApiProblem(502, 'rarity_index_unclosed', 'Array do índice incompleto.');
+}
+
+function quoteJavascriptNumericObjectKeys(string $source): string
+{
+    $output = '';
+    $quote = '';
+    $escaped = false;
+    $length = strlen($source);
+    for ($position = 0; $position < $length; $position++) {
+        $character = $source[$position];
+        if ($quote !== '') {
+            $output .= $character;
+            if ($escaped) {
+                $escaped = false;
+            } elseif ($character === '\\') {
+                $escaped = true;
+            } elseif ($character === $quote) {
+                $quote = '';
+            }
+            continue;
+        }
+        if ($character === '"' || $character === "'") {
+            $quote = $character;
+            $output .= $character;
+            continue;
+        }
+        if (ctype_digit($character)) {
+            $previous = $position - 1;
+            while ($previous >= 0 && ctype_space($source[$previous])) {
+                $previous--;
+            }
+            if ($previous >= 0 && ($source[$previous] === '{' || $source[$previous] === ',')) {
+                $digitsEnd = $position;
+                while ($digitsEnd < $length && ctype_digit($source[$digitsEnd])) {
+                    $digitsEnd++;
+                }
+                $colon = $digitsEnd;
+                while ($colon < $length && ctype_space($source[$colon])) {
+                    $colon++;
+                }
+                if ($colon < $length && $source[$colon] === ':') {
+                    $output .= '"' . substr($source, $position, $digitsEnd - $position) . '"';
+                    $output .= substr($source, $digitsEnd, $colon - $digitsEnd + 1);
+                    $position = $colon;
+                    continue;
+                }
+            }
+        }
+        $output .= $character;
+    }
+    return $output;
+}
+
+function habbonewsClothingClassification(string $code): array
+{
+    $code = strtolower(trim($code));
+    $index = habbonewsRarityIndex();
+    $record = $index['items'][$code] ?? null;
+    $known = is_array($record);
+    $hidden = $known && !empty($record['h']);
+    $iconCode = $known ? trim((string) ($record['i'] ?? '')) : '';
+    if (
+        $iconCode === HABBONEWS_TRANSPARENT_ICON
+        || preg_match('/^[A-Za-z0-9]{5,12}$/', $iconCode) !== 1
+    ) {
+        $iconCode = '';
+    }
+    return [
+        'known' => $known,
+        'hidden' => $hidden,
+        'iconCode' => $iconCode,
+        'iconUrl' => habbonewsRarityIconUrl($iconCode),
+        'source' => $known ? 'habbonews-iframe' : 'unclassified',
+    ];
+}
+
+function habbonewsRarityIconUrl(string $iconCode): string
+{
+    if (
+        $iconCode === ''
+        || $iconCode === HABBONEWS_TRANSPARENT_ICON
+        || preg_match('/^[A-Za-z0-9]{5,12}$/', $iconCode) !== 1
+    ) {
+        return '';
+    }
+    return 'https://i.imgur.com/' . rawurlencode($iconCode) . '.gif';
+}
+
+function habbonewsRarityPublicMeta(): array
+{
+    $index = habbonewsRarityIndex();
+    $meta = is_array($index['_meta'] ?? null) ? $index['_meta'] : [];
+    return [
+        'provider' => 'habbonews-iframe',
+        'cacheHit' => (bool) ($meta['cacheHit'] ?? false),
+        'stale' => (bool) ($meta['stale'] ?? false),
+        'updatedAt' => (string) ($meta['updatedAt'] ?? ''),
+        'ageSeconds' => $meta['ageSeconds'] ?? null,
+        'refreshIntervalSeconds' => HABBONEWS_RARITY_CACHE_TTL,
+        'entries' => count($index['items'] ?? []),
+    ];
 }
 
 function parseIncomingRequest(): array
@@ -307,10 +672,6 @@ function legacyPathFromQuery(array $params): string
     $endpoint = trim((string) ($params['endpoint'] ?? ''));
     $name = trim((string) ($params['name'] ?? ''));
     $uniqueId = trim((string) ($params['uniqueId'] ?? ''));
-
-    if (isset($params['rarityIconLevel'])) {
-        return 'rarity-icon/level/' . (int) $params['rarityIconLevel'];
-    }
 
     if ($endpoint === 'habbos-suggest') {
         return 'habboinfo/habbos';
@@ -983,6 +1344,10 @@ function cachedHttpRequest(
 ): array {
     assertAllowedUpstreamUrl($url);
     $method = strtoupper($method);
+    $upstreamHost = strtolower((string) parse_url($url, PHP_URL_HOST));
+    $referer = $upstreamHost === 'lite.habbonews.net'
+        ? 'https://www.habbonews.net/visuais'
+        : HABBOWIDGETS_BASE . '/';
     if (!function_exists('curl_init')) {
         throw new ApiProblem(
             500,
@@ -1005,8 +1370,8 @@ function cachedHttpRequest(
         CURLOPT_HTTPHEADER => [
             'Accept: text/html,application/json;q=0.9,*/*;q=0.7',
             'Accept-Language: ' . $language,
-            'Referer: ' . HABBOWIDGETS_BASE . '/',
-            'X-Toxic-App: 1.3.0',
+            'Referer: ' . $referer,
+            'X-Toxic-App: ' . TOXIC_API_VERSION,
         ],
         CURLOPT_WRITEFUNCTION => static function ($curl, string $chunk) use (
             &$body,
@@ -1082,6 +1447,7 @@ function assertAllowedUpstreamUrl(string $url): void
         'www.habbo.it',
         'www.habbo.nl',
         'www.habbo.com.tr',
+        'lite.habbonews.net',
     ];
     if (!in_array($host, $allowed, true)) {
         throw new ApiProblem(400, 'upstream_not_allowed', 'Destino externo não permitido.');
@@ -2231,27 +2597,22 @@ function parseClosetRows(DOMXPath $xpath, array $config): array
         if ($name === '') {
             $name = $code;
         }
-        $rarityNode = firstXpathNode(
-            $xpath,
-            './/img[contains(translate(@src, "KLD", "kld"), "kld1.gif") or contains(translate(@src, "KLD", "kld"), "kld2.gif")][1]',
-            $row
-        );
-        $icon = imageUrlFromNode($rarityNode);
+        $classification = habbonewsClothingClassification($code);
+        if ((bool) ($classification['hidden'] ?? false)) {
+            continue;
+        }
         $rowContext = nodeText($row);
         $scientificName = extractClothingScientificName($rowContext . ' ' . $href);
-        $rarityDetails = clothingRarityProfile($code, $name, $icon, $rowContext . ' ' . $scientificName);
         $slot = strtolower((string) strtok($code, '-'));
         $items[$slot] = clothingRecord(
             $code,
             $name,
             $category,
             $slot,
-            (string) $rarityDetails['legacy'],
-            $icon,
             (string) $config['key'],
             absoluteHabbowidgetsUrl($href),
-            $rarityDetails,
-            $scientificName
+            $scientificName,
+            $classification
         );
     }
     return $items;
@@ -2262,43 +2623,23 @@ function clothingRecord(
     string $name,
     string $category,
     string $slot,
-    string $rarity,
-    string $iconUrl,
     string $hotel,
     string $closetUrl = '',
-    array $rarityDetails = [],
-    string $scientificName = ''
+    string $scientificName = '',
+    array $classification = []
 ): array {
     $name = sanitizeClothingName($name, $code);
     $category = trim($category);
     if ($category === '') {
         $category = clothingSlotName($slot, $hotel);
     }
-
-    if ($rarityDetails === []) {
-        $rarityDetails = clothingRarityProfile(
-            $code,
-            $name,
-            $iconUrl,
-            $scientificName . ' ' . $category
-        );
+    if ($classification === []) {
+        $classification = habbonewsClothingClassification($code);
     }
-    $level = (int) ($rarityDetails['level'] ?? 0);
-    if ($level === 0 && isCompleteClothingName($name, $code, $category)) {
-        $definition = rarityLevelDefinitions()[3];
-        $rarityDetails = [
-            'level' => 3,
-            'key' => $definition['key'],
-            'label' => $definition['label'],
-            'description' => $definition['description'],
-            'legacy' => 'generic',
-            'source' => 'named-item-fallback',
-            'confidence' => 'low',
-        ];
-        $level = 3;
-    }
-    $legacyRarity = (string) ($rarityDetails['legacy'] ?? $rarity);
-    $resolvedIconUrl = $level > 0 ? rarityIconUrlByLevel($level) : '';
+    $iconCode = trim((string) ($classification['iconCode'] ?? ''));
+    $resolvedIconUrl = trim((string) ($classification['iconUrl'] ?? ''));
+    $hidden = (bool) ($classification['hidden'] ?? false);
+    $known = (bool) ($classification['known'] ?? false);
 
     return [
         'code' => $code,
@@ -2316,16 +2657,22 @@ function clothingRecord(
         'category' => $category,
         '_slot' => $slot,
         'slot' => $slot,
-        'rarity' => $legacyRarity,
-        'rarityType' => (string) ($rarityDetails['key'] ?? ''),
-        'rarityLevel' => $level,
-        'rarityKey' => (string) ($rarityDetails['key'] ?? ''),
-        'rarityLabel' => (string) ($rarityDetails['label'] ?? ''),
-        'rarityDescription' => (string) ($rarityDetails['description'] ?? ''),
-        'raritySource' => (string) ($rarityDetails['source'] ?? ''),
-        'rarityConfidence' => (string) ($rarityDetails['confidence'] ?? ''),
-        'isRare' => in_array($level, [2, 4, 8, 13], true),
-        'isNft' => $level === 13,
+        'rarity' => '',
+        'rarityType' => '',
+        'rarityLevel' => 0,
+        'rarityKey' => $iconCode,
+        'rarityCode' => $iconCode,
+        'rarityIconCode' => $iconCode,
+        'habbonewsIconCode' => $iconCode,
+        'rarityLabel' => '',
+        'rarityDescription' => '',
+        'raritySource' => (string) ($classification['source'] ?? 'unclassified'),
+        'rarityConfidence' => $known ? 'exact' : 'unknown',
+        'rarityKnown' => $known,
+        'isDefaultClothing' => $hidden,
+        'hidden' => $hidden,
+        'isRare' => false,
+        'isNft' => false,
         'iconUrl' => $resolvedIconUrl,
         'imageUrl' => $resolvedIconUrl,
         'rarityIconUrl' => $resolvedIconUrl,
@@ -2445,200 +2792,6 @@ function clothingSlotName(string $slot, string $hotel): string
     ];
     $map = normalizeHotel($hotel) === 'br' ? $pt : $en;
     return (string) ($map[strtolower($slot)] ?? strtoupper($slot));
-}
-
-function rarityLevelDefinitions(): array
-{
-    return [
-        1 => ['key' => 'catalog_permanent', 'label' => 'Permanente no catálogo', 'description' => 'Disponível permanentemente no catálogo.'],
-        2 => ['key' => 'activity_rare', 'label' => 'Raro de atividade', 'description' => 'Entregue em atividade e não vendido no catálogo.'],
-        3 => ['key' => 'normal_returnable', 'label' => 'Normal', 'description' => 'Peça normal que pode retornar ao catálogo.'],
-        4 => ['key' => 'rare', 'label' => 'Raro', 'description' => 'Peça rara, normalmente sem retorno à Habbo Loja.'],
-        5 => ['key' => 'pack_exclusive', 'label' => 'Exclusivo de pack', 'description' => 'Disponibilizado exclusivamente em um pack.'],
-        6 => ['key' => 'offer_exclusive', 'label' => 'Exclusivo de oferta', 'description' => 'Disponibilizado exclusivamente em uma oferta.'],
-        7 => ['key' => 'clickable_normal', 'label' => 'Mobi clicável', 'description' => 'Obtido por meio de um mobi clicável normal.'],
-        8 => ['key' => 'clickable_rare', 'label' => 'Mobi clicável raro', 'description' => 'Obtido por meio de um mobi clicável raro.'],
-        9 => ['key' => 'crafting_recipe', 'label' => 'Mesa de criações', 'description' => 'Obtido por receita de uma mesa de criações.'],
-        10 => ['key' => 'hc_gift', 'label' => 'Presente HC', 'description' => 'Presente de assinatura Habbo Club de anos anteriores.'],
-        11 => ['key' => 'unreleased', 'label' => 'Nunca lançado', 'description' => 'Nunca foi disponibilizado ou vendido no jogo.'],
-        12 => ['key' => 'activity_promotion', 'label' => 'Atividade ou promoção', 'description' => 'Entregue em atividade ou promoção oficial.'],
-        13 => ['key' => 'collectible', 'label' => 'Colecionável', 'description' => 'Exclusivo de uma edição colecionável, LTD ou NFT.'],
-        14 => ['key' => 'unavailable', 'label' => 'Indisponível', 'description' => 'Classificado como indisponível.'],
-    ];
-}
-
-function rarityLevelFromLegacy(string $rarity): int
-{
-    $rarity = strtolower(trim($rarity));
-    if (str_contains($rarity, 'nft') || str_contains($rarity, 'collect')) {
-        return 13;
-    }
-    if (str_contains($rarity, 'rare') || str_contains($rarity, 'raro')) {
-        return 4;
-    }
-    return 3;
-}
-
-function legacyRarityForLevel(int $level): string
-{
-    if ($level === 13) {
-        return 'nft';
-    }
-    if (in_array($level, [2, 4, 8], true)) {
-        return 'rare';
-    }
-    return 'generic';
-}
-
-function publicApiBaseUrl(): string
-{
-    $forwardedProto = trim((string) ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? ''));
-    $scheme = $forwardedProto !== ''
-        ? strtolower((string) strtok($forwardedProto, ','))
-        : ((!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http');
-    $host = trim((string) ($_SERVER['HTTP_HOST'] ?? ''));
-    $script = (string) ($_SERVER['SCRIPT_NAME'] ?? '/api.php');
-    if (preg_match('#^(.*?\.php)(?:/.*)?$#i', $script, $match) === 1) {
-        $script = $match[1];
-    }
-    if ($host === '') {
-        return '/api.php';
-    }
-    return $scheme . '://' . $host . $script;
-}
-
-function rarityIconUrlByLevel(int $level): string
-{
-    if ($level < 1 || $level > 14) {
-        return '';
-    }
-    return rtrim(publicApiBaseUrl(), '/') . '?rarityIconLevel=' . $level;
-}
-
-function clothingRarity(string $code, string $name, string $iconUrl): string
-{
-    return (string) clothingRarityProfile($code, $name, $iconUrl)['legacy'];
-}
-
-function clothingRarityProfile(
-    string $code,
-    string $name,
-    string $iconUrl = '',
-    string $context = '',
-    array $hints = []
-): array {
-    $definitions = rarityLevelDefinitions();
-    $combined = strtolower(removeAccents(
-        $code . ' ' . $name . ' ' . $iconUrl . ' ' . $context . ' '
-        . implode(' ', array_map('strval', $hints))
-    ));
-    $level = 0;
-    $source = 'unknown';
-    $confidence = 'unknown';
-
-    $explicitLevel = (int) ($hints['rarityLevel'] ?? 0);
-    if ($explicitLevel >= 1 && $explicitLevel <= 14) {
-        $level = $explicitLevel;
-        $source = (string) ($hints['source'] ?? 'mapping');
-        $confidence = 'exact';
-    } elseif (preg_match('/(?:raridade|rarity|nivel|level)\s*[:#-]?\s*(1[0-4]|[1-9])\b/i', $context, $m)) {
-        $level = (int) $m[1];
-        $source = 'source-page';
-        $confidence = 'exact';
-    } elseif (preg_match('/\b(?:indisponivel|unavailable|disabled clothing)\b/', $combined)) {
-        $level = 14;
-        $source = 'metadata';
-        $confidence = 'high';
-    } elseif (preg_match('/\b(?:nft|collectible|collectable|colecionavel|limited edition|clothing_ltd|ltd_)\b/', $combined)) {
-        $level = 13;
-        $source = 'metadata';
-        $confidence = 'high';
-    } elseif (preg_match('/\b(?:never released|unreleased|nao lancad|nunca (?:foi )?(?:disponibilizad|lancad|vendid))\b/', $combined)) {
-        $level = 11;
-        $source = 'metadata';
-        $confidence = 'high';
-    } elseif (preg_match('/\b(?:hc gift|habbo club gift|presente hc|monthly hc gift)\b/', $combined)) {
-        $level = 10;
-        $source = 'metadata';
-        $confidence = 'high';
-    } elseif (preg_match('/\b(?:craft|crafting|recipe|receita|mesa de criac)\b/', $combined)) {
-        $level = 9;
-        $source = 'metadata';
-        $confidence = 'high';
-    } elseif (preg_match('/\b(?:clickable|mobi clicavel|click furni)\b/', $combined)) {
-        $level = (str_contains($combined, 'kld2') || preg_match('/\brare|raro\b/', $combined)) ? 8 : 7;
-        $source = 'metadata';
-        $confidence = 'high';
-    } elseif (preg_match('/\b(?:pack|bundle)\b/', $combined)) {
-        $level = 5;
-        $source = 'metadata';
-        $confidence = 'high';
-    } elseif (preg_match('/\b(?:offer|oferta)\b/', $combined)) {
-        $level = 6;
-        $source = 'metadata';
-        $confidence = 'high';
-    } elseif (
-        preg_match('/\b(?:activity|atividade|event reward|recompensa)\b/', $combined)
-        && (str_contains($combined, 'kld2') || preg_match('/\brare|raro\b/', $combined))
-    ) {
-        $level = 2;
-        $source = 'metadata';
-        $confidence = 'medium';
-    } elseif (preg_match('/\b(?:promotion|promo|promocao|campaign reward)\b/', $combined)) {
-        $level = 12;
-        $source = 'metadata';
-        $confidence = 'medium';
-    } elseif (preg_match('/\b(?:permanent|permanente|always in catalog|catalogo permanente)\b/', $combined)) {
-        $level = 1;
-        $source = 'metadata';
-        $confidence = 'medium';
-    } elseif (str_contains(strtolower($iconUrl), 'kld2.gif')) {
-        $level = 4;
-        $source = 'habbowidgets';
-        $confidence = 'exact';
-    } elseif (str_contains(strtolower($iconUrl), 'kld1.gif')) {
-        $level = 3;
-        $source = 'habbowidgets';
-        $confidence = 'exact';
-    } elseif (preg_match('/\bclothing_r\d{2}[_-]/', $combined)) {
-        $level = 4;
-        $source = 'scientific-name';
-        $confidence = 'medium';
-    }
-
-    if ($level === 0) {
-        return [
-            'level' => 0,
-            'key' => '',
-            'label' => '',
-            'description' => '',
-            'legacy' => 'generic',
-            'source' => 'unknown',
-            'confidence' => 'unknown',
-        ];
-    }
-
-    $definition = $definitions[$level];
-    return [
-        'level' => $level,
-        'key' => $definition['key'],
-        'label' => $definition['label'],
-        'description' => $definition['description'],
-        'legacy' => legacyRarityForLevel($level),
-        'source' => $source,
-        'confidence' => $confidence,
-    ];
-}
-
-function rarityIconUrl(string $rarity): string
-{
-    return rarityIconUrlByLevel(rarityLevelFromLegacy($rarity));
-}
-
-function normalizeRarityIconUrl(string $iconUrl, string $rarity): string
-{
-    $profile = clothingRarityProfile('', '', $iconUrl, $rarity);
-    return rarityIconUrlByLevel((int) ($profile['level'] ?? 0));
 }
 
 function extractClothingScientificName(string $html): string
@@ -3404,7 +3557,11 @@ function sortProfileLists(array &$profile): void
         'previousNames' => ['changedAt', 'date'],
         'previousMottos' => ['changedAt', 'date'],
         'previousStyles' => ['changedAt', 'date'],
-        'previousFriends' => ['removedAt', 'date'],
+        'friends' => ['creationTime', 'friendSince', 'addedAt', 'createdAt', 'date'],
+        'previousFriends' => [
+            'removedAt', 'leftAt', 'date', 'creationTime', 'friendSince', 'addedAt', 'createdAt'
+        ],
+        'rooms' => ['creationTime', 'createdAt', 'date', 'updatedAt'],
         'previousRooms' => ['removedAt', 'date'],
         'previousBadges' => ['removedAt', 'date'],
         'previousGroups' => ['leftAt', 'removedAt', 'date'],
@@ -3455,6 +3612,12 @@ function clothingFromFigure(string $figure, string $hotel): array
         }
         $slot = strtolower($match[1]);
         $code = $slot . '-' . $match[2];
+        $classification = habbonewsClothingClassification($code);
+        // Peças padrão são descartadas pelo código antes mesmo da consulta do
+        // nome. Isso impede que "hd-600", "ch-240" etc. reapareçam na resposta.
+        if ((bool) ($classification['hidden'] ?? false)) {
+            continue;
+        }
         $cached = readClosetMetadata($hotel, $code);
         if ($cached !== null) {
             $cached['_slot'] = $slot;
@@ -3473,12 +3636,12 @@ function clothingFromFigure(string $figure, string $hotel): array
                 $code,
                 '',
                 $slot,
-                'generic',
-                '',
                 $hotel,
                 HABBOWIDGETS_BASE . '/habbo/closet/'
                     . rawurlencode((string) hotelConfig($hotel)['widget'])
-                    . '/' . rawurlencode($code)
+                    . '/' . rawurlencode($code),
+                '',
+                $classification
             );
         }
     }
@@ -3503,12 +3666,8 @@ function clothingFromFigure(string $figure, string $hotel): array
         'provider' => 'toxic',
         'figureString' => $figure,
         'hotel' => $hotel,
-        'rarityIcons' => array_map(
-            static fn (int $level): string => rarityIconUrlByLevel($level),
-            array_keys(rarityLevelDefinitions())
-        ),
-        'rarityLevels' => rarityLevelDefinitions(),
-        'note' => 'A raridade é vinculada à peça e usa os 14 níveis adotados por fã-sites.',
+        'rarityIndex' => habbonewsRarityPublicMeta(),
+        'note' => 'Nomes localizados: HabboWidgets. Ícone e filtro de peças padrão: índice tipo-ID do HabboNews.',
     ];
     return [$payload, $allFromCache];
 }
@@ -3568,42 +3727,17 @@ function parseClosetMetadataHtml(
     if (preg_match('/\bfrom\s+(.+?)\s+-\s+Habbo Closet/i', $pageTitle, $match)) {
         $category = normalizeText($match[1]);
     }
-    $nameNode = firstXpathNode(
-        $xpath,
-        '//*[contains(concat(" ", normalize-space(@class), " "), " text-center ")]/h4[1]'
-    );
-    $itemContainer = $nameNode !== null
-        ? firstXpathNode(
-            $xpath,
-            'ancestor::*[(self::div or self::section or self::article) and .//img[contains(translate(@src, "KLD", "kld"), "kld1.gif") or contains(translate(@src, "KLD", "kld"), "kld2.gif")]][1]',
-            $nameNode
-        )
-        : null;
-    $rarityNode = $itemContainer !== null
-        ? firstXpathNode(
-            $xpath,
-            './/img[contains(translate(@src, "KLD", "kld"), "kld1.gif") or contains(translate(@src, "KLD", "kld"), "kld2.gif")][1]',
-            $itemContainer
-        )
-        : null;
-    $rarityIcon = imageUrlFromNode($rarityNode);
     $scientificName = extractClothingScientificName($html);
-    $context = normalizeText(
-        ($itemContainer !== null ? nodeText($itemContainer) : '')
-        . ' ' . $pageTitle . ' ' . $scientificName
-    );
-    $rarityDetails = clothingRarityProfile($code, $name, $rarityIcon, $context);
+    $classification = habbonewsClothingClassification($code);
     return clothingRecord(
         $code,
         $name,
         $category,
         $slot,
-        (string) $rarityDetails['legacy'],
-        $rarityIcon,
         $hotel,
         $closetUrl,
-        $rarityDetails,
-        $scientificName
+        $scientificName,
+        $classification
     );
 }
 
