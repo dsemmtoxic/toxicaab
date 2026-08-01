@@ -22,8 +22,8 @@ declare(strict_types=1);
  * como complemento. Datas históricas são datas de detecção.
  */
 
-const TOXIC_API_VERSION = '1.3.2';
-const TOXIC_USER_AGENT = 'ToxicSearchTool/1.3.2 (+https://atoxic.com.br)';
+const TOXIC_API_VERSION = '1.3.3';
+const TOXIC_USER_AGENT = 'ToxicSearchTool/1.3.3 (+https://atoxic.com.br)';
 const HABBOWIDGETS_BASE = 'https://www.habbowidgets.com';
 const HABBOWIDGETS_KLD1_ICON = HABBOWIDGETS_BASE . '/images/kld1.gif';
 const HABBOWIDGETS_KLD2_ICON = HABBOWIDGETS_BASE . '/images/kld2.gif';
@@ -307,6 +307,10 @@ function legacyPathFromQuery(array $params): string
     $endpoint = trim((string) ($params['endpoint'] ?? ''));
     $name = trim((string) ($params['name'] ?? ''));
     $uniqueId = trim((string) ($params['uniqueId'] ?? ''));
+
+    if (isset($params['rarityIconLevel'])) {
+        return 'rarity-icon/level/' . (int) $params['rarityIconLevel'];
+    }
 
     if ($endpoint === 'habbos-suggest') {
         return 'habboinfo/habbos';
@@ -2339,10 +2343,45 @@ function sanitizeClothingName(string $name, string $code): string
 function isCompleteClothingName(string $name, string $code): bool
 {
     $name = sanitizeClothingName($name, $code);
-    if ($name === '' || normalizeKey($name) === normalizeKey($code)) {
+    $nameIdentity = preg_replace('/[^a-z0-9]+/', '', strtolower(removeAccents($name))) ?? '';
+    $codeIdentity = preg_replace('/[^a-z0-9]+/', '', strtolower(removeAccents($code))) ?? '';
+    if ($name === '' || ($codeIdentity !== '' && $nameIdentity === $codeIdentity)) {
         return false;
     }
-    return preg_match('/^(?:[a-z]{2,4}|nft|kld)[-_ ]?\d+(?:[-_ ]?\d+)*$/i', $name) !== 1;
+    return !isTechnicalClothingName($name);
+}
+
+function isTechnicalClothingName(string $name): bool
+{
+    $clean = normalizeText($name);
+    if ($clean === '') {
+        return true;
+    }
+    $plain = strtolower(removeAccents($clean));
+    $technical = preg_replace('/[^a-z0-9]+/', '_', $plain) ?? '';
+    $technical = trim(preg_replace('/_+/', '_', $technical) ?? $technical, '_');
+    $slots = '(?:hd|hr|ch|lg|sh|ha|he|ea|fa|cp|ca|cc|wa|pt|mc)';
+
+    if (preg_match('/^\d+$/', $technical) === 1) {
+        return true;
+    }
+    if (preg_match('/^' . $slots . '_?\d+(?:_\d+)*(?:_name)?$/', $technical) === 1) {
+        return true;
+    }
+    if (preg_match('/^(?:nft|kld)_?\d+(?:_\d+)*(?:_name)?$/', $technical) === 1) {
+        return true;
+    }
+    if (preg_match('/^(?:clothing|figure|avatar|look|furni)(?:_[a-z0-9]+)+$/', $technical) === 1) {
+        return true;
+    }
+
+    $technicalSeparators = preg_match('/[_.:\/]/', $clean) === 1
+        || (!str_contains($clean, ' ') && str_contains($clean, '-'));
+    return $technicalSeparators
+        && preg_match(
+            '/^(?:hair|hairstyle|shirt|top|trousers?|pants?|shoes?|hat|head|face|coat|jacket|accessory|accessories|belt|waist|chest|ear|hand)(?:_[a-z0-9]+)+$/',
+            $technical
+        ) === 1;
 }
 
 function clothingSlotName(string $slot, string $hotel): string
@@ -2436,6 +2475,9 @@ function publicApiBaseUrl(): string
         : ((!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http');
     $host = trim((string) ($_SERVER['HTTP_HOST'] ?? ''));
     $script = (string) ($_SERVER['SCRIPT_NAME'] ?? '/api.php');
+    if (preg_match('#^(.*?\.php)(?:/.*)?$#i', $script, $match) === 1) {
+        $script = $match[1];
+    }
     if ($host === '') {
         return '/api.php';
     }
@@ -2447,7 +2489,7 @@ function rarityIconUrlByLevel(int $level): string
     if ($level < 1 || $level > 14) {
         return '';
     }
-    return rtrim(publicApiBaseUrl(), '/') . '/rarity-icon/level/' . $level;
+    return rtrim(publicApiBaseUrl(), '/') . '?rarityIconLevel=' . $level;
 }
 
 function clothingRarity(string $code, string $name, string $iconUrl): string
@@ -3418,14 +3460,18 @@ function clothingFromFigure(string $figure, string $hotel): array
         }
     }
 
-    $result = array_values(array_filter(
+    $namedItems = array_filter(
         $items,
         static fn (array $item): bool => isCompleteClothingName(
             (string) ($item['name'] ?? ''),
             (string) ($item['code'] ?? '')
         )
-    ));
-    $payload = $items;
+    );
+    $result = array_values($namedItems);
+    // As chaves por slot também precisam conter somente peças com nome público.
+    // O app prioriza essas chaves antes de "result"; manter códigos técnicos
+    // aqui fazia roupas padrão reaparecerem mesmo com "result" filtrado.
+    $payload = $namedItems;
     $payload['result'] = $result;
     $payload['items'] = $result;
     $payload['total'] = count($result);
