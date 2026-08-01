@@ -52,28 +52,10 @@ import java.util.concurrent.*;
 
 public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
-    private static final String APP_VERSION = "1.3.4";
-    // Cabides pixelados de 17x15 para os níveis de raridade. Eles ficam dentro
-    // do APK para nunca dependerem de PATH_INFO, CDN, cache ou disponibilidade
-    // da API para serem exibidos.
-    private static final String[] RARITY_ICON_PNG_BASE64 = new String[] {
-            "",
-            "iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAwUlEQVR42p2TwQ3DIAxFTVQ1e7QHRsgAVRboGBmoY7AAygCMkEOyB7m4hwJ1iA0olnIx5ufxPyg0DrhS7wHzHhqnuNmuVaDYz0noIG7Tv//4iEQsCRXY1/kk2HScWPs6Qz8uUKubtEDxKVGVhE0kHIMS5XOdtOCtBtymROCtFgNQaNyh4a2G+/N18ITr0aQUACCXCGcoFaOeJZEokBtaij/OJhH6l5aitMnYflyKMRbvT7j2ePVD434k0uusehP2fQHxBn4QmxntRgAAAABJRU5ErkJggg==",
-            "iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAvUlEQVR42pVTuxHDIAwVviyQXlu4SJsNdM6gcN7ALQVb0DOCUsTidPzz7lRYyI/He2DYemjBfF5c9th605rdVgmG/VKJHkxEuf88z66iphJNcIVQES4dR3CFAEeMMMOjt6Dla0VTJS3j5BhaUTm39RYcIiSirMAh9pO602Eph8iJiBMRO8RuT4qtB3N/VIm0DHWI8N73yrNMIgSloaP4ZTaT6F1WoNVmY48YhzEO709p7L/F1v+U9F7nDPLfF/u0h6Qbz1rBAAAAAElFTkSuQmCC",
-            "iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAwUlEQVR42p2TwQ3DIAxFTVQ1e7QHRsgAVRboGBmoY7AAygCMkEOyB7m4hwJ1iA0olnIx5ufxPyg0DrhS7wHzHhqnuNmuVaDYz0noIG7Tv//4iEQsCRXY1/kk2HScWPs6Qz8uUKubtEDxKVGVhE0kHIMS5XOdtOCtBtymROCtFgNQaNyh4a2G+/N18ITr0aQUACCXCGcoFaOeJZEokBtaij/OJhH6l5aitMnYflyKMRbvT7j2ePVD434k0uusehP2fQHxBn4QmxntRgAAAABJRU5ErkJggg==",
-            "iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAvUlEQVR42pVTuxHDIAwVviyQXlu4SJsNdM6gcN7ALQVb0DOCUsTidPzz7lRYyI/He2DYemjBfF5c9th605rdVgmG/VKJHkxEuf88z66iphJNcIVQES4dR3CFAEeMMMOjt6Dla0VTJS3j5BhaUTm39RYcIiSirMAh9pO602Eph8iJiBMRO8RuT4qtB3N/VIm0DHWI8N73yrNMIgSloaP4ZTaT6F1WoNVmY48YhzEO709p7L/F1v+U9F7nDPLfF/u0h6Qbz1rBAAAAAElFTkSuQmCC",
-            "iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAwUlEQVR42pVTQQ6EIAwsxj+t4WL0CX6EhIds4kf6BIwXI6/qHta6DVBwm/RAaSfDTDGEEUphlhelNcJoSr3dU4BqPWUiG9H/Zpa3URkVmUiA/dwywEfP4djPDdZjhlb02oWkLxk1mZSE42dIRmlfp104GwA93QycDbpTlzvE6Wwg9EToiZwNao2TMIK5DpkjJUGdDTAOU6bZDcIAqaA1+7m3l+qPw1TdB82tW9j1mKs2VvcnFfbfJIxfJtrvbAXPfQDa+4yhxAKkSQAAAABJRU5ErkJggg==",
-            "iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAwUlEQVR42pVTQQ6EIAwsxj+t4WL0CX6EhIds4kf6BIwXI6/qHta6DVBwm/RAaSfDTDGEEUphlhelNcJoSr3dU4BqPWUiG9H/Zpa3URkVmUiA/dwywEfP4djPDdZjhlb02oWkLxk1mZSE42dIRmlfp104GwA93QycDbpTlzvE6Wwg9EToiZwNao2TMIK5DpkjJUGdDTAOU6bZDcIAqaA1+7m3l+qPw1TdB82tW9j1mKs2VvcnFfbfJIxfJtrvbAXPfQDa+4yhxAKkSQAAAABJRU5ErkJggg==",
-            "iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAwklEQVR42p1TMQ7DIAw0Ub6SJcyon2DKmCmvyCP6ik6MTPkEYk6WPMYdWpBDbYhqieUwp/OdUegDcKWmB5YY+qC43u4uQRUvldDG5Vwz/hqeoiJWCSWI8fghvDVOqhgP2OcNWtVLF1Q+VdRUwhmXxqCKyr5OutDOwnKuWYF2VgxAoQ8XQDsLxowXTziMJqUAALlEOEMpGfUskySC0tBa/Km3p+4bM1b3QUorG7vPWzXG6v581x7/PejDR4n0O1uV3r0BUXZ8+3RqTGMAAAAASUVORK5CYII=",
-            "iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAwElEQVR42pVTsQ3DIBAEy9OwQNooTpM2g9Ayg1sPQktjLLcs4HUuRQC/CA/OSy9Zx/l9f4clbBC1ku8bSgw2yBp3uDqgiZdKKBHanfjyYhVVldAB27r/DLy0Tqpt3cV0zKJXI3dA5VNFXSXVROIaVFHJG7gDr4yAdlmBV4ZPKqaD1F4ZQDtAO3hlWCx1SvcEGGLtAxSX8SHvXhraij9xR+r+43lv3gcurWzsdMzNGJv3pzT234YNXyXc39n1Jr73AQdPnpCnfIlyAAAAAElFTkSuQmCC",
-            "iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAv0lEQVR42pVT0QnDIBDVkAUcpnQD6UcDpVM4UqaQgPmQbiAZJiO8fjRnD+tpenAgz/N8955q+KRqoZ9XlBh80rXa4WyDJl4y4YU2fs+8blpkVGXCG2zL+tPw1DgU27KqfZ5UL0Zpg9PnjLpMasLRGJxRWTdIG8YFZSMyA+OC7NThDiiNC7ARsBEwLogYJbmbAamwdgHH9bHIs5eCtuyn2pGrf3ncm+9BcisLu89T08bm+ymF/Tfh04eJ9Dt7QefelkSbp3PJpcIAAAAASUVORK5CYII=",
-            "iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAvklEQVR42pVTMQ7DIAw0KBPfSaRO3Sqx9zN5A59hr5QtExL+TlZ3KFBKsEMtWUqOwzmfHUU+QC/U80YtRj6oHlePFpBwLREJbUmpUFdJLgAAgNv+8z7cTg7cdljWA65i4g7U/DoVHFLSnUhqo1bU8jR3EJ0BQlsURGf4SaU9oZzRGSK0RGgpOsNiOfOefQGG2PtAjav0UHpvDZXGn7lT7f78uIv7wE2rGLushzhGcX9aY/9N8uGjhPs7L71J997ASJ4cvt4KngAAAABJRU5ErkJggg==",
-            "iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAxUlEQVR42p2Tyw3EIAxEh5BWqCE9+GIpTaSNbYMmkLjQAyWkGu9hF+QlkM9a4jI4w2NMjISMXpl1kVaTkE2vd7prcKq3JLrRe1/1bduGRF0SbZBSOhjeuk6plBJijLiqebSh8TXRJUkvuHINTdT2TaMNZob3vhIw83AAcyswM4jokAkRgYh+NLMuIiEbA0B6E+kFqg/QmVWTYtAGejb+0ltN9Cl3StNaAC8A2Pcd1lo45x4ZlCeML81fS0L+jHj0d15V+e4NAfx6IlyulGUAAAAASUVORK5CYII=",
-            "iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAv0lEQVR42pVT0QnDIBDVkAUcpnQD6UcDpVM4UqaQgPmQbiAZJiO8fjRnD+tpenAgz/N8955q+KRqoZ9XlBh80rXa4WyDJl4y4YU2fs+8blpkVGXCG2zL+tPw1DgU27KqfZ5UL0Zpg9PnjLpMasLRGJxRWTdIG8YFZSMyA+OC7NThDiiNC7ARsBEwLogYJbmbAamwdgHH9bHIs5eCtuyn2pGrf3ncm+9BcisLu89T08bm+ymF/Tfh04eJ9Dt7QefelkSbp3PJpcIAAAAASUVORK5CYII=",
-            "iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAvUlEQVR42pVTuxHDIAwVviyQXlu4SJsNdM6gcN7ALQVb0DOCUsTidPzz7lRYyI/He2DYemjBfF5c9th605rdVgmG/VKJHkxEuf88z66iphJNcIVQES4dR3CFAEeMMMOjt6Dla0VTJS3j5BhaUTm39RYcIiSirMAh9pO602Eph8iJiBMRO8RuT4qtB3N/VIm0DHWI8N73yrNMIgSloaP4ZTaT6F1WoNVmY48YhzEO709p7L/F1v+U9F7nDPLfF/u0h6Qbz1rBAAAAAElFTkSuQmCC",
-            "iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAwElEQVR42p2TsRHDIBAED9mlkH7sEshdCwW4AGohpwRiulBKATiwYV74Ecg3o+R5nZa7kSo+QpJ6Pko/Kz4qaXdbNTid9yR80Vrb5s65IZFIwg1CCD+GS9epCiEgpYSZ7qMDjs+JpiRScPUanKjf20YHRARrbSMgomEBqvh4GBARjDGHTKQZb0oBKFIjUqDcjGfWTKpBH+hZ/XW3mfCvrIjT3gC8AGDfd+ScobW+ZFCDwZfmr6f4+Kl49HfOVN97A9vJfWF5JMoRAAAAAElFTkSuQmCC"
-    };
-    private final Bitmap[] rarityIconBitmaps = new Bitmap[15];
+    private static final String APP_VERSION = "1.3.5";
+    // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
+    // A API fornece apenas o hash; o APK usa estes arquivos locais para que
+    // os ícones nunca desapareçam por bloqueio de rede ou cache externo.
     private final ExecutorService executor = Executors.newFixedThreadPool(10);
     private FrameLayout screen;
     private LinearLayout root, resultWrap;
@@ -2962,6 +2944,7 @@ public class MainActivity extends Activity {
             r.totalBadges = String.valueOf(Math.max(declared, r.badgesWithAchievements.size()));
         }
         enrichSelectedBadgesWithOwnership(r);
+        sortProfileChronologyNewestFirst(r);
 
         if (r.officialPhotosAttempted) {
             ArrayList<JSONObject> complementPhotos = extractList(complement, "photos");
@@ -2969,6 +2952,36 @@ public class MainActivity extends Activity {
                 if (!complementPhotos.isEmpty()) applyLocalPhotosSource(r, complementPhotos, false);
             }
         }
+    }
+
+    private void sortProfileChronologyNewestFirst(ProfileResult profile) {
+        if (profile == null) return;
+        sortJsonNewestFirst(
+                profile.friends,
+                "creationTime", "friendSince", "addedAt", "createdAt", "date"
+        );
+        sortJsonNewestFirst(
+                profile.oldFriends,
+                "removedAt", "leftAt", "date", "creationTime", "friendSince", "createdAt"
+        );
+        sortJsonNewestFirst(
+                profile.rooms,
+                "creationTime", "createdAt", "date", "updatedAt"
+        );
+    }
+
+    private void sortJsonNewestFirst(ArrayList<JSONObject> items, String... dateKeys) {
+        if (items == null || items.size() < 2) return;
+        Collections.sort(items, (left, right) -> {
+            long leftTime = jsonDateMillis(left, dateKeys);
+            long rightTime = jsonDateMillis(right, dateKeys);
+            return Long.compare(rightTime, leftTime);
+        });
+    }
+
+    private long jsonDateMillis(JSONObject item, String... dateKeys) {
+        if (item == null) return 0L;
+        return parseHabboTimestampMsStatic(firstText(item, dateKeys));
     }
 
     private void applyOfficialPhotosData(
@@ -3844,13 +3857,7 @@ public class MainActivity extends Activity {
         row.setLayoutParams(lp(-1, -2, 0, 0, 0, 10));
         ImageView img = new ImageView(this); img.setScaleType(ImageView.ScaleType.FIT_CENTER); row.addView(img, new LinearLayout.LayoutParams(dp(40), dp(40)));
         String code = firstText(o, "code", "classname", "className", "id");
-        int rarityLevel = clothingRarityLevel(o);
-        if (setClothingRarityIcon(img, rarityLevel)) {
-            img.setContentDescription(clothingRarityTitle(o, rarityLevel));
-            img.setOnClickListener(v -> showClothingRarityDialog(o));
-        } else {
-            img.setVisibility(View.INVISIBLE);
-        }
+        if (setClothingRarityIcon(img, o)) img.setContentDescription(t(R.string.rarity));
         LinearLayout txt = new LinearLayout(this); txt.setOrientation(LinearLayout.VERTICAL); LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, -2, 1); tp.leftMargin = dp(12); row.addView(txt,tp);
         String name = clothingName(o, code);
         TextView nm = habboText(name.isEmpty()?t(R.string.item):name, 15, true); nm.setMaxLines(2); nm.setEllipsize(TextUtils.TruncateAt.END); txt.addView(nm);
@@ -3861,7 +3868,9 @@ public class MainActivity extends Activity {
 
 
     private boolean hasCompleteClothingName(JSONObject item) {
-        return !completeClothingName(item).isEmpty();
+        return item != null
+                && !isDefaultClothing(item)
+                && !completeClothingName(item).isEmpty();
     }
 
     private String completeClothingName(JSONObject item) {
@@ -3937,163 +3946,80 @@ public class MainActivity extends Activity {
         );
     }
 
-    private int clothingRarityLevel(JSONObject item) {
-        if (item == null) return 0;
-        int explicit = item.optInt("rarityLevel", 0);
-        if (explicit >= 1 && explicit <= 14) return explicit;
-
-        String provided = firstText(item, "rarityIconUrl", "iconUrl", "imageUrl", "url", "thumbnail");
-        String lowerIcon = provided == null ? "" : provided.trim().toLowerCase(Locale.ROOT);
-        java.util.regex.Matcher matcher = java.util.regex.Pattern
-                .compile("rarity-icon/(?:level/)?(\\d{1,2})", java.util.regex.Pattern.CASE_INSENSITIVE)
-                .matcher(lowerIcon);
-        if (matcher.find()) {
-            try {
-                int parsed = Integer.parseInt(matcher.group(1));
-                if (parsed >= 1 && parsed <= 14) return parsed;
-            } catch (Exception ignored) {}
-        }
-        if (lowerIcon.contains("kld2.gif")) return 4;
-        if (lowerIcon.contains("kld1.gif")) return 3;
-
-        String rarity = firstText(item, "rarity", "rarityType", "rarityKey", "type").toLowerCase(Locale.ROOT);
-        if (optBoolAny(item, false, "isNft", "nft") || rarity.contains("nft") || rarity.contains("collect")) return 13;
-        if (optBoolAny(item, false, "isRare", "rare") || rarity.contains("rare") || rarity.contains("raro")) return 4;
-        // Uma peça com nome público nunca pode deixar um buraco vazio na tela.
-        // Quando a API antiga não informa a classificação, usa o cabide normal.
-        return hasCompleteClothingName(item) ? 3 : 0;
+    private boolean isDefaultClothing(JSONObject item) {
+        return item != null && optBoolAny(
+                item,
+                false,
+                "isDefaultClothing", "defaultClothing", "hidden"
+        );
     }
 
-    private Bitmap clothingRarityIconBitmap(int level) {
-        if (level < 1 || level >= RARITY_ICON_PNG_BASE64.length) return null;
-        synchronized (rarityIconBitmaps) {
-            Bitmap cached = rarityIconBitmaps[level];
-            if (cached != null && !cached.isRecycled()) return cached;
-            try {
-                byte[] bytes = android.util.Base64.decode(
-                        RARITY_ICON_PNG_BASE64[level], android.util.Base64.DEFAULT
-                );
-                Bitmap decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
-                rarityIconBitmaps[level] = decoded;
-                return decoded;
-            } catch (Exception ignored) {
-                return null;
-            }
+    private String clothingRarityIconCode(JSONObject item) {
+        if (item == null) return "";
+        String code = firstText(
+                item,
+                "rarityIconCode", "rarityCode", "habbonewsIconCode", "rarityKey"
+        ).trim();
+        if (!code.matches("^[A-Za-z0-9]{5,12}$") || "OuxYRCz".equalsIgnoreCase(code)) {
+            return "";
+        }
+        return code;
+    }
+
+    private int clothingRarityDrawable(String iconCode) {
+        String code = iconCode == null ? "" : iconCode.toLowerCase(Locale.ROOT);
+        switch (code) {
+            case "7alj14m": return R.drawable.rarity_7alj14m;
+            case "xfwx5cf": return R.drawable.rarity_xfwx5cf;
+            case "3cn4kmp": return R.drawable.rarity_3cn4kmp;
+            case "auw3lqg": return R.drawable.rarity_auw3lqg;
+            case "fsbsabs": return R.drawable.rarity_fsbsabs;
+            case "i9zueld": return R.drawable.rarity_i9zueld;
+            case "jiebdv2": return R.drawable.rarity_jiebdv2;
+            case "dx0vak3": return R.drawable.rarity_dx0vak3;
+            case "kwobfca": return R.drawable.rarity_kwobfca;
+            case "tk0irr5": return R.drawable.rarity_tk0irr5;
+            default: return 0;
         }
     }
 
-    private boolean setClothingRarityIcon(ImageView view, int level) {
+    private boolean setClothingRarityIcon(ImageView view, JSONObject item) {
         if (view == null) return false;
-        Bitmap bitmap = clothingRarityIconBitmap(level);
-        if (bitmap == null) {
+        String iconCode = clothingRarityIconCode(item);
+        if (iconCode.isEmpty()) {
             view.setImageDrawable(null);
             view.setVisibility(View.INVISIBLE);
             return false;
         }
-        BitmapDrawable drawable = new BitmapDrawable(getResources(), bitmap);
-        drawable.setFilterBitmap(false);
-        drawable.setDither(false);
+
         view.clearColorFilter();
         view.setAlpha(1f);
-        view.setImageDrawable(drawable);
         view.setVisibility(View.VISIBLE);
-        return true;
-    }
-
-    private String clothingRarityLabel(JSONObject item, int level) {
-        String provided = firstText(item, "rarityLabel");
-        if (!provided.isEmpty()) return provided;
-        switch (level) {
-            case 1: return "Permanente no catálogo";
-            case 2: return "Raro de atividade";
-            case 3: return "Normal";
-            case 4: return "Raro";
-            case 5: return "Exclusivo de pack";
-            case 6: return "Exclusivo de oferta";
-            case 7: return "Mobi clicável";
-            case 8: return "Mobi clicável raro";
-            case 9: return "Mesa de criações";
-            case 10: return "Presente HC";
-            case 11: return "Nunca lançado";
-            case 12: return "Atividade ou promoção";
-            case 13: return "Colecionável";
-            case 14: return "Indisponível";
-            default: return "";
-        }
-    }
-
-    private String clothingRarityDescription(JSONObject item, int level) {
-        String provided = firstText(item, "rarityDescription");
-        if (!provided.isEmpty()) return provided;
-        switch (level) {
-            case 1: return "Disponível permanentemente no catálogo.";
-            case 2: return "Entregue em atividade e não vendido no catálogo.";
-            case 3: return "Peça normal que pode retornar ao catálogo.";
-            case 4: return "Peça rara, normalmente sem retorno à Habbo Loja.";
-            case 5: return "Disponibilizado exclusivamente em um pack.";
-            case 6: return "Disponibilizado exclusivamente em uma oferta.";
-            case 7: return "Obtido por meio de um mobi clicável normal.";
-            case 8: return "Obtido por meio de um mobi clicável raro.";
-            case 9: return "Obtido por receita de uma mesa de criações.";
-            case 10: return "Presente de assinatura Habbo Club de anos anteriores.";
-            case 11: return "Nunca foi disponibilizado ou vendido no jogo.";
-            case 12: return "Entregue em atividade ou promoção oficial.";
-            case 13: return "Exclusivo de uma edição colecionável, LTD ou NFT.";
-            case 14: return "Classificado como indisponível.";
-            default: return "";
-        }
-    }
-
-    private String clothingRarityTitle(JSONObject item, int level) {
-        if (level < 1 || level > 14) return "";
-        String label = clothingRarityLabel(item, level);
-        return "Nível " + level + (label.isEmpty() ? "" : " · " + label);
-    }
-
-    private void showClothingRarityDialog(JSONObject item) {
-        int level = clothingRarityLevel(item);
-        if (level < 1 || level > 14) return;
-
-        Dialog dialog = new Dialog(this);
-        LinearLayout wrap = new LinearLayout(this);
-        wrap.setOrientation(LinearLayout.VERTICAL);
-        wrap.setGravity(Gravity.CENTER_HORIZONTAL);
-        wrap.setPadding(dp(20), dp(20), dp(20), dp(18));
-        wrap.setBackground(round(dialogFillColor(), dp(22), dialogStrokeColor(), 1));
-        dialog.setContentView(wrap);
-
-        ImageView icon = new ImageView(this);
-        icon.setAdjustViewBounds(true);
-        icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        wrap.addView(icon, lp(dp(58), dp(58), 0, 0, 0, 10));
-        setClothingRarityIcon(icon, level);
-
-        TextView title = text(clothingRarityTitle(item, level), 17,
-                lightTheme ? Color.rgb(32,32,32) : Color.WHITE, true);
-        title.setGravity(Gravity.CENTER);
-        wrap.addView(title, lp(-1, -2, 0, 0, 0, 8));
-
-        String description = clothingRarityDescription(item, level);
-        if (!description.isEmpty()) {
-            TextView body = text(description, 14, themeMutedColor(), false);
-            body.setGravity(Gravity.CENTER);
-            wrap.addView(body, lp(-1, -2, 0, 0, 0, 14));
+        int drawableId = clothingRarityDrawable(iconCode);
+        if (drawableId != 0) {
+            view.setImageResource(drawableId);
+            Drawable drawable = view.getDrawable();
+            if (drawable instanceof BitmapDrawable) {
+                ((BitmapDrawable) drawable).setFilterBitmap(false);
+                ((BitmapDrawable) drawable).setDither(false);
+            }
+            return true;
         }
 
-        TextView close = dialogButton(t(R.string.close));
-        wrap.addView(close, lp(-1, dp(46), 0, 0, 0, 0));
-        close.setOnClickListener(v -> dialog.dismiss());
-
-        dialog.show();
-        Window window = dialog.getWindow();
-        if (window != null) {
-            window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-            WindowManager.LayoutParams params = new WindowManager.LayoutParams();
-            params.copyFrom(window.getAttributes());
-            params.width = (int) (getResources().getDisplayMetrics().widthPixels * 0.84f);
-            params.height = WindowManager.LayoutParams.WRAP_CONTENT;
-            window.setAttributes(params);
+        // Suporte futuro: se o iframe passar a usar um hash novo, a API envia
+        // também a URL exata; os dez hashes atuais continuam locais no APK.
+        String remote = firstText(item, "rarityIconUrl", "iconUrl", "imageUrl");
+        if (remote.startsWith("https://")) {
+            Glide.with(this)
+                    .load(remote)
+                    .diskCacheStrategy(DiskCacheStrategy.AUTOMATIC)
+                    .dontAnimate()
+                    .into(view);
+            return true;
         }
+        view.setImageDrawable(null);
+        view.setVisibility(View.INVISIBLE);
+        return false;
     }
 
     private String clothingName(JSONObject o, String fallback) {
@@ -4820,7 +4746,9 @@ public class MainActivity extends Activity {
         String n = firstText(f, "name", "username", "habboName"); if (n.isEmpty()) n = t(R.string.profile);
         String fig = firstText(f, "figureString", "figure", "look", "avatarFigureString");
         String fid = firstText(f, "uniqueId", "id", "habboId");
-        String date = firstText(f, "creationTime", "friendSince", "createdAt", "date", "removedAt");
+        String date = removed
+                ? firstText(f, "removedAt", "leftAt", "date", "creationTime", "friendSince", "createdAt")
+                : firstText(f, "creationTime", "friendSince", "addedAt", "createdAt", "date");
 
         FrameLayout headWrap = new FrameLayout(this);
         card.addView(headWrap, new LinearLayout.LayoutParams(-1, dp(64)));
@@ -8001,30 +7929,15 @@ private int loadingProgressFor(String message) {
                 String code = firstText(itemInfo, "code", "classname", "className", "id");
                 String name = clothingName(itemInfo, code);
                 String collection = clothingLineName(itemInfo, "");
-                int rarityLevel = clothingRarityLevel(itemInfo);
 
                 info.addView(visualItemInfoRow(t(R.string.item_name), name));
                 if (!collection.isEmpty()) {
                     info.addView(visualItemInfoRow(t(R.string.collection), collection));
                 }
-                if (rarityLevel > 0) {
-                    info.addView(visualItemInfoRow(
-                            getString(R.string.rarity),
-                            clothingRarityTitle(itemInfo, rarityLevel)
-                    ));
-                    String rarityDescription = clothingRarityDescription(itemInfo, rarityLevel);
-                    if (!rarityDescription.isEmpty()) {
-                        info.addView(visualItemInfoRow(
-                                getString(R.string.rarity_details),
-                                rarityDescription
-                        ));
-                    }
-                }
 
                 rarityThumbnail.setImageDrawable(null);
-                if (setClothingRarityIcon(rarityThumbnail, rarityLevel)) {
-                    rarityThumbnail.setContentDescription(clothingRarityTitle(itemInfo, rarityLevel));
-                    rarityThumbnail.setOnClickListener(v -> showClothingRarityDialog(itemInfo));
+                if (setClothingRarityIcon(rarityThumbnail, itemInfo)) {
+                    rarityThumbnail.setContentDescription(t(R.string.rarity));
                 } else {
                     rarityThumbnail.setVisibility(View.INVISIBLE);
                 }
@@ -10476,7 +10389,12 @@ private int loadingProgressFor(String message) {
                 "yyyy-MM-dd'T'HH:mm:ssZ",
                 "yyyy-MM-dd HH:mm:ss",
                 "yyyy-MM-dd'T'HH:mm:ss.SSS",
-                "yyyy-MM-dd'T'HH:mm:ss"
+                "yyyy-MM-dd'T'HH:mm:ss",
+                "yyyy-MM-dd",
+                "dd/MM/yyyy HH:mm:ss",
+                "dd/MM/yyyy HH:mm",
+                "dd/MM/yyyy",
+                "dd-MM-yyyy"
         };
         for (String candidate : candidates) {
             for (String pattern : patterns) {
