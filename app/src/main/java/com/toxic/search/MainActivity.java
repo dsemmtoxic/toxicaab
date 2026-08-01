@@ -52,9 +52,7 @@ import java.util.concurrent.*;
 
 public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
-    private static final String APP_VERSION = "1.3.1";
-    private static final String HABBOWIDGETS_KLD1_ICON = "https://www.habbowidgets.com/images/kld1.gif";
-    private static final String HABBOWIDGETS_KLD2_ICON = "https://www.habbowidgets.com/images/kld2.gif";
+    private static final String APP_VERSION = "1.3.2";
     private final ExecutorService executor = Executors.newFixedThreadPool(10);
     private FrameLayout screen;
     private LinearLayout root, resultWrap;
@@ -3810,7 +3808,7 @@ public class MainActivity extends Activity {
                         clothesContainer.addView(mottoItem(t(R.string.no_clothes_found), ""));
                         return;
                     }
-                    for (int i=0; i<Math.min(namedClothes.size(), 40); i++) {
+                    for (int i=0; i<namedClothes.size(); i++) {
                         clothesContainer.addView(clothingRow(namedClothes.get(i)));
                     }
                 });
@@ -3825,9 +3823,15 @@ public class MainActivity extends Activity {
         row.setLayoutParams(lp(-1, -2, 0, 0, 0, 10));
         ImageView img = new ImageView(this); img.setScaleType(ImageView.ScaleType.FIT_CENTER); row.addView(img, new LinearLayout.LayoutParams(dp(40), dp(40)));
         String code = firstText(o, "code", "classname", "className", "id");
-        String rarity = clothingRarity(o);
-        String icon = clothingRarityIconUrl(o, rarity);
-        if (!icon.isEmpty()) loadImage(img, icon);
+        int rarityLevel = clothingRarityLevel(o);
+        String icon = clothingRarityIconUrl(o, rarityLevel);
+        if (!icon.isEmpty()) {
+            loadImage(img, icon);
+            img.setContentDescription(clothingRarityTitle(o, rarityLevel));
+            img.setOnClickListener(v -> showClothingRarityDialog(o));
+        } else {
+            img.setVisibility(View.INVISIBLE);
+        }
         LinearLayout txt = new LinearLayout(this); txt.setOrientation(LinearLayout.VERTICAL); LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, -2, 1); tp.leftMargin = dp(12); row.addView(txt,tp);
         String name = clothingName(o, code);
         TextView nm = habboText(name.isEmpty()?t(R.string.item):name, 15, true); nm.setMaxLines(2); nm.setEllipsize(TextUtils.TruncateAt.END); txt.addView(nm);
@@ -3863,23 +3867,140 @@ public class MainActivity extends Activity {
                 || clean.matches("(?i)^(?:nft|kld)[-_ ]?\\d+(?:[-_ ]?\\d+)*$");
     }
 
-    private String clothingRarity(JSONObject item) {
-        String rarity = firstText(item, "rarity", "rarityType", "type").toLowerCase(Locale.ROOT);
-        if (optBoolAny(item, false, "isNft", "nft") || rarity.contains("nft") || rarity.contains("collect")) return "nft";
-        if (optBoolAny(item, false, "isRare", "rare") || rarity.contains("rare") || rarity.contains("raro")) return "rare";
-        String combined = (firstText(item, "code", "classname", "className", "id") + " "
-                + clothingName(item, "")).toLowerCase(Locale.ROOT);
-        if (combined.contains("nft") || combined.contains("kld3")) return "nft";
-        if (combined.contains("kld2")) return "rare";
-        return "generic";
+    private int clothingRarityLevel(JSONObject item) {
+        if (item == null) return 0;
+        int explicit = item.optInt("rarityLevel", 0);
+        if (explicit >= 1 && explicit <= 14) return explicit;
+
+        String provided = firstText(item, "rarityIconUrl", "iconUrl", "imageUrl", "url", "thumbnail");
+        String lowerIcon = provided == null ? "" : provided.trim().toLowerCase(Locale.ROOT);
+        java.util.regex.Matcher matcher = java.util.regex.Pattern
+                .compile("rarity-icon/(?:level/)?(\\d{1,2})", java.util.regex.Pattern.CASE_INSENSITIVE)
+                .matcher(lowerIcon);
+        if (matcher.find()) {
+            try {
+                int parsed = Integer.parseInt(matcher.group(1));
+                if (parsed >= 1 && parsed <= 14) return parsed;
+            } catch (Exception ignored) {}
+        }
+        if (lowerIcon.contains("kld2.gif")) return 4;
+        if (lowerIcon.contains("kld1.gif")) return 3;
+
+        String rarity = firstText(item, "rarity", "rarityType", "rarityKey", "type").toLowerCase(Locale.ROOT);
+        if (optBoolAny(item, false, "isNft", "nft") || rarity.contains("nft") || rarity.contains("collect")) return 13;
+        if (optBoolAny(item, false, "isRare", "rare") || rarity.contains("rare") || rarity.contains("raro")) return 4;
+        return 0;
     }
 
-    private String clothingRarityIconUrl(JSONObject item, String rarity) {
+    private String clothingRarityIconUrl(JSONObject item, int level) {
         String provided = firstText(item, "rarityIconUrl", "iconUrl", "imageUrl", "url", "thumbnail");
-        String lower = provided == null ? "" : provided.trim().toLowerCase(Locale.ROOT);
-        if (lower.contains("/images/kld1.gif")) return HABBOWIDGETS_KLD1_ICON;
-        if (lower.contains("/images/kld2.gif")) return HABBOWIDGETS_KLD2_ICON;
-        return "generic".equals(rarity) ? HABBOWIDGETS_KLD1_ICON : HABBOWIDGETS_KLD2_ICON;
+        String clean = provided == null ? "" : provided.trim();
+        String lower = clean.toLowerCase(Locale.ROOT);
+        if (lower.contains("/rarity-icon/")) return normalizeUrl(clean);
+        if (level < 1 || level > 14) {
+            if (lower.contains("kld2.gif")) level = 4;
+            else if (lower.contains("kld1.gif")) level = 3;
+        }
+        return level >= 1 && level <= 14
+                ? PROFILE_API + "/rarity-icon/level/" + level
+                : "";
+    }
+
+    private String clothingRarityLabel(JSONObject item, int level) {
+        String provided = firstText(item, "rarityLabel");
+        if (!provided.isEmpty()) return provided;
+        switch (level) {
+            case 1: return "Permanente no catálogo";
+            case 2: return "Raro de atividade";
+            case 3: return "Normal";
+            case 4: return "Raro";
+            case 5: return "Exclusivo de pack";
+            case 6: return "Exclusivo de oferta";
+            case 7: return "Mobi clicável";
+            case 8: return "Mobi clicável raro";
+            case 9: return "Mesa de criações";
+            case 10: return "Presente HC";
+            case 11: return "Nunca lançado";
+            case 12: return "Atividade ou promoção";
+            case 13: return "Colecionável";
+            case 14: return "Indisponível";
+            default: return "";
+        }
+    }
+
+    private String clothingRarityDescription(JSONObject item, int level) {
+        String provided = firstText(item, "rarityDescription");
+        if (!provided.isEmpty()) return provided;
+        switch (level) {
+            case 1: return "Disponível permanentemente no catálogo.";
+            case 2: return "Entregue em atividade e não vendido no catálogo.";
+            case 3: return "Peça normal que pode retornar ao catálogo.";
+            case 4: return "Peça rara, normalmente sem retorno à Habbo Loja.";
+            case 5: return "Disponibilizado exclusivamente em um pack.";
+            case 6: return "Disponibilizado exclusivamente em uma oferta.";
+            case 7: return "Obtido por meio de um mobi clicável normal.";
+            case 8: return "Obtido por meio de um mobi clicável raro.";
+            case 9: return "Obtido por receita de uma mesa de criações.";
+            case 10: return "Presente de assinatura Habbo Club de anos anteriores.";
+            case 11: return "Nunca foi disponibilizado ou vendido no jogo.";
+            case 12: return "Entregue em atividade ou promoção oficial.";
+            case 13: return "Exclusivo de uma edição colecionável, LTD ou NFT.";
+            case 14: return "Classificado como indisponível.";
+            default: return "";
+        }
+    }
+
+    private String clothingRarityTitle(JSONObject item, int level) {
+        if (level < 1 || level > 14) return "";
+        String label = clothingRarityLabel(item, level);
+        return "Nível " + level + (label.isEmpty() ? "" : " · " + label);
+    }
+
+    private void showClothingRarityDialog(JSONObject item) {
+        int level = clothingRarityLevel(item);
+        if (level < 1 || level > 14) return;
+
+        Dialog dialog = new Dialog(this);
+        LinearLayout wrap = new LinearLayout(this);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+        wrap.setGravity(Gravity.CENTER_HORIZONTAL);
+        wrap.setPadding(dp(20), dp(20), dp(20), dp(18));
+        wrap.setBackground(round(dialogFillColor(), dp(22), dialogStrokeColor(), 1));
+        dialog.setContentView(wrap);
+
+        ImageView icon = new ImageView(this);
+        icon.setAdjustViewBounds(true);
+        icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        wrap.addView(icon, lp(dp(58), dp(58), 0, 0, 0, 10));
+        String iconUrl = clothingRarityIconUrl(item, level);
+        if (!iconUrl.isEmpty()) loadImage(icon, iconUrl);
+
+        TextView title = text(clothingRarityTitle(item, level), 17,
+                lightTheme ? Color.rgb(32,32,32) : Color.WHITE, true);
+        title.setGravity(Gravity.CENTER);
+        wrap.addView(title, lp(-1, -2, 0, 0, 0, 8));
+
+        String description = clothingRarityDescription(item, level);
+        if (!description.isEmpty()) {
+            TextView body = text(description, 14, themeMutedColor(), false);
+            body.setGravity(Gravity.CENTER);
+            wrap.addView(body, lp(-1, -2, 0, 0, 0, 14));
+        }
+
+        TextView close = dialogButton(t(R.string.close));
+        wrap.addView(close, lp(-1, dp(46), 0, 0, 0, 0));
+        close.setOnClickListener(v -> dialog.dismiss());
+
+        dialog.show();
+        Window window = dialog.getWindow();
+        if (window != null) {
+            window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            WindowManager.LayoutParams params = new WindowManager.LayoutParams();
+            params.copyFrom(window.getAttributes());
+            params.width = (int) (getResources().getDisplayMetrics().widthPixels * 0.84f);
+            params.height = WindowManager.LayoutParams.WRAP_CONTENT;
+            window.setAttributes(params);
+        }
     }
 
     private String clothingName(JSONObject o, String fallback) {
@@ -7780,23 +7901,45 @@ private int loadingProgressFor(String message) {
             runOnUiThread(() -> {
                 info.removeAllViews();
 
-                String code = firstText(itemInfo, "code", "classname", "className", "id");
-                String name = clothingName(itemInfo, code.isEmpty() ? (type + "-" + itemId) : code);
-                String collection = clothingLineName(itemInfo, "");
-                String rarity = clothingRarity(itemInfo);
-                String icon = clothingRarityIconUrl(itemInfo, rarity);
+                if (itemInfo == null || !hasCompleteClothingName(itemInfo)) {
+                    rarityThumbnail.setVisibility(View.INVISIBLE);
+                    info.addView(visualItemInfoRow(t(R.string.item_name), ""));
+                    return;
+                }
 
-                info.addView(visualItemInfoRow(t(R.string.item_name), name.isEmpty() ? "" : name));
-                info.addView(visualItemInfoRow(t(R.string.collection), collection));
+                String code = firstText(itemInfo, "code", "classname", "className", "id");
+                String name = clothingName(itemInfo, code);
+                String collection = clothingLineName(itemInfo, "");
+                int rarityLevel = clothingRarityLevel(itemInfo);
+                String icon = clothingRarityIconUrl(itemInfo, rarityLevel);
+
+                info.addView(visualItemInfoRow(t(R.string.item_name), name));
+                if (!collection.isEmpty()) {
+                    info.addView(visualItemInfoRow(t(R.string.collection), collection));
+                }
+                if (rarityLevel > 0) {
+                    info.addView(visualItemInfoRow(
+                            getString(R.string.rarity),
+                            clothingRarityTitle(itemInfo, rarityLevel)
+                    ));
+                    String rarityDescription = clothingRarityDescription(itemInfo, rarityLevel);
+                    if (!rarityDescription.isEmpty()) {
+                        info.addView(visualItemInfoRow(
+                                getString(R.string.rarity_details),
+                                rarityDescription
+                        ));
+                    }
+                }
+
                 rarityThumbnail.setImageDrawable(null);
-                rarityThumbnail.setVisibility(View.VISIBLE);
-                Glide.with(MainActivity.this)
-                        .asGif()
-                        .load(icon)
-                        .diskCacheStrategy(DiskCacheStrategy.AUTOMATIC)
-                        .placeholder(new ColorDrawable(Color.TRANSPARENT))
-                        .error(new ColorDrawable(Color.TRANSPARENT))
-                        .into(rarityThumbnail);
+                if (!icon.isEmpty()) {
+                    rarityThumbnail.setVisibility(View.VISIBLE);
+                    loadImage(rarityThumbnail, icon);
+                    rarityThumbnail.setContentDescription(clothingRarityTitle(itemInfo, rarityLevel));
+                    rarityThumbnail.setOnClickListener(v -> showClothingRarityDialog(itemInfo));
+                } else {
+                    rarityThumbnail.setVisibility(View.INVISIBLE);
+                }
             });
         });
     }

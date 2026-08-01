@@ -200,4 +200,6 @@
     <string name="kilobytes_format">%1$.1f KB</string>
     <string name="megabytes_format">%1$.1f MB</string>
     <string name="ad_badge">AD</string>
+    <string name="rarity">Raridade</string>
+    <string name="rarity_details">Detalhes da raridade</string>
 </resources>

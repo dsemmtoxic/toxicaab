@@ -200,4 +200,6 @@
     <string name="kilobytes_format">%1$.1f kt</string>
     <string name="megabytes_format">%1$.1f Mt</string>
     <string name="ad_badge">MAINOS</string>
+    <string name="rarity">Harvinaisuus</string>
+    <string name="rarity_details">Harvinaisuuden tiedot</string>
 </resources>

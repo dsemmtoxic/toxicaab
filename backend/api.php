@@ -22,9 +22,11 @@ declare(strict_types=1);
  * como complemento. Datas históricas são datas de detecção.
  */
 
-const TOXIC_API_VERSION = '1.3.0';
-const TOXIC_USER_AGENT = 'ToxicSearchTool/1.3.0 (+https://atoxic.com.br)';
+const TOXIC_API_VERSION = '1.3.2';
+const TOXIC_USER_AGENT = 'ToxicSearchTool/1.3.2 (+https://atoxic.com.br)';
 const HABBOWIDGETS_BASE = 'https://www.habbowidgets.com';
+const HABBOWIDGETS_KLD1_ICON = HABBOWIDGETS_BASE . '/images/kld1.gif';
+const HABBOWIDGETS_KLD2_ICON = HABBOWIDGETS_BASE . '/images/kld2.gif';
 const CACHE_ROOT = __DIR__ . '/cache/habbowidgets_api';
 // A API opera de forma totalmente stateless. Não altere para true em hospedagens
 // com pouco espaço: nenhum perfil, histórico, resposta ou lock é persistido.
@@ -75,6 +77,9 @@ function main(): void
     try {
         purgeLegacyStorage();
         [$path, $params, $gatewayMode] = parseIncomingRequest();
+        if (preg_match('#^rarity-icon/(?:level/)?(\d{1,2})$#i', $path, $iconMatch)) {
+            sendRarityIcon((int) $iconMatch[1]);
+        }
         if (preg_match('#^rarity-icon/(generic|rare|nft)$#i', $path, $iconMatch)) {
             sendRarityIcon(strtolower($iconMatch[1]));
         }
@@ -177,22 +182,50 @@ function sanitizePublicPayload(mixed $value, string $key = ''): mixed
     return trim($clean);
 }
 
-function sendRarityIcon(string $rarity): void
+function sendRarityIcon(string|int $rarity): void
 {
-    $styles = [
-        'generic' => ['#687386', '#d7deea', 'G'],
-        'rare' => ['#7b43c6', '#f3d35d', 'R'],
-        'nft' => ['#087d86', '#62f0dc', 'N'],
-    ];
-    [$background, $foreground, $letter] = $styles[$rarity] ?? $styles['generic'];
-    header('Content-Type: image/svg+xml; charset=utf-8');
-    header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
-    echo '<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36">'
-        . '<rect x="1" y="1" width="34" height="34" rx="9" fill="' . $background . '" stroke="' . $foreground . '" stroke-width="2"/>'
-        . '<path d="M9 27V9h18v18z" fill="none" stroke="' . $foreground . '" stroke-width="1.4" opacity=".6"/>'
-        . '<text x="18" y="23" text-anchor="middle" font-family="Arial,sans-serif" font-size="14" font-weight="700" fill="' . $foreground . '">' . $letter . '</text>'
-        . '</svg>';
+    $level = is_int($rarity)
+        ? $rarity
+        : rarityLevelFromLegacy((string) $rarity);
+    $level = max(1, min(14, $level));
+    $encoded = rarityIconPngBase64($level);
+    if ($encoded === '') {
+        throw new ApiProblem(404, 'rarity_icon_not_found', 'Ícone de raridade não encontrado.');
+    }
+    $binary = base64_decode($encoded, true);
+    if (!is_string($binary)) {
+        throw new ApiProblem(500, 'rarity_icon_invalid', 'Ícone de raridade inválido.');
+    }
+
+    header_remove('Content-Type');
+    header('Content-Type: image/png');
+    header('Cache-Control: public, max-age=604800, immutable');
+    header('Content-Length: ' . strlen($binary));
+    echo $binary;
     exit;
+}
+
+function rarityIconPngBase64(int $level): string
+{
+    // Cores alinhadas à legenda de cabides usada por fã-sites. Alguns níveis
+    // compartilham o mesmo cabide e são diferenciados pelo nível e tooltip.
+    $icons = [
+        1 => 'iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAwUlEQVR42p2TwQ3DIAxFTVQ1e7QHRsgAVRboGBmoY7AAygCMkEOyB7m4hwJ1iA0olnIx5ufxPyg0DrhS7wHzHhqnuNmuVaDYz0noIG7Tv//4iEQsCRXY1/kk2HScWPs6Qz8uUKubtEDxKVGVhE0kHIMS5XOdtOCtBtymROCtFgNQaNyh4a2G+/N18ITr0aQUACCXCGcoFaOeJZEokBtaij/OJhH6l5aitMnYflyKMRbvT7j2ePVD434k0uusehP2fQHxBn4QmxntRgAAAABJRU5ErkJggg==',
+        2 => 'iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAvUlEQVR42pVTuxHDIAwVviyQXlu4SJsNdM6gcN7ALQVb0DOCUsTidPzz7lRYyI/He2DYemjBfF5c9th605rdVgmG/VKJHkxEuf88z66iphJNcIVQES4dR3CFAEeMMMOjt6Dla0VTJS3j5BhaUTm39RYcIiSirMAh9pO602Eph8iJiBMRO8RuT4qtB3N/VIm0DHWI8N73yrNMIgSloaP4ZTaT6F1WoNVmY48YhzEO709p7L/F1v+U9F7nDPLfF/u0h6Qbz1rBAAAAAElFTkSuQmCC',
+        3 => 'iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAwUlEQVR42p2TwQ3DIAxFTVQ1e7QHRsgAVRboGBmoY7AAygCMkEOyB7m4hwJ1iA0olnIx5ufxPyg0DrhS7wHzHhqnuNmuVaDYz0noIG7Tv//4iEQsCRXY1/kk2HScWPs6Qz8uUKubtEDxKVGVhE0kHIMS5XOdtOCtBtymROCtFgNQaNyh4a2G+/N18ITr0aQUACCXCGcoFaOeJZEokBtaij/OJhH6l5aitMnYflyKMRbvT7j2ePVD434k0uusehP2fQHxBn4QmxntRgAAAABJRU5ErkJggg==',
+        4 => 'iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAvUlEQVR42pVTuxHDIAwVviyQXlu4SJsNdM6gcN7ALQVb0DOCUsTidPzz7lRYyI/He2DYemjBfF5c9th605rdVgmG/VKJHkxEuf88z66iphJNcIVQES4dR3CFAEeMMMOjt6Dla0VTJS3j5BhaUTm39RYcIiSirMAh9pO602Eph8iJiBMRO8RuT4qtB3N/VIm0DHWI8N73yrNMIgSloaP4ZTaT6F1WoNVmY48YhzEO709p7L/F1v+U9F7nDPLfF/u0h6Qbz1rBAAAAAElFTkSuQmCC',
+        5 => 'iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAwUlEQVR42pVTQQ6EIAwsxj+t4WL0CX6EhIds4kf6BIwXI6/qHta6DVBwm/RAaSfDTDGEEUphlhelNcJoSr3dU4BqPWUiG9H/Zpa3URkVmUiA/dwywEfP4djPDdZjhlb02oWkLxk1mZSE42dIRmlfp104GwA93QycDbpTlzvE6Wwg9EToiZwNao2TMIK5DpkjJUGdDTAOU6bZDcIAqaA1+7m3l+qPw1TdB82tW9j1mKs2VvcnFfbfJIxfJtrvbAXPfQDa+4yhxAKkSQAAAABJRU5ErkJggg==',
+        6 => 'iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAwUlEQVR42pVTQQ6EIAwsxj+t4WL0CX6EhIds4kf6BIwXI6/qHta6DVBwm/RAaSfDTDGEEUphlhelNcJoSr3dU4BqPWUiG9H/Zpa3URkVmUiA/dwywEfP4djPDdZjhlb02oWkLxk1mZSE42dIRmlfp104GwA93QycDbpTlzvE6Wwg9EToiZwNao2TMIK5DpkjJUGdDTAOU6bZDcIAqaA1+7m3l+qPw1TdB82tW9j1mKs2VvcnFfbfJIxfJtrvbAXPfQDa+4yhxAKkSQAAAABJRU5ErkJggg==',
+        7 => 'iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAwklEQVR42p1TMQ7DIAw0Ub6SJcyon2DKmCmvyCP6ik6MTPkEYk6WPMYdWpBDbYhqieUwp/OdUegDcKWmB5YY+qC43u4uQRUvldDG5Vwz/hqeoiJWCSWI8fghvDVOqhgP2OcNWtVLF1Q+VdRUwhmXxqCKyr5OutDOwnKuWYF2VgxAoQ8XQDsLxowXTziMJqUAALlEOEMpGfUskySC0tBa/Km3p+4bM1b3QUorG7vPWzXG6v581x7/PejDR4n0O1uV3r0BUXZ8+3RqTGMAAAAASUVORK5CYII=',
+        8 => 'iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAwElEQVR42pVTsQ3DIBAEy9OwQNooTpM2g9Ayg1sPQktjLLcs4HUuRQC/CA/OSy9Zx/l9f4clbBC1ku8bSgw2yBp3uDqgiZdKKBHanfjyYhVVldAB27r/DLy0Tqpt3cV0zKJXI3dA5VNFXSXVROIaVFHJG7gDr4yAdlmBV4ZPKqaD1F4ZQDtAO3hlWCx1SvcEGGLtAxSX8SHvXhraij9xR+r+43lv3gcurWzsdMzNGJv3pzT234YNXyXc39n1Jr73AQdPnpCnfIlyAAAAAElFTkSuQmCC',
+        9 => 'iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAv0lEQVR42pVT0QnDIBDVkAUcpnQD6UcDpVM4UqaQgPmQbiAZJiO8fjRnD+tpenAgz/N8955q+KRqoZ9XlBh80rXa4WyDJl4y4YU2fs+8blpkVGXCG2zL+tPw1DgU27KqfZ5UL0Zpg9PnjLpMasLRGJxRWTdIG8YFZSMyA+OC7NThDiiNC7ARsBEwLogYJbmbAamwdgHH9bHIs5eCtuyn2pGrf3ncm+9BcisLu89T08bm+ymF/Tfh04eJ9Dt7QefelkSbp3PJpcIAAAAASUVORK5CYII=',
+        10 => 'iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAvklEQVR42pVTMQ7DIAw0KBPfSaRO3Sqx9zN5A59hr5QtExL+TlZ3KFBKsEMtWUqOwzmfHUU+QC/U80YtRj6oHlePFpBwLREJbUmpUFdJLgAAgNv+8z7cTg7cdljWA65i4g7U/DoVHFLSnUhqo1bU8jR3EJ0BQlsURGf4SaU9oZzRGSK0RGgpOsNiOfOefQGG2PtAjav0UHpvDZXGn7lT7f78uIv7wE2rGLushzhGcX9aY/9N8uGjhPs7L71J997ASJ4cvt4KngAAAABJRU5ErkJggg==',
+        11 => 'iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAxUlEQVR42p2Tyw3EIAxEh5BWqCE9+GIpTaSNbYMmkLjQAyWkGu9hF+QlkM9a4jI4w2NMjISMXpl1kVaTkE2vd7prcKq3JLrRe1/1bduGRF0SbZBSOhjeuk6plBJijLiqebSh8TXRJUkvuHINTdT2TaMNZob3vhIw83AAcyswM4jokAkRgYh+NLMuIiEbA0B6E+kFqg/QmVWTYtAGejb+0ltN9Cl3StNaAC8A2Pcd1lo45x4ZlCeML81fS0L+jHj0d15V+e4NAfx6IlyulGUAAAAASUVORK5CYII=',
+        12 => 'iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAv0lEQVR42pVT0QnDIBDVkAUcpnQD6UcDpVM4UqaQgPmQbiAZJiO8fjRnD+tpenAgz/N8955q+KRqoZ9XlBh80rXa4WyDJl4y4YU2fs+8blpkVGXCG2zL+tPw1DgU27KqfZ5UL0Zpg9PnjLpMasLRGJxRWTdIG8YFZSMyA+OC7NThDiiNC7ARsBEwLogYJbmbAamwdgHH9bHIs5eCtuyn2pGrf3ncm+9BcisLu89T08bm+ymF/Tfh04eJ9Dt7QefelkSbp3PJpcIAAAAASUVORK5CYII=',
+        13 => 'iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAvUlEQVR42pVTuxHDIAwVviyQXlu4SJsNdM6gcN7ALQVb0DOCUsTidPzz7lRYyI/He2DYemjBfF5c9th605rdVgmG/VKJHkxEuf88z66iphJNcIVQES4dR3CFAEeMMMOjt6Dla0VTJS3j5BhaUTm39RYcIiSirMAh9pO602Eph8iJiBMRO8RuT4qtB3N/VIm0DHWI8N73yrNMIgSloaP4ZTaT6F1WoNVmY48YhzEO709p7L/F1v+U9F7nDPLfF/u0h6Qbz1rBAAAAAElFTkSuQmCC',
+        14 => 'iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAwElEQVR42p2TsRHDIBAED9mlkH7sEshdCwW4AGohpwRiulBKATiwYV74Ecg3o+R5nZa7kSo+QpJ6Pko/Kz4qaXdbNTid9yR80Vrb5s65IZFIwg1CCD+GS9epCiEgpYSZ7qMDjs+JpiRScPUanKjf20YHRARrbSMgomEBqvh4GBARjDGHTKQZb0oBKFIjUqDcjGfWTKpBH+hZ/XW3mfCvrIjT3gC8AGDfd+ScobW+ZFCDwZfmr6f4+Kl49HfOVN97A9vJfWF5JMoRAAAAAElFTkSuQmCC',
+    ];
+    return (string) ($icons[$level] ?? '');
 }
 
 function encodeJson(mixed $value): string
@@ -2194,18 +2227,27 @@ function parseClosetRows(DOMXPath $xpath, array $config): array
         if ($name === '') {
             $name = $code;
         }
-        $icon = imageUrlFromNode(firstXpathNode($xpath, './/img[1]', $row));
-        $rarity = clothingRarity($code, $name, $icon);
+        $rarityNode = firstXpathNode(
+            $xpath,
+            './/img[contains(translate(@src, "KLD", "kld"), "kld1.gif") or contains(translate(@src, "KLD", "kld"), "kld2.gif")][1]',
+            $row
+        );
+        $icon = imageUrlFromNode($rarityNode);
+        $rowContext = nodeText($row);
+        $scientificName = extractClothingScientificName($rowContext . ' ' . $href);
+        $rarityDetails = clothingRarityProfile($code, $name, $icon, $rowContext . ' ' . $scientificName);
         $slot = strtolower((string) strtok($code, '-'));
         $items[$slot] = clothingRecord(
             $code,
             $name,
             $category,
             $slot,
-            $rarity,
+            (string) $rarityDetails['legacy'],
             $icon,
             (string) $config['key'],
-            absoluteHabbowidgetsUrl($href)
+            absoluteHabbowidgetsUrl($href),
+            $rarityDetails,
+            $scientificName
         );
     }
     return $items;
@@ -2219,20 +2261,33 @@ function clothingRecord(
     string $rarity,
     string $iconUrl,
     string $hotel,
-    string $closetUrl = ''
+    string $closetUrl = '',
+    array $rarityDetails = [],
+    string $scientificName = ''
 ): array {
     $name = sanitizeClothingName($name, $code);
     $category = trim($category);
     if ($category === '') {
         $category = clothingSlotName($slot, $hotel);
     }
-    if ($iconUrl === '' || str_contains(strtolower($iconUrl), 'habbowidgets')) {
-        $iconUrl = rarityIconUrl($rarity);
+
+    if ($rarityDetails === []) {
+        $rarityDetails = clothingRarityProfile(
+            $code,
+            $name,
+            $iconUrl,
+            $scientificName . ' ' . $category
+        );
     }
+    $level = (int) ($rarityDetails['level'] ?? 0);
+    $legacyRarity = (string) ($rarityDetails['legacy'] ?? $rarity);
+    $resolvedIconUrl = $level > 0 ? rarityIconUrlByLevel($level) : '';
+
     return [
         'code' => $code,
         'classname' => $code,
         'className' => $code,
+        'scientificName' => $scientificName,
         'id' => $code,
         'name' => $name,
         'publicName' => $name,
@@ -2244,12 +2299,19 @@ function clothingRecord(
         'category' => $category,
         '_slot' => $slot,
         'slot' => $slot,
-        'rarity' => $rarity,
-        'isRare' => $rarity === 'rare',
-        'isNft' => $rarity === 'nft',
-        'iconUrl' => $iconUrl,
-        'imageUrl' => $iconUrl,
-        'rarityIconUrl' => $iconUrl,
+        'rarity' => $legacyRarity,
+        'rarityType' => (string) ($rarityDetails['key'] ?? ''),
+        'rarityLevel' => $level,
+        'rarityKey' => (string) ($rarityDetails['key'] ?? ''),
+        'rarityLabel' => (string) ($rarityDetails['label'] ?? ''),
+        'rarityDescription' => (string) ($rarityDetails['description'] ?? ''),
+        'raritySource' => (string) ($rarityDetails['source'] ?? ''),
+        'rarityConfidence' => (string) ($rarityDetails['confidence'] ?? ''),
+        'isRare' => in_array($level, [2, 4, 8, 13], true),
+        'isNft' => $level === 13,
+        'iconUrl' => $resolvedIconUrl,
+        'imageUrl' => $resolvedIconUrl,
+        'rarityIconUrl' => $resolvedIconUrl,
         'closetUrl' => '',
         'source' => 'toxic',
     ];
@@ -2272,6 +2334,15 @@ function sanitizeClothingName(string $name, string $code): string
         return $code;
     }
     return $clean;
+}
+
+function isCompleteClothingName(string $name, string $code): bool
+{
+    $name = sanitizeClothingName($name, $code);
+    if ($name === '' || normalizeKey($name) === normalizeKey($code)) {
+        return false;
+    }
+    return preg_match('/^(?:[a-z]{2,4}|nft|kld)[-_ ]?\d+(?:[-_ ]?\d+)*$/i', $name) !== 1;
 }
 
 function clothingSlotName(string $slot, string $hotel): string
@@ -2314,22 +2385,203 @@ function clothingSlotName(string $slot, string $hotel): string
     return (string) ($map[strtolower($slot)] ?? strtoupper($slot));
 }
 
-function clothingRarity(string $code, string $name, string $iconUrl): string
+function rarityLevelDefinitions(): array
 {
-    $combined = strtolower(removeAccents($code . ' ' . $name . ' ' . $iconUrl));
-    if (preg_match('/\bnft\b|collectible|colecionavel|kld3/', $combined)) {
+    return [
+        1 => ['key' => 'catalog_permanent', 'label' => 'Permanente no catálogo', 'description' => 'Disponível permanentemente no catálogo.'],
+        2 => ['key' => 'activity_rare', 'label' => 'Raro de atividade', 'description' => 'Entregue em atividade e não vendido no catálogo.'],
+        3 => ['key' => 'normal_returnable', 'label' => 'Normal', 'description' => 'Peça normal que pode retornar ao catálogo.'],
+        4 => ['key' => 'rare', 'label' => 'Raro', 'description' => 'Peça rara, normalmente sem retorno à Habbo Loja.'],
+        5 => ['key' => 'pack_exclusive', 'label' => 'Exclusivo de pack', 'description' => 'Disponibilizado exclusivamente em um pack.'],
+        6 => ['key' => 'offer_exclusive', 'label' => 'Exclusivo de oferta', 'description' => 'Disponibilizado exclusivamente em uma oferta.'],
+        7 => ['key' => 'clickable_normal', 'label' => 'Mobi clicável', 'description' => 'Obtido por meio de um mobi clicável normal.'],
+        8 => ['key' => 'clickable_rare', 'label' => 'Mobi clicável raro', 'description' => 'Obtido por meio de um mobi clicável raro.'],
+        9 => ['key' => 'crafting_recipe', 'label' => 'Mesa de criações', 'description' => 'Obtido por receita de uma mesa de criações.'],
+        10 => ['key' => 'hc_gift', 'label' => 'Presente HC', 'description' => 'Presente de assinatura Habbo Club de anos anteriores.'],
+        11 => ['key' => 'unreleased', 'label' => 'Nunca lançado', 'description' => 'Nunca foi disponibilizado ou vendido no jogo.'],
+        12 => ['key' => 'activity_promotion', 'label' => 'Atividade ou promoção', 'description' => 'Entregue em atividade ou promoção oficial.'],
+        13 => ['key' => 'collectible', 'label' => 'Colecionável', 'description' => 'Exclusivo de uma edição colecionável, LTD ou NFT.'],
+        14 => ['key' => 'unavailable', 'label' => 'Indisponível', 'description' => 'Classificado como indisponível.'],
+    ];
+}
+
+function rarityLevelFromLegacy(string $rarity): int
+{
+    $rarity = strtolower(trim($rarity));
+    if (str_contains($rarity, 'nft') || str_contains($rarity, 'collect')) {
+        return 13;
+    }
+    if (str_contains($rarity, 'rare') || str_contains($rarity, 'raro')) {
+        return 4;
+    }
+    return 3;
+}
+
+function legacyRarityForLevel(int $level): string
+{
+    if ($level === 13) {
         return 'nft';
     }
-    if (str_contains($combined, 'kld2')) {
+    if (in_array($level, [2, 4, 8], true)) {
         return 'rare';
     }
     return 'generic';
 }
 
+function publicApiBaseUrl(): string
+{
+    $forwardedProto = trim((string) ($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? ''));
+    $scheme = $forwardedProto !== ''
+        ? strtolower((string) strtok($forwardedProto, ','))
+        : ((!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http');
+    $host = trim((string) ($_SERVER['HTTP_HOST'] ?? ''));
+    $script = (string) ($_SERVER['SCRIPT_NAME'] ?? '/api.php');
+    if ($host === '') {
+        return '/api.php';
+    }
+    return $scheme . '://' . $host . $script;
+}
+
+function rarityIconUrlByLevel(int $level): string
+{
+    if ($level < 1 || $level > 14) {
+        return '';
+    }
+    return rtrim(publicApiBaseUrl(), '/') . '/rarity-icon/level/' . $level;
+}
+
+function clothingRarity(string $code, string $name, string $iconUrl): string
+{
+    return (string) clothingRarityProfile($code, $name, $iconUrl)['legacy'];
+}
+
+function clothingRarityProfile(
+    string $code,
+    string $name,
+    string $iconUrl = '',
+    string $context = '',
+    array $hints = []
+): array {
+    $definitions = rarityLevelDefinitions();
+    $combined = strtolower(removeAccents(
+        $code . ' ' . $name . ' ' . $iconUrl . ' ' . $context . ' '
+        . implode(' ', array_map('strval', $hints))
+    ));
+    $level = 0;
+    $source = 'unknown';
+    $confidence = 'unknown';
+
+    $explicitLevel = (int) ($hints['rarityLevel'] ?? 0);
+    if ($explicitLevel >= 1 && $explicitLevel <= 14) {
+        $level = $explicitLevel;
+        $source = (string) ($hints['source'] ?? 'mapping');
+        $confidence = 'exact';
+    } elseif (preg_match('/(?:raridade|rarity|nivel|level)\s*[:#-]?\s*(1[0-4]|[1-9])\b/i', $context, $m)) {
+        $level = (int) $m[1];
+        $source = 'source-page';
+        $confidence = 'exact';
+    } elseif (preg_match('/\b(?:indisponivel|unavailable|disabled clothing)\b/', $combined)) {
+        $level = 14;
+        $source = 'metadata';
+        $confidence = 'high';
+    } elseif (preg_match('/\b(?:nft|collectible|collectable|colecionavel|limited edition|clothing_ltd|ltd_)\b/', $combined)) {
+        $level = 13;
+        $source = 'metadata';
+        $confidence = 'high';
+    } elseif (preg_match('/\b(?:never released|unreleased|nao lancad|nunca (?:foi )?(?:disponibilizad|lancad|vendid))\b/', $combined)) {
+        $level = 11;
+        $source = 'metadata';
+        $confidence = 'high';
+    } elseif (preg_match('/\b(?:hc gift|habbo club gift|presente hc|monthly hc gift)\b/', $combined)) {
+        $level = 10;
+        $source = 'metadata';
+        $confidence = 'high';
+    } elseif (preg_match('/\b(?:craft|crafting|recipe|receita|mesa de criac)\b/', $combined)) {
+        $level = 9;
+        $source = 'metadata';
+        $confidence = 'high';
+    } elseif (preg_match('/\b(?:clickable|mobi clicavel|click furni)\b/', $combined)) {
+        $level = (str_contains($combined, 'kld2') || preg_match('/\brare|raro\b/', $combined)) ? 8 : 7;
+        $source = 'metadata';
+        $confidence = 'high';
+    } elseif (preg_match('/\b(?:pack|bundle)\b/', $combined)) {
+        $level = 5;
+        $source = 'metadata';
+        $confidence = 'high';
+    } elseif (preg_match('/\b(?:offer|oferta)\b/', $combined)) {
+        $level = 6;
+        $source = 'metadata';
+        $confidence = 'high';
+    } elseif (
+        preg_match('/\b(?:activity|atividade|event reward|recompensa)\b/', $combined)
+        && (str_contains($combined, 'kld2') || preg_match('/\brare|raro\b/', $combined))
+    ) {
+        $level = 2;
+        $source = 'metadata';
+        $confidence = 'medium';
+    } elseif (preg_match('/\b(?:promotion|promo|promocao|campaign reward)\b/', $combined)) {
+        $level = 12;
+        $source = 'metadata';
+        $confidence = 'medium';
+    } elseif (preg_match('/\b(?:permanent|permanente|always in catalog|catalogo permanente)\b/', $combined)) {
+        $level = 1;
+        $source = 'metadata';
+        $confidence = 'medium';
+    } elseif (str_contains(strtolower($iconUrl), 'kld2.gif')) {
+        $level = 4;
+        $source = 'habbowidgets';
+        $confidence = 'exact';
+    } elseif (str_contains(strtolower($iconUrl), 'kld1.gif')) {
+        $level = 3;
+        $source = 'habbowidgets';
+        $confidence = 'exact';
+    } elseif (preg_match('/\bclothing_r\d{2}[_-]/', $combined)) {
+        $level = 4;
+        $source = 'scientific-name';
+        $confidence = 'medium';
+    }
+
+    if ($level === 0) {
+        return [
+            'level' => 0,
+            'key' => '',
+            'label' => '',
+            'description' => '',
+            'legacy' => 'generic',
+            'source' => 'unknown',
+            'confidence' => 'unknown',
+        ];
+    }
+
+    $definition = $definitions[$level];
+    return [
+        'level' => $level,
+        'key' => $definition['key'],
+        'label' => $definition['label'],
+        'description' => $definition['description'],
+        'legacy' => legacyRarityForLevel($level),
+        'source' => $source,
+        'confidence' => $confidence,
+    ];
+}
+
 function rarityIconUrl(string $rarity): string
 {
-    $type = in_array($rarity, ['generic', 'rare', 'nft'], true) ? $rarity : 'generic';
-    return 'https://atoxic.com.br/api.php/rarity-icon/' . $type;
+    return rarityIconUrlByLevel(rarityLevelFromLegacy($rarity));
+}
+
+function normalizeRarityIconUrl(string $iconUrl, string $rarity): string
+{
+    $profile = clothingRarityProfile('', '', $iconUrl, $rarity);
+    return rarityIconUrlByLevel((int) ($profile['level'] ?? 0));
+}
+
+function extractClothingScientificName(string $html): string
+{
+    if (preg_match('/\b(clothing_[a-z0-9_]+)\b/i', $html, $match)) {
+        return strtolower($match[1]);
+    }
+    return '';
 }
 
 function localeKeyForHotel(string $hotel): string
@@ -3157,7 +3409,7 @@ function clothingFromFigure(string $figure, string $hotel): array
                 '',
                 $slot,
                 'generic',
-                rarityIconUrl('generic'),
+                '',
                 $hotel,
                 HABBOWIDGETS_BASE . '/habbo/closet/'
                     . rawurlencode((string) hotelConfig($hotel)['widget'])
@@ -3166,7 +3418,13 @@ function clothingFromFigure(string $figure, string $hotel): array
         }
     }
 
-    $result = array_values($items);
+    $result = array_values(array_filter(
+        $items,
+        static fn (array $item): bool => isCompleteClothingName(
+            (string) ($item['name'] ?? ''),
+            (string) ($item['code'] ?? '')
+        )
+    ));
     $payload = $items;
     $payload['result'] = $result;
     $payload['items'] = $result;
@@ -3175,12 +3433,12 @@ function clothingFromFigure(string $figure, string $hotel): array
         'provider' => 'toxic',
         'figureString' => $figure,
         'hotel' => $hotel,
-        'rarityIcons' => [
-            'generic' => rarityIconUrl('generic'),
-            'rare' => rarityIconUrl('rare'),
-            'nft' => rarityIconUrl('nft'),
-        ],
-        'note' => 'Os indicadores distinguem item genérico, raro e NFT.',
+        'rarityIcons' => array_map(
+            static fn (int $level): string => rarityIconUrlByLevel($level),
+            array_keys(rarityLevelDefinitions())
+        ),
+        'rarityLevels' => rarityLevelDefinitions(),
+        'note' => 'A raridade é vinculada à peça e usa os 14 níveis adotados por fã-sites.',
     ];
     return [$payload, $allFromCache];
 }
@@ -3240,19 +3498,42 @@ function parseClosetMetadataHtml(
     if (preg_match('/\bfrom\s+(.+?)\s+-\s+Habbo Closet/i', $pageTitle, $match)) {
         $category = normalizeText($match[1]);
     }
-    $rarity = clothingRarity($code, $name, '');
-    if ($rarity === 'generic' && normalizeKey($name) !== normalizeKey($code)) {
-        $rarity = 'rare';
-    }
+    $nameNode = firstXpathNode(
+        $xpath,
+        '//*[contains(concat(" ", normalize-space(@class), " "), " text-center ")]/h4[1]'
+    );
+    $itemContainer = $nameNode !== null
+        ? firstXpathNode(
+            $xpath,
+            'ancestor::*[(self::div or self::section or self::article) and .//img[contains(translate(@src, "KLD", "kld"), "kld1.gif") or contains(translate(@src, "KLD", "kld"), "kld2.gif")]][1]',
+            $nameNode
+        )
+        : null;
+    $rarityNode = $itemContainer !== null
+        ? firstXpathNode(
+            $xpath,
+            './/img[contains(translate(@src, "KLD", "kld"), "kld1.gif") or contains(translate(@src, "KLD", "kld"), "kld2.gif")][1]',
+            $itemContainer
+        )
+        : null;
+    $rarityIcon = imageUrlFromNode($rarityNode);
+    $scientificName = extractClothingScientificName($html);
+    $context = normalizeText(
+        ($itemContainer !== null ? nodeText($itemContainer) : '')
+        . ' ' . $pageTitle . ' ' . $scientificName
+    );
+    $rarityDetails = clothingRarityProfile($code, $name, $rarityIcon, $context);
     return clothingRecord(
         $code,
         $name,
         $category,
         $slot,
-        $rarity,
-        rarityIconUrl($rarity),
+        (string) $rarityDetails['legacy'],
+        $rarityIcon,
         $hotel,
-        $closetUrl
+        $closetUrl,
+        $rarityDetails,
+        $scientificName
     );
 }
 
