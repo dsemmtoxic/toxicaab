@@ -22,8 +22,8 @@ declare(strict_types=1);
  * como complemento. Datas históricas são datas de detecção.
  */
 
-const TOXIC_API_VERSION = '1.3.3';
-const TOXIC_USER_AGENT = 'ToxicSearchTool/1.3.3 (+https://atoxic.com.br)';
+const TOXIC_API_VERSION = '1.3.4';
+const TOXIC_USER_AGENT = 'ToxicSearchTool/1.3.4 (+https://atoxic.com.br)';
 const HABBOWIDGETS_BASE = 'https://www.habbowidgets.com';
 const HABBOWIDGETS_KLD1_ICON = HABBOWIDGETS_BASE . '/images/kld1.gif';
 const HABBOWIDGETS_KLD2_ICON = HABBOWIDGETS_BASE . '/images/kld2.gif';
@@ -2284,6 +2284,19 @@ function clothingRecord(
         );
     }
     $level = (int) ($rarityDetails['level'] ?? 0);
+    if ($level === 0 && isCompleteClothingName($name, $code, $category)) {
+        $definition = rarityLevelDefinitions()[3];
+        $rarityDetails = [
+            'level' => 3,
+            'key' => $definition['key'],
+            'label' => $definition['label'],
+            'description' => $definition['description'],
+            'legacy' => 'generic',
+            'source' => 'named-item-fallback',
+            'confidence' => 'low',
+        ];
+        $level = 3;
+    }
     $legacyRarity = (string) ($rarityDetails['legacy'] ?? $rarity);
     $resolvedIconUrl = $level > 0 ? rarityIconUrlByLevel($level) : '';
 
@@ -2340,12 +2353,16 @@ function sanitizeClothingName(string $name, string $code): string
     return $clean;
 }
 
-function isCompleteClothingName(string $name, string $code): bool
+function isCompleteClothingName(string $name, string $code, string $category = ''): bool
 {
     $name = sanitizeClothingName($name, $code);
     $nameIdentity = preg_replace('/[^a-z0-9]+/', '', strtolower(removeAccents($name))) ?? '';
     $codeIdentity = preg_replace('/[^a-z0-9]+/', '', strtolower(removeAccents($code))) ?? '';
+    $categoryIdentity = preg_replace('/[^a-z0-9]+/', '', strtolower(removeAccents($category))) ?? '';
     if ($name === '' || ($codeIdentity !== '' && $nameIdentity === $codeIdentity)) {
+        return false;
+    }
+    if ($categoryIdentity !== '' && $nameIdentity === $categoryIdentity) {
         return false;
     }
     return !isTechnicalClothingName($name);
@@ -2365,13 +2382,19 @@ function isTechnicalClothingName(string $name): bool
     if (preg_match('/^\d+$/', $technical) === 1) {
         return true;
     }
-    if (preg_match('/^' . $slots . '_?\d+(?:_\d+)*(?:_name)?$/', $technical) === 1) {
+    if (preg_match('/^' . $slots . '_?\d+(?:_\d+)*(?:_[a-z0-9]+)*$/', $technical) === 1) {
         return true;
     }
     if (preg_match('/^(?:nft|kld)_?\d+(?:_\d+)*(?:_name)?$/', $technical) === 1) {
         return true;
     }
     if (preg_match('/^(?:clothing|figure|avatar|look|furni)(?:_[a-z0-9]+)+$/', $technical) === 1) {
+        return true;
+    }
+    if (preg_match(
+        '/^(?:rosto_corpo|face_body|cabelo|hair|camisas?|shirts?|calcas?|trousers?|pants?|sapatos?|shoes?|chapeus?|hats?|acessorios_de_cabeca|head_accessories|acessorios_faciais|face_accessories|estampas|prints|casacos|coats|acessorios_de_peito|chest_accessories|acessorios_de_orelha|ear_accessories|acessorios_de_mao|hand_accessories|cintura|waist)$/',
+        $technical
+    ) === 1) {
         return true;
     }
 
@@ -3464,7 +3487,8 @@ function clothingFromFigure(string $figure, string $hotel): array
         $items,
         static fn (array $item): bool => isCompleteClothingName(
             (string) ($item['name'] ?? ''),
-            (string) ($item['code'] ?? '')
+            (string) ($item['code'] ?? ''),
+            (string) ($item['category'] ?? $item['lineCode'] ?? '')
         )
     );
     $result = array_values($namedItems);

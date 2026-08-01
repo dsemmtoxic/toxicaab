@@ -52,10 +52,10 @@ import java.util.concurrent.*;
 
 public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
-    private static final String APP_VERSION = "1.3.3";
-    // Os mesmos cabides pixelados de 17x15 usados na legenda de raridades do
-    // editor de visuais. Eles ficam dentro do APK para nunca dependerem de
-    // PATH_INFO, CDN, cache ou disponibilidade da API para serem exibidos.
+    private static final String APP_VERSION = "1.3.4";
+    // Cabides pixelados de 17x15 para os níveis de raridade. Eles ficam dentro
+    // do APK para nunca dependerem de PATH_INFO, CDN, cache ou disponibilidade
+    // da API para serem exibidos.
     private static final String[] RARITY_ICON_PNG_BASE64 = new String[] {
             "",
             "iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAwUlEQVR42p2TwQ3DIAxFTVQ1e7QHRsgAVRboGBmoY7AAygCMkEOyB7m4hwJ1iA0olnIx5ufxPyg0DrhS7wHzHhqnuNmuVaDYz0noIG7Tv//4iEQsCRXY1/kk2HScWPs6Qz8uUKubtEDxKVGVhE0kHIMS5XOdtOCtBtymROCtFgNQaNyh4a2G+/N18ITr0aQUACCXCGcoFaOeJZEokBtaij/OJhH6l5aitMnYflyKMRbvT7j2ePVD434k0uusehP2fQHxBn4QmxntRgAAAABJRU5ErkJggg==",
@@ -3867,6 +3867,7 @@ public class MainActivity extends Activity {
     private String completeClothingName(JSONObject item) {
         if (item == null) return "";
         String code = firstText(item, "code", "classname", "className", "id");
+        String categoryIdentity = normalizeClothingIdentity(clothingLineName(item, ""));
         ArrayList<String> candidates = new ArrayList<>();
         JSONObject localeNames = item.optJSONObject("localeNames");
         if (localeNames != null) {
@@ -3885,6 +3886,8 @@ public class MainActivity extends Activity {
             if (name.isEmpty()) continue;
             if (!code.isEmpty()
                     && normalizeClothingIdentity(name).equals(normalizeClothingIdentity(code))) continue;
+            if (!categoryIdentity.isEmpty()
+                    && normalizeClothingIdentity(name).equals(categoryIdentity)) continue;
             if (!looksLikeClothingCode(name)) return name;
         }
         return "";
@@ -3914,14 +3917,23 @@ public class MainActivity extends Activity {
                 .replaceAll("^_+|_+$", "");
         String slots = "(?:hd|hr|ch|lg|sh|ha|he|ea|fa|cp|ca|cc|wa|pt|mc)";
         if (technical.matches("^\\d+$")) return true;
-        if (technical.matches("^" + slots + "_?\\d+(?:_\\d+)*(?:_name)?$")) return true;
+        // Também elimina rótulos produzidos pela fonte como "ch-240 de camisas".
+        if (technical.matches("^" + slots + "_?\\d+(?:_\\d+)*(?:_[a-z0-9]+)*$")) return true;
         if (technical.matches("^(?:nft|kld)_?\\d+(?:_\\d+)*(?:_name)?$")) return true;
         if (technical.matches("^(?:clothing|figure|avatar|look|furni)(?:_[a-z0-9]+)+$")) return true;
+        if (isGenericClothingCategory(technical)) return true;
 
         boolean technicalSeparators = clean.matches(".*[_.:/].*")
                 || (!clean.contains(" ") && clean.contains("-"));
         return technicalSeparators && technical.matches(
                 "^(?:hair|hairstyle|shirt|top|trousers?|pants?|shoes?|hat|head|face|coat|jacket|accessory|accessories|belt|waist|chest|ear|hand)(?:_[a-z0-9]+)+$"
+        );
+    }
+
+    private boolean isGenericClothingCategory(String technical) {
+        if (technical == null || technical.isEmpty()) return false;
+        return technical.matches(
+                "^(?:rosto_corpo|face_body|cabelo|hair|camisas?|shirts?|calcas?|trousers?|pants?|sapatos?|shoes?|chapeus?|hats?|acessorios_de_cabeca|head_accessories|acessorios_faciais|face_accessories|estampas|prints|casacos|coats|acessorios_de_peito|chest_accessories|acessorios_de_orelha|ear_accessories|acessorios_de_mao|hand_accessories|cintura|waist)$"
         );
     }
 
@@ -3947,7 +3959,9 @@ public class MainActivity extends Activity {
         String rarity = firstText(item, "rarity", "rarityType", "rarityKey", "type").toLowerCase(Locale.ROOT);
         if (optBoolAny(item, false, "isNft", "nft") || rarity.contains("nft") || rarity.contains("collect")) return 13;
         if (optBoolAny(item, false, "isRare", "rare") || rarity.contains("rare") || rarity.contains("raro")) return 4;
-        return 0;
+        // Uma peça com nome público nunca pode deixar um buraco vazio na tela.
+        // Quando a API antiga não informa a classificação, usa o cabide normal.
+        return hasCompleteClothingName(item) ? 3 : 0;
     }
 
     private Bitmap clothingRarityIconBitmap(int level) {
