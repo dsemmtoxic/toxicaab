@@ -52,7 +52,28 @@ import java.util.concurrent.*;
 
 public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
-    private static final String APP_VERSION = "1.3.2";
+    private static final String APP_VERSION = "1.3.3";
+    // Os mesmos cabides pixelados de 17x15 usados na legenda de raridades do
+    // editor de visuais. Eles ficam dentro do APK para nunca dependerem de
+    // PATH_INFO, CDN, cache ou disponibilidade da API para serem exibidos.
+    private static final String[] RARITY_ICON_PNG_BASE64 = new String[] {
+            "",
+            "iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAwUlEQVR42p2TwQ3DIAxFTVQ1e7QHRsgAVRboGBmoY7AAygCMkEOyB7m4hwJ1iA0olnIx5ufxPyg0DrhS7wHzHhqnuNmuVaDYz0noIG7Tv//4iEQsCRXY1/kk2HScWPs6Qz8uUKubtEDxKVGVhE0kHIMS5XOdtOCtBtymROCtFgNQaNyh4a2G+/N18ITr0aQUACCXCGcoFaOeJZEokBtaij/OJhH6l5aitMnYflyKMRbvT7j2ePVD434k0uusehP2fQHxBn4QmxntRgAAAABJRU5ErkJggg==",
+            "iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAvUlEQVR42pVTuxHDIAwVviyQXlu4SJsNdM6gcN7ALQVb0DOCUsTidPzz7lRYyI/He2DYemjBfF5c9th605rdVgmG/VKJHkxEuf88z66iphJNcIVQES4dR3CFAEeMMMOjt6Dla0VTJS3j5BhaUTm39RYcIiSirMAh9pO602Eph8iJiBMRO8RuT4qtB3N/VIm0DHWI8N73yrNMIgSloaP4ZTaT6F1WoNVmY48YhzEO709p7L/F1v+U9F7nDPLfF/u0h6Qbz1rBAAAAAElFTkSuQmCC",
+            "iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAwUlEQVR42p2TwQ3DIAxFTVQ1e7QHRsgAVRboGBmoY7AAygCMkEOyB7m4hwJ1iA0olnIx5ufxPyg0DrhS7wHzHhqnuNmuVaDYz0noIG7Tv//4iEQsCRXY1/kk2HScWPs6Qz8uUKubtEDxKVGVhE0kHIMS5XOdtOCtBtymROCtFgNQaNyh4a2G+/N18ITr0aQUACCXCGcoFaOeJZEokBtaij/OJhH6l5aitMnYflyKMRbvT7j2ePVD434k0uusehP2fQHxBn4QmxntRgAAAABJRU5ErkJggg==",
+            "iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAvUlEQVR42pVTuxHDIAwVviyQXlu4SJsNdM6gcN7ALQVb0DOCUsTidPzz7lRYyI/He2DYemjBfF5c9th605rdVgmG/VKJHkxEuf88z66iphJNcIVQES4dR3CFAEeMMMOjt6Dla0VTJS3j5BhaUTm39RYcIiSirMAh9pO602Eph8iJiBMRO8RuT4qtB3N/VIm0DHWI8N73yrNMIgSloaP4ZTaT6F1WoNVmY48YhzEO709p7L/F1v+U9F7nDPLfF/u0h6Qbz1rBAAAAAElFTkSuQmCC",
+            "iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAwUlEQVR42pVTQQ6EIAwsxj+t4WL0CX6EhIds4kf6BIwXI6/qHta6DVBwm/RAaSfDTDGEEUphlhelNcJoSr3dU4BqPWUiG9H/Zpa3URkVmUiA/dwywEfP4djPDdZjhlb02oWkLxk1mZSE42dIRmlfp104GwA93QycDbpTlzvE6Wwg9EToiZwNao2TMIK5DpkjJUGdDTAOU6bZDcIAqaA1+7m3l+qPw1TdB82tW9j1mKs2VvcnFfbfJIxfJtrvbAXPfQDa+4yhxAKkSQAAAABJRU5ErkJggg==",
+            "iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAwUlEQVR42pVTQQ6EIAwsxj+t4WL0CX6EhIds4kf6BIwXI6/qHta6DVBwm/RAaSfDTDGEEUphlhelNcJoSr3dU4BqPWUiG9H/Zpa3URkVmUiA/dwywEfP4djPDdZjhlb02oWkLxk1mZSE42dIRmlfp104GwA93QycDbpTlzvE6Wwg9EToiZwNao2TMIK5DpkjJUGdDTAOU6bZDcIAqaA1+7m3l+qPw1TdB82tW9j1mKs2VvcnFfbfJIxfJtrvbAXPfQDa+4yhxAKkSQAAAABJRU5ErkJggg==",
+            "iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAwklEQVR42p1TMQ7DIAw0Ub6SJcyon2DKmCmvyCP6ik6MTPkEYk6WPMYdWpBDbYhqieUwp/OdUegDcKWmB5YY+qC43u4uQRUvldDG5Vwz/hqeoiJWCSWI8fghvDVOqhgP2OcNWtVLF1Q+VdRUwhmXxqCKyr5OutDOwnKuWYF2VgxAoQ8XQDsLxowXTziMJqUAALlEOEMpGfUskySC0tBa/Km3p+4bM1b3QUorG7vPWzXG6v581x7/PejDR4n0O1uV3r0BUXZ8+3RqTGMAAAAASUVORK5CYII=",
+            "iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAwElEQVR42pVTsQ3DIBAEy9OwQNooTpM2g9Ayg1sPQktjLLcs4HUuRQC/CA/OSy9Zx/l9f4clbBC1ku8bSgw2yBp3uDqgiZdKKBHanfjyYhVVldAB27r/DLy0Tqpt3cV0zKJXI3dA5VNFXSXVROIaVFHJG7gDr4yAdlmBV4ZPKqaD1F4ZQDtAO3hlWCx1SvcEGGLtAxSX8SHvXhraij9xR+r+43lv3gcurWzsdMzNGJv3pzT234YNXyXc39n1Jr73AQdPnpCnfIlyAAAAAElFTkSuQmCC",
+            "iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAv0lEQVR42pVT0QnDIBDVkAUcpnQD6UcDpVM4UqaQgPmQbiAZJiO8fjRnD+tpenAgz/N8955q+KRqoZ9XlBh80rXa4WyDJl4y4YU2fs+8blpkVGXCG2zL+tPw1DgU27KqfZ5UL0Zpg9PnjLpMasLRGJxRWTdIG8YFZSMyA+OC7NThDiiNC7ARsBEwLogYJbmbAamwdgHH9bHIs5eCtuyn2pGrf3ncm+9BcisLu89T08bm+ymF/Tfh04eJ9Dt7QefelkSbp3PJpcIAAAAASUVORK5CYII=",
+            "iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAvklEQVR42pVTMQ7DIAw0KBPfSaRO3Sqx9zN5A59hr5QtExL+TlZ3KFBKsEMtWUqOwzmfHUU+QC/U80YtRj6oHlePFpBwLREJbUmpUFdJLgAAgNv+8z7cTg7cdljWA65i4g7U/DoVHFLSnUhqo1bU8jR3EJ0BQlsURGf4SaU9oZzRGSK0RGgpOsNiOfOefQGG2PtAjav0UHpvDZXGn7lT7f78uIv7wE2rGLushzhGcX9aY/9N8uGjhPs7L71J997ASJ4cvt4KngAAAABJRU5ErkJggg==",
+            "iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAxUlEQVR42p2Tyw3EIAxEh5BWqCE9+GIpTaSNbYMmkLjQAyWkGu9hF+QlkM9a4jI4w2NMjISMXpl1kVaTkE2vd7prcKq3JLrRe1/1bduGRF0SbZBSOhjeuk6plBJijLiqebSh8TXRJUkvuHINTdT2TaMNZob3vhIw83AAcyswM4jokAkRgYh+NLMuIiEbA0B6E+kFqg/QmVWTYtAGejb+0ltN9Cl3StNaAC8A2Pcd1lo45x4ZlCeML81fS0L+jHj0d15V+e4NAfx6IlyulGUAAAAASUVORK5CYII=",
+            "iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAv0lEQVR42pVT0QnDIBDVkAUcpnQD6UcDpVM4UqaQgPmQbiAZJiO8fjRnD+tpenAgz/N8955q+KRqoZ9XlBh80rXa4WyDJl4y4YU2fs+8blpkVGXCG2zL+tPw1DgU27KqfZ5UL0Zpg9PnjLpMasLRGJxRWTdIG8YFZSMyA+OC7NThDiiNC7ARsBEwLogYJbmbAamwdgHH9bHIs5eCtuyn2pGrf3ncm+9BcisLu89T08bm+ymF/Tfh04eJ9Dt7QefelkSbp3PJpcIAAAAASUVORK5CYII=",
+            "iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAvUlEQVR42pVTuxHDIAwVviyQXlu4SJsNdM6gcN7ALQVb0DOCUsTidPzz7lRYyI/He2DYemjBfF5c9th605rdVgmG/VKJHkxEuf88z66iphJNcIVQES4dR3CFAEeMMMOjt6Dla0VTJS3j5BhaUTm39RYcIiSirMAh9pO602Eph8iJiBMRO8RuT4qtB3N/VIm0DHWI8N73yrNMIgSloaP4ZTaT6F1WoNVmY48YhzEO709p7L/F1v+U9F7nDPLfF/u0h6Qbz1rBAAAAAElFTkSuQmCC",
+            "iVBORw0KGgoAAAANSUhEUgAAABEAAAAPCAYAAAACsSQRAAAAwElEQVR42p2TsRHDIBAED9mlkH7sEshdCwW4AGohpwRiulBKATiwYV74Ecg3o+R5nZa7kSo+QpJ6Pko/Kz4qaXdbNTid9yR80Vrb5s65IZFIwg1CCD+GS9epCiEgpYSZ7qMDjs+JpiRScPUanKjf20YHRARrbSMgomEBqvh4GBARjDGHTKQZb0oBKFIjUqDcjGfWTKpBH+hZ/XW3mfCvrIjT3gC8AGDfd+ScobW+ZFCDwZfmr6f4+Kl49HfOVN97A9vJfWF5JMoRAAAAAElFTkSuQmCC"
+    };
+    private final Bitmap[] rarityIconBitmaps = new Bitmap[15];
     private final ExecutorService executor = Executors.newFixedThreadPool(10);
     private FrameLayout screen;
     private LinearLayout root, resultWrap;
@@ -3824,9 +3845,7 @@ public class MainActivity extends Activity {
         ImageView img = new ImageView(this); img.setScaleType(ImageView.ScaleType.FIT_CENTER); row.addView(img, new LinearLayout.LayoutParams(dp(40), dp(40)));
         String code = firstText(o, "code", "classname", "className", "id");
         int rarityLevel = clothingRarityLevel(o);
-        String icon = clothingRarityIconUrl(o, rarityLevel);
-        if (!icon.isEmpty()) {
-            loadImage(img, icon);
+        if (setClothingRarityIcon(img, rarityLevel)) {
             img.setContentDescription(clothingRarityTitle(o, rarityLevel));
             img.setOnClickListener(v -> showClothingRarityDialog(o));
         } else {
@@ -3842,16 +3861,40 @@ public class MainActivity extends Activity {
 
 
     private boolean hasCompleteClothingName(JSONObject item) {
-        if (item == null) return false;
+        return !completeClothingName(item).isEmpty();
+    }
+
+    private String completeClothingName(JSONObject item) {
+        if (item == null) return "";
         String code = firstText(item, "code", "classname", "className", "id");
-        String localized = pickLocalizedValue(item.optJSONObject("localeNames"), "");
-        String rawName = localized.isEmpty()
-                ? firstText(item, "name", "publicName", "furniName")
-                : localized;
-        String name = sanitizeClothingLabel(rawName);
-        if (name.isEmpty()) return false;
-        if (!code.isEmpty() && normalizeClothingIdentity(name).equals(normalizeClothingIdentity(code))) return false;
-        return !looksLikeClothingCode(name);
+        ArrayList<String> candidates = new ArrayList<>();
+        JSONObject localeNames = item.optJSONObject("localeNames");
+        if (localeNames != null) {
+            addClothingNameCandidate(candidates, pickLocalizedValue(localeNames, ""));
+            Iterator<String> localeKeys = localeNames.keys();
+            while (localeKeys.hasNext()) {
+                addClothingNameCandidate(candidates, localeNames.optString(localeKeys.next(), ""));
+            }
+        }
+        addClothingNameCandidate(candidates, firstText(item, "name"));
+        addClothingNameCandidate(candidates, firstText(item, "publicName"));
+        addClothingNameCandidate(candidates, firstText(item, "furniName"));
+
+        for (String candidate : candidates) {
+            String name = sanitizeClothingLabel(candidate);
+            if (name.isEmpty()) continue;
+            if (!code.isEmpty()
+                    && normalizeClothingIdentity(name).equals(normalizeClothingIdentity(code))) continue;
+            if (!looksLikeClothingCode(name)) return name;
+        }
+        return "";
+    }
+
+    private void addClothingNameCandidate(ArrayList<String> candidates, String value) {
+        if (value == null) return;
+        String clean = value.trim();
+        if (clean.isEmpty() || "null".equalsIgnoreCase(clean) || candidates.contains(clean)) return;
+        candidates.add(clean);
     }
 
     private String normalizeClothingIdentity(String value) {
@@ -3863,8 +3906,23 @@ public class MainActivity extends Activity {
 
     private boolean looksLikeClothingCode(String value) {
         String clean = value == null ? "" : value.trim();
-        return clean.matches("(?i)^[a-z]{2,4}[-_ ]?\\d+(?:[-_ ]?\\d+)*$")
-                || clean.matches("(?i)^(?:nft|kld)[-_ ]?\\d+(?:[-_ ]?\\d+)*$");
+        if (clean.isEmpty()) return true;
+        String plain = java.text.Normalizer.normalize(clean, java.text.Normalizer.Form.NFD)
+                .replaceAll("\\p{M}+", "")
+                .toLowerCase(Locale.ROOT);
+        String technical = plain.replaceAll("[^a-z0-9]+", "_")
+                .replaceAll("^_+|_+$", "");
+        String slots = "(?:hd|hr|ch|lg|sh|ha|he|ea|fa|cp|ca|cc|wa|pt|mc)";
+        if (technical.matches("^\\d+$")) return true;
+        if (technical.matches("^" + slots + "_?\\d+(?:_\\d+)*(?:_name)?$")) return true;
+        if (technical.matches("^(?:nft|kld)_?\\d+(?:_\\d+)*(?:_name)?$")) return true;
+        if (technical.matches("^(?:clothing|figure|avatar|look|furni)(?:_[a-z0-9]+)+$")) return true;
+
+        boolean technicalSeparators = clean.matches(".*[_.:/].*")
+                || (!clean.contains(" ") && clean.contains("-"));
+        return technicalSeparators && technical.matches(
+                "^(?:hair|hairstyle|shirt|top|trousers?|pants?|shoes?|hat|head|face|coat|jacket|accessory|accessories|belt|waist|chest|ear|hand)(?:_[a-z0-9]+)+$"
+        );
     }
 
     private int clothingRarityLevel(JSONObject item) {
@@ -3892,18 +3950,40 @@ public class MainActivity extends Activity {
         return 0;
     }
 
-    private String clothingRarityIconUrl(JSONObject item, int level) {
-        String provided = firstText(item, "rarityIconUrl", "iconUrl", "imageUrl", "url", "thumbnail");
-        String clean = provided == null ? "" : provided.trim();
-        String lower = clean.toLowerCase(Locale.ROOT);
-        if (lower.contains("/rarity-icon/")) return normalizeUrl(clean);
-        if (level < 1 || level > 14) {
-            if (lower.contains("kld2.gif")) level = 4;
-            else if (lower.contains("kld1.gif")) level = 3;
+    private Bitmap clothingRarityIconBitmap(int level) {
+        if (level < 1 || level >= RARITY_ICON_PNG_BASE64.length) return null;
+        synchronized (rarityIconBitmaps) {
+            Bitmap cached = rarityIconBitmaps[level];
+            if (cached != null && !cached.isRecycled()) return cached;
+            try {
+                byte[] bytes = android.util.Base64.decode(
+                        RARITY_ICON_PNG_BASE64[level], android.util.Base64.DEFAULT
+                );
+                Bitmap decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.length);
+                rarityIconBitmaps[level] = decoded;
+                return decoded;
+            } catch (Exception ignored) {
+                return null;
+            }
         }
-        return level >= 1 && level <= 14
-                ? PROFILE_API + "/rarity-icon/level/" + level
-                : "";
+    }
+
+    private boolean setClothingRarityIcon(ImageView view, int level) {
+        if (view == null) return false;
+        Bitmap bitmap = clothingRarityIconBitmap(level);
+        if (bitmap == null) {
+            view.setImageDrawable(null);
+            view.setVisibility(View.INVISIBLE);
+            return false;
+        }
+        BitmapDrawable drawable = new BitmapDrawable(getResources(), bitmap);
+        drawable.setFilterBitmap(false);
+        drawable.setDither(false);
+        view.clearColorFilter();
+        view.setAlpha(1f);
+        view.setImageDrawable(drawable);
+        view.setVisibility(View.VISIBLE);
+        return true;
     }
 
     private String clothingRarityLabel(JSONObject item, int level) {
@@ -3972,8 +4052,7 @@ public class MainActivity extends Activity {
         icon.setAdjustViewBounds(true);
         icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
         wrap.addView(icon, lp(dp(58), dp(58), 0, 0, 0, 10));
-        String iconUrl = clothingRarityIconUrl(item, level);
-        if (!iconUrl.isEmpty()) loadImage(icon, iconUrl);
+        setClothingRarityIcon(icon, level);
 
         TextView title = text(clothingRarityTitle(item, level), 17,
                 lightTheme ? Color.rgb(32,32,32) : Color.WHITE, true);
@@ -4004,9 +4083,7 @@ public class MainActivity extends Activity {
     }
 
     private String clothingName(JSONObject o, String fallback) {
-        String n = pickLocalizedValue(o == null ? null : o.optJSONObject("localeNames"), fallback);
-        if (n.isEmpty()) n = firstText(o, "name", "publicName", "furniName", "classname", "className", "code");
-        n = sanitizeClothingLabel(n);
+        String n = completeClothingName(o);
         return n.isEmpty() ? fallback : n;
     }
 
@@ -7911,7 +7988,6 @@ private int loadingProgressFor(String message) {
                 String name = clothingName(itemInfo, code);
                 String collection = clothingLineName(itemInfo, "");
                 int rarityLevel = clothingRarityLevel(itemInfo);
-                String icon = clothingRarityIconUrl(itemInfo, rarityLevel);
 
                 info.addView(visualItemInfoRow(t(R.string.item_name), name));
                 if (!collection.isEmpty()) {
@@ -7932,9 +8008,7 @@ private int loadingProgressFor(String message) {
                 }
 
                 rarityThumbnail.setImageDrawable(null);
-                if (!icon.isEmpty()) {
-                    rarityThumbnail.setVisibility(View.VISIBLE);
-                    loadImage(rarityThumbnail, icon);
+                if (setClothingRarityIcon(rarityThumbnail, rarityLevel)) {
                     rarityThumbnail.setContentDescription(clothingRarityTitle(itemInfo, rarityLevel));
                     rarityThumbnail.setOnClickListener(v -> showClothingRarityDialog(itemInfo));
                 } else {
