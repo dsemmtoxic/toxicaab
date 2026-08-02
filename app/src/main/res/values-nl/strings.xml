@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="no_internet_title">Geen internetverbinding</string>
+    <string name="no_internet_body">Toxic heeft internettoegang nodig om te werken. Controleer je verbinding. Dit scherm sluit automatisch zodra de toegang is hersteld.</string>
+    <string name="ad_blocker_title">Advertentieblokkering gedetecteerd</string>
+    <string name="ad_blocker_body">Toxic werkt niet zolang een advertentieblokkering actief is. Schakel AdGuard of de blokkering voor deze app uit. De toegang wordt daarna automatisch hersteld.</string>
+    <string name="access_gate_auto_check">Automatisch controleren…</string>
+
     <string name="favorites_pull">Trek om favorieten te vernieuwen</string>
     <string name="favorites_release">Laat los om favorieten te vernieuwen</string>
     <string name="favorites_updating">Favorieten bijwerken...</string>
