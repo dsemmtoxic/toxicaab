@@ -52,7 +52,7 @@ import java.util.concurrent.*;
 
 public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
-    private static final String APP_VERSION = "1.3.6";
+    private static final String APP_VERSION = "1.3.7";
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
     // os ícones nunca desapareçam por bloqueio de rede ou cache externo.
@@ -243,6 +243,33 @@ public class MainActivity extends Activity {
     private boolean appInForeground = true;
     private static final long FAVORITE_ONLINE_FOREGROUND_INTERVAL_MS = 15L * 1000L;
     private static final long FAVORITE_ONLINE_BACKGROUND_INTERVAL_MS = 60L * 1000L;
+    private static final long ACCESS_GATE_BLOCKED_RECHECK_MS = 3L * 1000L;
+    private static final long ACCESS_GATE_CLEAR_RECHECK_MS = 60L * 1000L;
+    private static final int ACCESS_GATE_CONNECT_TIMEOUT_MS = 3500;
+    private static final int ACCESS_GATE_READ_TIMEOUT_MS = 3500;
+    private static final String[] ACCESS_GATE_CONTROL_URLS = new String[] {
+            "https://atoxic.com.br/",
+            "https://www.habbo.com/"
+    };
+    private static final String[][] ACCESS_GATE_AD_PROBES = new String[][] {
+            {
+                    "pagead2.googlesyndication.com",
+                    "https://pagead2.googlesyndication.com/pagead/gen_204?id=gmob-apps"
+            },
+            {
+                    "googleads.g.doubleclick.net",
+                    "https://googleads.g.doubleclick.net/pagead/gen_204?id=gmob-apps"
+            }
+    };
+    private ConnectivityManager accessConnectivityManager;
+    private ConnectivityManager.NetworkCallback accessNetworkCallback;
+    private boolean accessNetworkCallbackRegistered = false;
+    private boolean accessProbeRunning = false;
+    private boolean accessProbeRerunRequested = false;
+    private int accessProbeGeneration = 0;
+    private Dialog accessGateDialog;
+    private AccessGateReason accessGateReason = AccessGateReason.NONE;
+    private final Runnable accessGateRecheckRunnable = this::requestAccessGateCheck;
 
     private final int bg = Color.rgb(13, 13, 18);
     private final int purple = Color.rgb(139, 52, 217);
@@ -273,6 +300,22 @@ public class MainActivity extends Activity {
     private final Map<String, View> visualItemViewsSessionCache = new HashMap<>();
     private final Map<String, Integer> visualItemRenderLimits = new HashMap<>();
     private final Set<String> visualCategoryLoading = Collections.synchronizedSet(new HashSet<>());
+
+    private enum AccessGateReason {
+        NONE,
+        OFFLINE,
+        AD_BLOCKER
+    }
+
+    private static class AccessProbeResult {
+        final boolean appInternetReachable;
+        final boolean adServicesReachable;
+
+        AccessProbeResult(boolean appInternetReachable, boolean adServicesReachable) {
+            this.appInternetReachable = appInternetReachable;
+            this.adServicesReachable = adServicesReachable;
+        }
+    }
 
     private interface IntChangeListener {
         void onChange(int value);
@@ -337,6 +380,7 @@ public class MainActivity extends Activity {
         removeAdsPurchased = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_REMOVE_ADS_PURCHASED, false);
         MobileAds.initialize(this, initializationStatus -> {});
         buildUi();
+        startAccessGateMonitoring();
         preloadBannerAds();
         attachTopSearchBannerIfPossible();
         initBillingClient();
@@ -844,6 +888,7 @@ public class MainActivity extends Activity {
     }
 
     private void maybeShowProfileInterstitial() {
+        if (accessGateReason != AccessGateReason.NONE) return;
         profileOpenActionsSinceAd++;
 
         long now = System.currentTimeMillis();
@@ -1177,6 +1222,7 @@ public class MainActivity extends Activity {
     }
 
     private void showRewardedAdDialog() {
+        if (accessGateReason != AccessGateReason.NONE) return;
         loadRewardedAd();
         consumeAdFreeElapsed();
         String remaining = formatAdFreeRemaining();
@@ -1347,6 +1393,7 @@ public class MainActivity extends Activity {
     }
 
     private void showRewardedAdForAdFreeTime() {
+        if (accessGateReason != AccessGateReason.NONE) return;
         if (getAdFreeRemainingMs() >= MAX_AD_FREE_MS) {
             toast(t(R.string.limit_24h));
             updateRewardButtonText();
@@ -1472,6 +1519,7 @@ public class MainActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         appInForeground = true;
+        if (!accessProbeRunning) requestAccessGateCheck();
         resumeBannerAds();
         if (removeAdsPurchased || hasAdFreeAccess()) destroyAllBannerAds();
         else { preloadBannerAds(); attachTopSearchBannerIfPossible(); }
@@ -1491,6 +1539,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onPause() {
         appInForeground = false;
+        uiHandler.removeCallbacks(accessGateRecheckRunnable);
         pauseBannerAds();
         cancelAllBannerAdRetries();
         saveAdFreeUntil();
@@ -1504,6 +1553,7 @@ public class MainActivity extends Activity {
     @Override protected void onDestroy() {
         saveAdFreeUntil();
         cancelTutorialPulseAnimation();
+        stopAccessGateMonitoring();
         if (suggestionDebounceTask != null) uiHandler.removeCallbacks(suggestionDebounceTask);
         uiHandler.removeCallbacks(adFreeTicker);
         cancelInterstitialAdRetry();
@@ -1513,6 +1563,367 @@ public class MainActivity extends Activity {
         try { if (billingClient != null && billingClient.isReady()) billingClient.endConnection(); } catch(Exception ignored) {}
         executor.shutdownNow();
         super.onDestroy();
+    }
+
+    private void startAccessGateMonitoring() {
+        accessConnectivityManager = (ConnectivityManager)getSystemService(CONNECTIVITY_SERVICE);
+        if (accessConnectivityManager == null || accessNetworkCallbackRegistered) {
+            requestAccessGateCheck();
+            return;
+        }
+        accessNetworkCallback = new ConnectivityManager.NetworkCallback() {
+            private void changed() {
+                uiHandler.post(MainActivity.this::requestAccessGateCheck);
+            }
+
+            @Override public void onAvailable(Network network) { changed(); }
+            @Override public void onLost(Network network) { changed(); }
+            @Override public void onCapabilitiesChanged(Network network, NetworkCapabilities capabilities) { changed(); }
+            @Override public void onLinkPropertiesChanged(Network network, LinkProperties properties) { changed(); }
+        };
+        try {
+            if (Build.VERSION.SDK_INT >= 24) {
+                accessConnectivityManager.registerDefaultNetworkCallback(accessNetworkCallback);
+            } else {
+                NetworkRequest request = new NetworkRequest.Builder()
+                        .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                        .build();
+                accessConnectivityManager.registerNetworkCallback(request, accessNetworkCallback);
+            }
+            accessNetworkCallbackRegistered = true;
+        } catch(Exception ignored) {
+            accessNetworkCallbackRegistered = false;
+        }
+        requestAccessGateCheck();
+    }
+
+    private void stopAccessGateMonitoring() {
+        accessProbeGeneration++;
+        accessProbeRerunRequested = false;
+        uiHandler.removeCallbacks(accessGateRecheckRunnable);
+        if (accessNetworkCallbackRegistered && accessConnectivityManager != null && accessNetworkCallback != null) {
+            try { accessConnectivityManager.unregisterNetworkCallback(accessNetworkCallback); } catch(Exception ignored) {}
+        }
+        accessNetworkCallbackRegistered = false;
+        accessNetworkCallback = null;
+        dismissAccessGate();
+    }
+
+    private void requestAccessGateCheck() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            uiHandler.post(this::requestAccessGateCheck);
+            return;
+        }
+        uiHandler.removeCallbacks(accessGateRecheckRunnable);
+        if (!appInForeground || isFinishing() || (Build.VERSION.SDK_INT >= 17 && isDestroyed())) return;
+
+        NetworkCapabilities capabilities = currentAccessNetworkCapabilities();
+        boolean configuredForInternet = capabilities != null
+                && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET);
+        boolean captivePortal = capabilities != null
+                && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL);
+        boolean validated = capabilities != null
+                && capabilities.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+
+        if (!configuredForInternet || captivePortal) {
+            accessProbeGeneration++;
+            if (accessProbeRunning) accessProbeRerunRequested = true;
+            showAccessGate(AccessGateReason.OFFLINE);
+            scheduleNextAccessGateCheck();
+            return;
+        }
+
+        if (isKnownAdBlockingDnsActive()) {
+            accessProbeGeneration++;
+            if (accessProbeRunning) accessProbeRerunRequested = true;
+            showAccessGate(AccessGateReason.AD_BLOCKER);
+            scheduleNextAccessGateCheck();
+            return;
+        }
+
+        // Enquanto o Android ainda não validou a rede, bloqueia a interface.
+        // A sondagem abaixo distingue falta de acesso do bloqueio aos anúncios.
+        if (!validated) showAccessGate(AccessGateReason.OFFLINE);
+
+        if (accessProbeRunning) {
+            accessProbeGeneration++;
+            accessProbeRerunRequested = true;
+            return;
+        }
+
+        accessProbeRunning = true;
+        accessProbeRerunRequested = false;
+        final int generation = ++accessProbeGeneration;
+        executor.execute(() -> {
+            AccessProbeResult result = performAccessProbe();
+            uiHandler.post(() -> {
+                accessProbeRunning = false;
+                if (!appInForeground || isFinishing() || (Build.VERSION.SDK_INT >= 17 && isDestroyed())) return;
+                if (generation != accessProbeGeneration) {
+                    if (accessProbeRerunRequested) {
+                        accessProbeRerunRequested = false;
+                        requestAccessGateCheck();
+                    }
+                    return;
+                }
+
+                NetworkCapabilities latest = currentAccessNetworkCapabilities();
+                boolean stillConfigured = latest != null
+                        && latest.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                        && !latest.hasCapability(NetworkCapabilities.NET_CAPABILITY_CAPTIVE_PORTAL);
+                if (!stillConfigured || !result.appInternetReachable) {
+                    showAccessGate(AccessGateReason.OFFLINE);
+                } else if (isKnownAdBlockingDnsActive() || !result.adServicesReachable) {
+                    showAccessGate(AccessGateReason.AD_BLOCKER);
+                } else {
+                    dismissAccessGate();
+                }
+
+                if (accessProbeRerunRequested) {
+                    accessProbeRerunRequested = false;
+                    requestAccessGateCheck();
+                } else {
+                    scheduleNextAccessGateCheck();
+                }
+            });
+        });
+    }
+
+    private NetworkCapabilities currentAccessNetworkCapabilities() {
+        try {
+            if (accessConnectivityManager == null) {
+                accessConnectivityManager = (ConnectivityManager)getSystemService(CONNECTIVITY_SERVICE);
+            }
+            if (accessConnectivityManager == null) return null;
+            Network active = accessConnectivityManager.getActiveNetwork();
+            return active == null ? null : accessConnectivityManager.getNetworkCapabilities(active);
+        } catch(Exception ignored) {
+            return null;
+        }
+    }
+
+    private LinkProperties currentAccessLinkProperties() {
+        try {
+            if (accessConnectivityManager == null) {
+                accessConnectivityManager = (ConnectivityManager)getSystemService(CONNECTIVITY_SERVICE);
+            }
+            if (accessConnectivityManager == null) return null;
+            Network active = accessConnectivityManager.getActiveNetwork();
+            return active == null ? null : accessConnectivityManager.getLinkProperties(active);
+        } catch(Exception ignored) {
+            return null;
+        }
+    }
+
+    private boolean isKnownAdBlockingDnsActive() {
+        LinkProperties properties = currentAccessLinkProperties();
+        if (properties == null) return false;
+        try {
+            if (Build.VERSION.SDK_INT >= 28) {
+                String privateDns = properties.getPrivateDnsServerName();
+                String normalized = privateDns == null ? "" : privateDns.trim().toLowerCase(Locale.ROOT);
+                if (normalized.contains("adguard") && !normalized.contains("unfiltered")) return true;
+            }
+            for (InetAddress dns : properties.getDnsServers()) {
+                if (dns == null) continue;
+                String address = dns.getHostAddress();
+                if (address == null) continue;
+                address = address.toLowerCase(Locale.ROOT);
+                int zone = address.indexOf('%');
+                if (zone >= 0) address = address.substring(0, zone);
+                if ("94.140.14.14".equals(address)
+                        || "94.140.15.15".equals(address)
+                        || "94.140.14.15".equals(address)
+                        || "94.140.15.16".equals(address)) return true;
+                if (address.startsWith("2a10:50c0:")
+                        && (address.endsWith(":ad1:ff")
+                        || address.endsWith(":ad2:ff")
+                        || address.endsWith(":bad1:ff")
+                        || address.endsWith(":bad2:ff"))) return true;
+            }
+        } catch(Exception ignored) {}
+        return false;
+    }
+
+    private AccessProbeResult performAccessProbe() {
+        boolean appInternetReachable = false;
+        for (String url : ACCESS_GATE_CONTROL_URLS) {
+            int code = probeHttpResponseCode(url);
+            if (code > 0) {
+                appInternetReachable = true;
+                break;
+            }
+        }
+        if (!appInternetReachable) return new AccessProbeResult(false, false);
+
+        boolean adServicesReachable = false;
+        for (String[] probe : ACCESS_GATE_AD_PROBES) {
+            if (probe == null || probe.length < 2 || !hostResolvesPublicly(probe[0])) continue;
+            if (probeHttpResponseCode(probe[1]) == HttpURLConnection.HTTP_NO_CONTENT) {
+                adServicesReachable = true;
+                break;
+            }
+        }
+        return new AccessProbeResult(true, adServicesReachable);
+    }
+
+    private boolean hostResolvesPublicly(String host) {
+        try {
+            InetAddress[] addresses = InetAddress.getAllByName(host);
+            if (addresses == null || addresses.length == 0) return false;
+            for (InetAddress address : addresses) {
+                if (address == null) continue;
+                if (!address.isAnyLocalAddress()
+                        && !address.isLoopbackAddress()
+                        && !address.isLinkLocalAddress()
+                        && !address.isSiteLocalAddress()) return true;
+            }
+        } catch(Exception ignored) {}
+        return false;
+    }
+
+    private int probeHttpResponseCode(String rawUrl) {
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection)new URL(rawUrl).openConnection();
+            connection.setUseCaches(false);
+            connection.setDefaultUseCaches(false);
+            connection.setConnectTimeout(ACCESS_GATE_CONNECT_TIMEOUT_MS);
+            connection.setReadTimeout(ACCESS_GATE_READ_TIMEOUT_MS);
+            connection.setInstanceFollowRedirects(false);
+            connection.setRequestMethod("GET");
+            connection.setRequestProperty("Accept", "*/*");
+            connection.setRequestProperty("Cache-Control", "no-cache, no-store");
+            connection.setRequestProperty("Connection", "close");
+            connection.setRequestProperty("User-Agent", "ToxicSearchTool/" + APP_VERSION + " Android");
+            return connection.getResponseCode();
+        } catch(Exception ignored) {
+            return -1;
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
+
+    private void scheduleNextAccessGateCheck() {
+        uiHandler.removeCallbacks(accessGateRecheckRunnable);
+        if (!appInForeground) return;
+        long delay = accessGateReason == AccessGateReason.NONE
+                ? ACCESS_GATE_CLEAR_RECHECK_MS
+                : ACCESS_GATE_BLOCKED_RECHECK_MS;
+        uiHandler.postDelayed(accessGateRecheckRunnable, delay);
+    }
+
+    private void showAccessGate(AccessGateReason reason) {
+        if (reason == null || reason == AccessGateReason.NONE) {
+            dismissAccessGate();
+            return;
+        }
+        if (accessGateReason == reason && accessGateDialog != null && accessGateDialog.isShowing()) return;
+        dismissAccessGate();
+        accessGateReason = reason;
+
+        final Dialog dialog = new Dialog(this);
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+        dialog.setCancelable(false);
+        dialog.setCanceledOnTouchOutside(false);
+        dialog.setOnKeyListener((ignored, keyCode, event) -> keyCode == KeyEvent.KEYCODE_BACK);
+
+        FrameLayout full = new FrameLayout(this);
+        full.setBackground(makeBg());
+        full.setClickable(true);
+        full.setFocusable(true);
+
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setGravity(Gravity.CENTER_HORIZONTAL);
+        card.setPadding(dp(24), dp(28), dp(24), dp(26));
+        int cardFillColor = lightTheme ? Color.WHITE : Color.rgb(35, 23, 49);
+        int cardStrokeColor = lightTheme ? Color.rgb(222, 205, 238) : Color.argb(95, 190, 115, 255);
+        card.setBackground(round(cardFillColor, dp(24), cardStrokeColor, 1));
+        if (Build.VERSION.SDK_INT >= 21) card.setElevation(dp(12));
+
+        FrameLayout iconWrap = new FrameLayout(this);
+        int first = reason == AccessGateReason.OFFLINE ? Color.rgb(255, 142, 70) : Color.rgb(169, 68, 235);
+        int second = reason == AccessGateReason.OFFLINE ? Color.rgb(224, 63, 78) : Color.rgb(105, 42, 180);
+        iconWrap.setBackground(grad(dp(999), first, second));
+        TextView icon = text(reason == AccessGateReason.OFFLINE ? "!" : "×", 38, Color.WHITE, true);
+        icon.setTextColor(Color.WHITE);
+        icon.setGravity(Gravity.CENTER);
+        icon.setIncludeFontPadding(false);
+        iconWrap.addView(icon, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
+        card.addView(iconWrap, new LinearLayout.LayoutParams(dp(76), dp(76)));
+
+        int titleRes = reason == AccessGateReason.OFFLINE
+                ? R.string.no_internet_title
+                : R.string.ad_blocker_title;
+        int bodyRes = reason == AccessGateReason.OFFLINE
+                ? R.string.no_internet_body
+                : R.string.ad_blocker_body;
+
+        TextView title = habboText(t(titleRes), 22, true);
+        title.setGravity(Gravity.CENTER);
+        title.setIncludeFontPadding(false);
+        LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(-1, -2);
+        titleLp.topMargin = dp(20);
+        card.addView(title, titleLp);
+
+        TextView body = text(t(bodyRes), 14, lightTheme ? Color.rgb(83, 68, 94) : Color.argb(215,255,255,255), false);
+        body.setGravity(Gravity.CENTER);
+        body.setLineSpacing(dp(3), 1f);
+        LinearLayout.LayoutParams bodyLp = new LinearLayout.LayoutParams(-1, -2);
+        bodyLp.topMargin = dp(12);
+        card.addView(body, bodyLp);
+
+        ProgressBar spinner = new ProgressBar(this, null, android.R.attr.progressBarStyleSmall);
+        spinner.setIndeterminate(true);
+        if (Build.VERSION.SDK_INT >= 21) spinner.setIndeterminateTintList(ColorStateList.valueOf(purple));
+        LinearLayout.LayoutParams spinnerLp = new LinearLayout.LayoutParams(dp(30), dp(30));
+        spinnerLp.topMargin = dp(22);
+        card.addView(spinner, spinnerLp);
+
+        TextView checking = text(t(R.string.access_gate_auto_check), 12, lightTheme ? Color.rgb(100, 82, 112) : Color.argb(175,255,255,255), true);
+        checking.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams checkingLp = new LinearLayout.LayoutParams(-1, -2);
+        checkingLp.topMargin = dp(8);
+        card.addView(checking, checkingLp);
+
+        FrameLayout.LayoutParams cardLp = new FrameLayout.LayoutParams(-1, -2, Gravity.CENTER);
+        cardLp.leftMargin = dp(24);
+        cardLp.rightMargin = dp(24);
+        full.addView(card, cardLp);
+        dialog.setContentView(full);
+        accessGateDialog = dialog;
+        try {
+            dialog.show();
+            Window window = dialog.getWindow();
+            if (window != null) {
+                window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+                window.setStatusBarColor(lightTheme ? Color.WHITE : bg);
+                window.setNavigationBarColor(lightTheme ? Color.WHITE : bg);
+                window.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT);
+                WindowManager.LayoutParams params = window.getAttributes();
+                params.width = WindowManager.LayoutParams.MATCH_PARENT;
+                params.height = WindowManager.LayoutParams.MATCH_PARENT;
+                params.dimAmount = 0f;
+                window.setAttributes(params);
+                if (Build.VERSION.SDK_INT >= 23) {
+                    int flags = lightTheme ? View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR : 0;
+                    if (Build.VERSION.SDK_INT >= 26 && lightTheme) flags |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
+                    window.getDecorView().setSystemUiVisibility(flags);
+                }
+            }
+        } catch(Exception ignored) {
+            accessGateDialog = null;
+        }
+    }
+
+    private void dismissAccessGate() {
+        accessGateReason = AccessGateReason.NONE;
+        Dialog dialog = accessGateDialog;
+        accessGateDialog = null;
+        if (dialog != null) {
+            try { dialog.dismiss(); } catch(Exception ignored) {}
+        }
     }
 
     private void buildUi() {
@@ -9273,6 +9684,7 @@ private int loadingProgressFor(String message) {
     }
 
     @Override public void onBackPressed() {
+        if (accessGateReason != AccessGateReason.NONE) return;
         if (searchInput != null && searchInput.hasFocus()) {
             clearSearchFocus();
             return;
