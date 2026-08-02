@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="no_internet_title">No internet connection</string>
+    <string name="no_internet_body">Toxic needs internet access to work. Check your connection. This screen will close automatically when access is restored.</string>
+    <string name="ad_blocker_title">Ad blocker detected</string>
+    <string name="ad_blocker_body">Toxic does not work while an ad blocker is active. Disable AdGuard or the blocker for this app. Access will return automatically afterward.</string>
+    <string name="access_gate_auto_check">Checking automatically…</string>
+
     <string name="favorites_pull">Pull to refresh favorites</string>
     <string name="favorites_release">Release to refresh favorites</string>
     <string name="favorites_updating">Updating favorites...</string>
