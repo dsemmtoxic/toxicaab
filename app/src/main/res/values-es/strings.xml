@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="no_internet_title">Sin conexión a Internet</string>
+    <string name="no_internet_body">Toxic necesita acceso a Internet para funcionar. Comprueba tu conexión. Esta pantalla se cerrará automáticamente cuando se restablezca el acceso.</string>
+    <string name="ad_blocker_title">Bloqueador de anuncios detectado</string>
+    <string name="ad_blocker_body">Toxic no funciona mientras haya un bloqueador de anuncios activo. Desactiva AdGuard o el bloqueador para esta aplicación. El acceso volverá automáticamente.</string>
+    <string name="access_gate_auto_check">Comprobando automáticamente…</string>
+
     <string name="favorites_pull">Tira para actualizar favoritos</string>
     <string name="favorites_release">Suelta para actualizar favoritos</string>
     <string name="favorites_updating">Actualizando favoritos...</string>
