@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="no_internet_title">Ei internetyhteyttä</string>
+    <string name="no_internet_body">Toxic tarvitsee internetyhteyden toimiakseen. Tarkista yhteys. Tämä ilmoitus sulkeutuu automaattisesti, kun yhteys palautuu.</string>
+    <string name="ad_blocker_title">Mainosten esto havaittu</string>
+    <string name="ad_blocker_body">Toxic ei toimi, kun mainosten esto on käytössä. Poista AdGuard tai tämän sovelluksen mainosten esto käytöstä. Käyttö palautuu automaattisesti.</string>
+    <string name="access_gate_auto_check">Tarkistetaan automaattisesti…</string>
+
     <string name="favorites_pull">Päivitä suosikit vetämällä</string>
     <string name="favorites_release">Vapauta päivittääksesi suosikit</string>
     <string name="favorites_updating">Päivitetään suosikkeja...</string>
