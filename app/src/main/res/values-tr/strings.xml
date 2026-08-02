@@ -1,5 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="no_internet_title">İnternet bağlantısı yok</string>
+    <string name="no_internet_body">Toxic’in çalışması için internet erişimi gerekir. Bağlantınızı kontrol edin. Erişim geri geldiğinde bu ekran otomatik olarak kapanır.</string>
+    <string name="ad_blocker_title">Reklam engelleyici algılandı</string>
+    <string name="ad_blocker_body">Toxic, reklam engelleyici etkinken çalışmaz. AdGuard’ı veya bu uygulama için engelleyiciyi kapatın. Erişim otomatik olarak geri gelir.</string>
+    <string name="access_gate_auto_check">Otomatik olarak kontrol ediliyor…</string>
+
     <string name="favorites_pull">Favorileri yenilemek için çek</string>
     <string name="favorites_release">Favorileri yenilemek için bırak</string>
     <string name="favorites_updating">Favoriler güncelleniyor...</string>
