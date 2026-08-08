@@ -24,8 +24,8 @@ declare(strict_types=1);
  * roupa do HabboNews é usado: os nomes localizados continuam no HabboWidgets.
  */
 
-const TOXIC_API_VERSION = '1.3.9';
-const TOXIC_USER_AGENT = 'ToxicSearchTool/1.3.9 (+https://atoxic.com.br)';
+const TOXIC_API_VERSION = '1.4.0';
+const TOXIC_USER_AGENT = 'ToxicSearchTool/1.4.0 (+https://atoxic.com.br)';
 const HABBOWIDGETS_BASE = 'https://www.habbowidgets.com';
 const CACHE_ROOT = __DIR__ . '/cache/habbowidgets_api';
 const HABBONEWS_IFRAME_URL = 'https://lite.habbonews.net/iframes/iframe-clothing2-temp.php?nick=&direcao=2&genero=3&tutorial=3';
@@ -1317,6 +1317,17 @@ function fetchAndParseHabbowidgetsProfile(
 
     if ($response === null && $name !== '') {
         try {
+            // A página por nome cria uma sessão e o endpoint usado pelo próprio
+            // HabboWidgets devolve o HHID histórico, inclusive para banidos que
+            // já não existem na API pública oficial.
+            $response = fetchHabbowidgetsProfileByNameSession($config, $name);
+        } catch (Throwable $error) {
+            $lastError = $error;
+        }
+    }
+
+    if ($response === null && $name !== '') {
+        try {
             $response = cachedHttpRequest(
                 'POST',
                 HABBOWIDGETS_BASE . '/habinfo/submit',
@@ -1344,6 +1355,125 @@ function fetchAndParseHabbowidgetsProfile(
     );
     $parsed['stale'] = (bool) $response['stale'];
     return $parsed;
+}
+
+function fetchHabbowidgetsProfileByNameSession(array $config, string $name): ?array
+{
+    if (!function_exists('curl_init')) {
+        throw new ApiProblem(
+            500,
+            'curl_missing',
+            'A extensão cURL não está habilitada no servidor.'
+        );
+    }
+
+    $widgetHotel = (string) ($config['widget'] ?? 'com.br');
+    $language = (string) ($config['language'] ?? 'en-US,en;q=0.9');
+    $landingUrl = HABBOWIDGETS_BASE
+        . '/habinfo/' . rawurlencode($widgetHotel)
+        . '/' . rawurlencode($name);
+    $extractUrl = HABBOWIDGETS_BASE . '/habinfo-extract';
+    assertAllowedUpstreamUrl($landingUrl);
+    assertAllowedUpstreamUrl($extractUrl);
+
+    $ch = curl_init();
+    if ($ch === false) {
+        throw new ApiProblem(502, 'history_source_unavailable', 'Fonte histórica indisponível.');
+    }
+
+    try {
+        $common = [
+            CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_MAXREDIRS => 5,
+            CURLOPT_CONNECTTIMEOUT => 12,
+            CURLOPT_TIMEOUT => 35,
+            CURLOPT_ENCODING => '',
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_COOKIEFILE => '',
+            CURLOPT_USERAGENT => TOXIC_USER_AGENT,
+        ];
+        if (defined('CURLOPT_PROTOCOLS') && defined('CURLPROTO_HTTPS')) {
+            $common[CURLOPT_PROTOCOLS] = CURLPROTO_HTTPS;
+        }
+        if (defined('CURLOPT_REDIR_PROTOCOLS') && defined('CURLPROTO_HTTPS')) {
+            $common[CURLOPT_REDIR_PROTOCOLS] = CURLPROTO_HTTPS;
+        }
+        curl_setopt_array($ch, $common);
+
+        politeThrottle((string) parse_url($landingUrl, PHP_URL_HOST));
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $landingUrl,
+            CURLOPT_HTTPGET => true,
+            CURLOPT_HTTPHEADER => [
+                'Accept: text/html,application/xhtml+xml',
+                'Accept-Language: ' . $language,
+                'Referer: ' . HABBOWIDGETS_BASE . '/',
+                'X-Toxic-App: ' . TOXIC_API_VERSION,
+            ],
+        ]);
+        $landingBody = curl_exec($ch);
+        $landingStatus = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        if (
+            !is_string($landingBody)
+            || $landingStatus < 200
+            || $landingStatus >= 300
+            || strlen($landingBody) > MAX_HTML_BYTES
+        ) {
+            return null;
+        }
+
+        politeThrottle((string) parse_url($extractUrl, PHP_URL_HOST));
+        $form = http_build_query([
+            'hotel' => $widgetHotel,
+            'habbo' => $name,
+            'hhid' => '',
+            'type' => 'extract',
+        ], '', '&', PHP_QUERY_RFC3986);
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $extractUrl,
+            CURLOPT_HTTPGET => false,
+            CURLOPT_POST => true,
+            CURLOPT_POSTFIELDS => $form,
+            CURLOPT_HTTPHEADER => [
+                'Accept: application/json, text/javascript, */*; q=0.01',
+                'Accept-Language: ' . $language,
+                'Content-Type: application/x-www-form-urlencoded; charset=UTF-8',
+                'Origin: ' . HABBOWIDGETS_BASE,
+                'Referer: ' . $landingUrl,
+                'X-Requested-With: XMLHttpRequest',
+                'X-Toxic-App: ' . TOXIC_API_VERSION,
+            ],
+        ]);
+        $extractBody = curl_exec($ch);
+        $extractStatus = (int) curl_getinfo($ch, CURLINFO_RESPONSE_CODE);
+        if (!is_string($extractBody) || $extractStatus < 200 || $extractStatus >= 300) {
+            return null;
+        }
+        $decoded = json_decode($extractBody, true);
+        if (!is_array($decoded)) {
+            return null;
+        }
+        $resolvedId = firstString($decoded, ['hhid', 'uniqueId', 'id']);
+        if ($resolvedId === '') {
+            return null;
+        }
+        try {
+            $resolvedId = validateUniqueId($resolvedId);
+        } catch (Throwable $ignored) {
+            return null;
+        }
+    } finally {
+        curl_close($ch);
+    }
+
+    return cachedHttpRequest(
+        'GET',
+        HABBOWIDGETS_BASE . '/habinfo/' . rawurlencode($resolvedId),
+        [],
+        HTTP_CACHE_TTL,
+        MAX_HTML_BYTES,
+        $language
+    );
 }
 
 function cachedHttpRequest(
@@ -1539,21 +1669,28 @@ function parseHabbowidgetsHtml(
     $figure = extractFigureFromImageUrl($avatarUrl);
     $motto = extractMotto($xpath, $summary);
     $summaryText = nodeText($summary);
-    $banned = firstXpathNode($xpath, '//*[@id="extract-banned"]') instanceof DOMNode
-        || (bool) preg_match('/\bthis habbo is banned\b/i', normalizeText(
-            (string) ($document->textContent ?? '')
-        ));
-    $privateProfile = !$banned && (bool) preg_match(
+    $pageText = normalizeText((string) ($document->textContent ?? ''));
+    $privateProfile = (bool) preg_match(
         '/perfil fechado|private profile|closed profile|privates profil|profil fermé|perfil cerrado|profiel gesloten|profilo chiuso|gizli profil|yksityinen profiili/i',
-        $summaryText
+        $summaryText . ' ' . $pageText
     );
-    if (!$banned && !$privateProfile) {
+    if (!$privateProfile) {
         $privateProfile = firstXpathNode(
             $xpath,
             './/a[contains(concat(" ", normalize-space(@class), " "), " btn-warning ")][.//*[contains(concat(" ", normalize-space(@class), " "), " glyphicon-lock ")]]',
             $summary
         ) instanceof DOMNode;
     }
+    $bannedMarker = firstXpathNode($xpath, '//*[@id="extract-banned"]') instanceof DOMNode
+        || (bool) preg_match('/\bthis habbo is banned\b/i', $pageText);
+    $bannedButton = firstXpathNode(
+        $xpath,
+        './/a[contains(concat(" ", normalize-space(@class), " "), " btn-danger ")][.//*[contains(concat(" ", normalize-space(@class), " "), " glyphicon-remove ")]]',
+        $summary
+    ) instanceof DOMNode;
+    // O HabboWidgets reutiliza extract-banned dentro do aviso de perfil
+    // fechado. O estado privado/cadeado é, portanto, mais específico.
+    $banned = !$privateProfile && ($bannedButton || $bannedMarker);
     $lastChangeAt = nodeAttribute(
         firstXpathNode($xpath, './/time[@datetime][1]', $summary),
         'datetime'
