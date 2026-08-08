@@ -51,6 +51,7 @@
     <string name="image">Image</string>
     <string name="disclaimer1">This application is not affiliated with, endorsed, sponsored, or specifically approved by Sulake Corporation Oy or its affiliates.</string>
     <string name="profile_private">Private</string>
+    <string name="profile_banned">Banned</string>
     <string name="status">Status</string>
     <string name="online">Online</string>
     <string name="offline">Offline</string>
