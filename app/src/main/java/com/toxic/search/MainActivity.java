@@ -53,7 +53,7 @@ import java.util.concurrent.*;
 public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBOWIDGETS_BASE = "https://www.habbowidgets.com";
-    private static final String APP_VERSION = "1.3.8";
+    private static final String APP_VERSION = "1.3.9";
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
     // os ícones nunca desapareçam por bloqueio de rede ou cache externo.
@@ -119,6 +119,9 @@ public class MainActivity extends Activity {
     private static final int CURRENT_VISUAL_ITEM_TUTORIAL_VERSION = 1;
     private ValueAnimator tutorialPulseAnimator;
     private FrameLayout tutorialOverlayView;
+    private View mainTutorialSettingsTarget;
+    private View mainTutorialSearchTarget;
+    private View mainTutorialVisualsTarget;
     private boolean profileFeatureTutorialRunning = false;
     private FrameLayout visualTutorialOverlayView;
     private View visualItemTutorialTarget;
@@ -769,7 +772,7 @@ public class MainActivity extends Activity {
                 break;
             }
         }
-        LinearLayout.LayoutParams params = lp(-1, dp(68), 0, 0, 0, 16);
+        LinearLayout.LayoutParams params = lp(-1, dp(68), 0, 0, 0, 12);
         if (insertAt >= 0) root.addView(banner, Math.min(insertAt + 1, root.getChildCount()), params);
         else root.addView(banner, params);
         requestTopSearchBannerLoadIfNeeded();
@@ -1595,6 +1598,23 @@ public class MainActivity extends Activity {
         super.onPause();
     }
 
+    @Override public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        translationContext = null;
+        translationContextHotel = "";
+        applySystemBarsForTheme();
+        if (screen != null) {
+            screen.requestLayout();
+            screen.post(() -> {
+                screen.requestLayout();
+                screen.invalidate();
+                if (tutorialOverlayView != null) tutorialOverlayView.invalidate();
+                if (visualTutorialOverlayView != null) visualTutorialOverlayView.invalidate();
+                if (mainScroll != null) mainScroll.requestLayout();
+            });
+        }
+    }
+
     @Override protected void onDestroy() {
         saveAdFreeUntil();
         cancelTutorialPulseAnimation();
@@ -1973,6 +1993,9 @@ public class MainActivity extends Activity {
     }
 
     private void buildUi() {
+        mainTutorialSettingsTarget = null;
+        mainTutorialSearchTarget = null;
+        mainTutorialVisualsTarget = null;
         screen = new PullDispatchFrameLayout(this);
         ((PullDispatchFrameLayout) screen).setPullTouchListener(this::handleMainPullToRefreshDispatch);
         screen.setBackground(makeBg());
@@ -1988,7 +2011,7 @@ public class MainActivity extends Activity {
         });
         root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(16), dp(22), dp(16), dp(104));
+        root.setPadding(dp(16), dp(10), dp(16), dp(104));
         scroll.addView(root, new ScrollView.LayoutParams(-1, -2));
         screen.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
 
@@ -2056,28 +2079,21 @@ public class MainActivity extends Activity {
 
         updateRewardButtonText();
         
-
-
-        ImageView topLogo = new ImageView(this);
-        topLogo.setAdjustViewBounds(true);
-        topLogo.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        topLogo.setImageResource(R.drawable.toxic_top_logo);
-        root.addView(topLogo, lp(-1, dp(64), 78, 2, 78, 4));
-
         LinearLayout subtitleRow = new LinearLayout(this);
         subtitleRow.setOrientation(LinearLayout.HORIZONTAL);
         subtitleRow.setGravity(Gravity.CENTER);
-        root.addView(subtitleRow, lp(-1, dp(24), 0, 0, 0, 10));
+        root.addView(subtitleRow, lp(-1, dp(42), 48, 0, 48, 18));
 
-        TextView subtitle = text(t(R.string.searching), 13, muted, true);
+        TextView subtitle = habboText(t(R.string.searching), 19, true);
+        subtitle.setTextColor(lightTheme ? Color.rgb(34,34,38) : Color.WHITE);
         subtitle.setGravity(Gravity.CENTER);
-        subtitle.setLetterSpacing(0.025f);
+        subtitle.setLetterSpacing(0.015f);
         subtitleRow.addView(subtitle, new LinearLayout.LayoutParams(-2, -2));
 
         ImageView selectedHotelFlag = new ImageView(this);
         selectedHotelFlag.setImageDrawable(new HotelFlagDrawable(currentHotelKey));
-        LinearLayout.LayoutParams selectedFlagLp = new LinearLayout.LayoutParams(dp(24), dp(16));
-        selectedFlagLp.leftMargin = dp(7);
+        LinearLayout.LayoutParams selectedFlagLp = new LinearLayout.LayoutParams(dp(28), dp(18));
+        selectedFlagLp.leftMargin = dp(8);
         subtitleRow.addView(selectedHotelFlag, selectedFlagLp);
 
         LinearLayout searchOuter = neutralCard(dp(22));
@@ -2085,10 +2101,11 @@ public class MainActivity extends Activity {
         searchOuter.setPadding(dp(16), dp(16), dp(16), dp(16));
         if (Build.VERSION.SDK_INT >= 21) searchOuter.setElevation(dp(5));
         root.addView(searchOuter, lp(-1, -2, 0, 2, 0, 12));
+        mainTutorialSearchTarget = searchOuter;
 
         View topSearchBanner = buildTopSearchBannerAd();
         if (topSearchBanner != null) {
-            root.addView(topSearchBanner, lp(-1, dp(68), 0, 0, 0, 16));
+            root.addView(topSearchBanner, lp(-1, dp(68), 0, 0, 0, 12));
             requestTopSearchBannerLoadIfNeeded();
         }
 
@@ -2104,7 +2121,7 @@ public class MainActivity extends Activity {
         searchInput.setHintTextColor(lightTheme ? Color.rgb(117, 117, 117) : Color.argb(135,255,255,255));
         searchInput.setTextColor(lightTheme ? Color.rgb(33, 33, 33) : Color.WHITE);
         searchInput.setTextSize(16);
-        searchInput.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        searchInput.setTypeface(habboFont);
         searchInput.setGravity(Gravity.CENTER_VERTICAL);
         searchInput.setPadding(dp(16), 0, dp(16), 0);
         searchInput.setBackground(round(
@@ -2155,7 +2172,8 @@ public class MainActivity extends Activity {
         root.addView(progress, lp(-1, dp(34), 0, 0, 0, 2));
         statusText = text("", 14, Color.argb(210,255,255,255), false);
         statusText.setGravity(Gravity.CENTER);
-        root.addView(statusText, lp(-1, -2, 0, 0, 0, 10));
+        statusText.setVisibility(View.GONE);
+        root.addView(statusText, lp(-1, -2, 0, 0, 0, 0));
 
         resultWrap = new LinearLayout(this);
         resultWrap.setOrientation(LinearLayout.VERTICAL);
@@ -2266,6 +2284,20 @@ public class MainActivity extends Activity {
     private void showTutorialOverlay(final int step) {
         if (screen == null) return;
         final int safeStep = Math.max(0, Math.min(2, step));
+        final View target = safeStep == 0
+                ? mainTutorialSettingsTarget
+                : (safeStep == 1 ? mainTutorialSearchTarget : mainTutorialVisualsTarget);
+        final int targetPadding = safeStep == 1 ? 7 : 6;
+        if (
+                target == null
+                || target.getParent() == null
+                || target.getWidth() <= 0
+                || target.getHeight() <= 0
+                || tutorialTargetBounds(screen, target, targetPadding) == null
+        ) {
+            uiHandler.postDelayed(() -> showTutorialOverlay(safeStep), 180L);
+            return;
+        }
         cancelTutorialPulseAnimation();
         if (tutorialOverlayView != null) detachViewFromParent(tutorialOverlayView);
 
@@ -2274,7 +2306,12 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 21) overlay.setElevation(dp(80));
         overlay.setClickable(true);
         overlay.setFocusable(true);
-        final TutorialOverlayDrawable overlayDrawable = new TutorialOverlayDrawable(safeStep);
+        final TutorialOverlayDrawable overlayDrawable = new TutorialOverlayDrawable(
+                overlay,
+                target,
+                targetPadding,
+                safeStep
+        );
         overlay.setBackground(overlayDrawable);
 
         final LinearLayout card = new LinearLayout(this);
@@ -2506,15 +2543,17 @@ public class MainActivity extends Activity {
 
     private RectF tutorialTargetBounds(FrameLayout host, View target, int paddingDp) {
         if (target == null || host == null) return null;
-        int[] hostLocation = new int[2];
-        int[] targetLocation = new int[2];
-        host.getLocationOnScreen(hostLocation);
-        target.getLocationOnScreen(targetLocation);
+        Rect hostVisible = new Rect();
+        Rect targetVisible = new Rect();
+        if (!host.getGlobalVisibleRect(hostVisible) || !target.getGlobalVisibleRect(targetVisible)) {
+            return null;
+        }
+        if (!targetVisible.intersect(hostVisible)) return null;
         float pad = dp(paddingDp);
-        float left = targetLocation[0] - hostLocation[0] - pad;
-        float top = targetLocation[1] - hostLocation[1] - pad;
-        float right = left + target.getWidth() + (pad * 2f);
-        float bottom = top + target.getHeight() + (pad * 2f);
+        float left = targetVisible.left - hostVisible.left - pad;
+        float top = targetVisible.top - hostVisible.top - pad;
+        float right = targetVisible.right - hostVisible.left + pad;
+        float bottom = targetVisible.bottom - hostVisible.top + pad;
         left = Math.max(dp(6), left);
         top = Math.max(dp(6), top);
         right = Math.min(host.getWidth() - dp(6), right);
@@ -2546,7 +2585,12 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 21) overlay.setElevation(dp(80));
         overlay.setClickable(true);
         overlay.setFocusable(true);
-        final ProfileTutorialOverlayDrawable overlayDrawable = new ProfileTutorialOverlayDrawable(spotlight, safeStep);
+        final ProfileTutorialOverlayDrawable overlayDrawable = new ProfileTutorialOverlayDrawable(
+                overlay,
+                target,
+                safeStep >= 2 ? 8 : 10,
+                safeStep
+        );
         overlay.setBackground(overlayDrawable);
 
         final LinearLayout card = new LinearLayout(this);
@@ -2741,7 +2785,12 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 21) overlay.setElevation(dp(80));
         overlay.setClickable(true);
         overlay.setFocusable(true);
-        final ProfileTutorialOverlayDrawable overlayDrawable = new ProfileTutorialOverlayDrawable(spotlight, 0);
+        final ProfileTutorialOverlayDrawable overlayDrawable = new ProfileTutorialOverlayDrawable(
+                overlay,
+                target,
+                8,
+                0
+        );
         overlay.setBackground(overlayDrawable);
 
         LinearLayout card = new LinearLayout(this);
@@ -2899,7 +2948,7 @@ public class MainActivity extends Activity {
                     inlineProgressPct = 0;
                     inlineProgressMessage = "";
                     renderProfile(r);
-                    statusText.setText("");
+                    setStatusMessage("");
                     searchInProgress = false;
                     activeSearchNick = "";
                     currentLoadedNick = normalizeNickKey(r.name);
@@ -3018,7 +3067,7 @@ public class MainActivity extends Activity {
                     inlineProgressPct = 0;
                     inlineProgressMessage = "";
                     renderProfile(r);
-                    statusText.setText("");
+                    setStatusMessage("");
                     searchInProgress = false;
                     activeSearchNick = "";
                     currentLoadedNick = normalizeNickKey(r.uniqueId.isEmpty() ? r.name : r.uniqueId);
@@ -3135,8 +3184,33 @@ public class MainActivity extends Activity {
             Future<JSONObject> suggestFuture = executor.submit(
                     () -> unwrap(tryJson(habbodexSuggestUrl(nick)))
             );
+            Future<String> historicalIdFuture = executor.submit(
+                    () -> resolveHabbowidgetsUniqueIdByName(nick, currentHotelKey)
+            );
             try { complementByName = complementFuture.get(); } catch(Exception ignored) {}
             try { suggest = suggestFuture.get(); } catch(Exception ignored) {}
+
+            if (complementByName == null) {
+                String historicalId = "";
+                try { historicalId = historicalIdFuture.get(); } catch(Exception ignored) {}
+                if (!historicalId.isEmpty()) {
+                    complementByName = validProfileObject(
+                            unwrap(tryJson(complementProfileByUniqueUrl(historicalId)))
+                    );
+                    if (complementByName == null) {
+                        Boolean directlyBanned = fetchHabbowidgetsBannedStatus(historicalId);
+                        if (Boolean.TRUE.equals(directlyBanned)) {
+                            JSONObject minimalBanned = new JSONObject();
+                            minimalBanned.put("uniqueId", historicalId);
+                            minimalBanned.put("id", historicalId);
+                            minimalBanned.put("name", nick);
+                            minimalBanned.put("isBanned", true);
+                            minimalBanned.put("banned", true);
+                            complementByName = minimalBanned;
+                        }
+                    }
+                }
+            }
         }
 
         JSONObject base = firstObject(habboPublic, complementByName);
@@ -3330,7 +3404,10 @@ public class MainActivity extends Activity {
         r.dexProfile = complement;
         if (r.dex == null) r.dex = complement;
         Boolean banned = optBoolNullableDeep(complement, "isBanned", "banned", "is_banned", "ban");
-        if (Boolean.TRUE.equals(banned)) r.banned = true;
+        // A existência do usuário em qualquer rota oficial tem precedência:
+        // perfil privado/fechado não é perfil banido.
+        if (r.habboPublic != null || r.officialProfile != null) r.banned = false;
+        else if (Boolean.TRUE.equals(banned)) r.banned = true;
 
         r.previousNames = mergeLists(
                 r.previousNames,
@@ -3362,8 +3439,10 @@ public class MainActivity extends Activity {
         JSONObject complement = r.dexProfile;
         JSONObject official = r.officialProfile;
         JSONObject officialUser = official == null ? null : official.optJSONObject("user");
-        if (official != null) {
+        if (r.habboPublic != null || official != null) {
             r.banned = false;
+        }
+        if (official != null) {
             r.privateProfile = resolveProfilePrivate(
                     r.habboPublic,
                     official,
@@ -5839,19 +5918,25 @@ public class MainActivity extends Activity {
     }
 
     private void showError(String msg) { resultWrap.removeAllViews(); LinearLayout c = sectionCard(t(R.string.error_title), 0, false); TextView t = text(msg, 15, Color.WHITE, true); t.setGravity(Gravity.CENTER); c.addView(t); }
+    private void setStatusMessage(String message) {
+        if (statusText == null) return;
+        String clean = message == null ? "" : message.trim();
+        statusText.setText(clean);
+        statusText.setVisibility(clean.isEmpty() ? View.GONE : View.VISIBLE);
+    }
     private void setLoading(boolean loading, String message) {
         if (loading) { suppressSuggestions = true; suggestionRequestId++; setSuggestionsVisible(false); }
         searchBtn.setEnabled(!loading);
         searchBtn.setText(loading ? t(R.string.searching_profile) : t(R.string.search_button));
         progress.setVisibility(View.GONE);
-        statusText.setText(loading ? "" : (message == null ? "" : message));
+        setStatusMessage(loading ? "" : message);
         if (loading) showLoadingSkeleton(message == null ? t(R.string.searching_profile) : message);
     }
 
     private void showInlineLoading(String message) {
         inlineProgressMessage = message == null ? "" : message;
         inlineProgressPct = loadingProgressFor(message);
-        statusText.setText("");
+        setStatusMessage("");
     }
 
     private View inlineProgressBar(int pct) {
@@ -6187,6 +6272,113 @@ private int loadingProgressFor(String message) {
         return Boolean.TRUE.equals(fetchHabbowidgetsBannedStatus(resolvedId));
     }
 
+    private String habbowidgetsHotelCode(String hotelKey) {
+        String hotel = normalizeHotelKey(hotelKey);
+        if ("br".equals(hotel)) return "com.br";
+        if ("tr".equals(hotel)) return "com.tr";
+        if ("com".equals(hotel)) return "com";
+        return hotel.isEmpty() ? "com.br" : hotel;
+    }
+
+    private String responseCookies(HttpURLConnection connection) {
+        if (connection == null) return "";
+        StringBuilder cookies = new StringBuilder();
+        try {
+            Map<String, List<String>> headers = connection.getHeaderFields();
+            if (headers == null) return "";
+            for (Map.Entry<String, List<String>> entry : headers.entrySet()) {
+                String key = entry.getKey();
+                if (key == null || !"set-cookie".equalsIgnoreCase(key)) continue;
+                List<String> values = entry.getValue();
+                if (values == null) continue;
+                for (String value : values) {
+                    if (value == null) continue;
+                    String pair = value.split(";", 2)[0].trim();
+                    if (pair.isEmpty()) continue;
+                    if (cookies.length() > 0) cookies.append("; ");
+                    cookies.append(pair);
+                }
+            }
+        } catch (Exception ignored) {}
+        return cookies.toString();
+    }
+
+    private String resolveHabbowidgetsUniqueIdByName(String name, String hotelKey) {
+        String cleanName = name == null ? "" : name.trim();
+        if (cleanName.isEmpty()) return "";
+
+        HttpURLConnection landing = null;
+        HttpURLConnection extract = null;
+        try {
+            String widgetHotel = habbowidgetsHotelCode(hotelKey);
+            String landingUrl = HABBOWIDGETS_BASE
+                    + "/habinfo/" + enc(widgetHotel)
+                    + "/" + enc(cleanName);
+            landing = (HttpURLConnection)new URL(landingUrl).openConnection();
+            landing.setInstanceFollowRedirects(true);
+            landing.setUseCaches(false);
+            landing.setConnectTimeout(9000);
+            landing.setReadTimeout(18000);
+            landing.setRequestProperty("Accept", "text/html,application/xhtml+xml");
+            landing.setRequestProperty("Accept-Language", "en-US,en;q=0.9");
+            landing.setRequestProperty(
+                    "User-Agent",
+                    "ToxicSearchTool/" + APP_VERSION + " Android (+https://atoxic.com.br)"
+            );
+            int landingCode = landing.getResponseCode();
+            InputStream landingStream = landingCode >= 200 && landingCode < 300
+                    ? landing.getInputStream()
+                    : landing.getErrorStream();
+            readAll(landingStream);
+            if (landingCode < 200 || landingCode >= 300) return "";
+            String cookies = responseCookies(landing);
+
+            String form = "hotel=" + enc(widgetHotel)
+                    + "&habbo=" + enc(cleanName)
+                    + "&hhid=&type=extract";
+            byte[] formBytes = form.getBytes("UTF-8");
+            extract = (HttpURLConnection)new URL(
+                    HABBOWIDGETS_BASE + "/habinfo-extract"
+            ).openConnection();
+            extract.setInstanceFollowRedirects(true);
+            extract.setUseCaches(false);
+            extract.setConnectTimeout(9000);
+            extract.setReadTimeout(18000);
+            extract.setRequestMethod("POST");
+            extract.setDoOutput(true);
+            extract.setFixedLengthStreamingMode(formBytes.length);
+            extract.setRequestProperty("Accept", "application/json, text/javascript, */*; q=0.01");
+            extract.setRequestProperty("Accept-Language", "en-US,en;q=0.9");
+            extract.setRequestProperty("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8");
+            extract.setRequestProperty("Origin", HABBOWIDGETS_BASE);
+            extract.setRequestProperty("Referer", landingUrl);
+            extract.setRequestProperty("X-Requested-With", "XMLHttpRequest");
+            extract.setRequestProperty(
+                    "User-Agent",
+                    "ToxicSearchTool/" + APP_VERSION + " Android (+https://atoxic.com.br)"
+            );
+            if (!cookies.isEmpty()) extract.setRequestProperty("Cookie", cookies);
+            try (OutputStream output = extract.getOutputStream()) {
+                output.write(formBytes);
+            }
+
+            int extractCode = extract.getResponseCode();
+            InputStream extractStream = extractCode >= 200 && extractCode < 300
+                    ? extract.getInputStream()
+                    : extract.getErrorStream();
+            String body = readAll(extractStream);
+            if (extractCode < 200 || extractCode >= 300 || body.trim().isEmpty()) return "";
+            JSONObject payload = new JSONObject(body);
+            String uniqueId = firstText(payload, "hhid", "uniqueId", "id").toLowerCase(Locale.ROOT);
+            return uniqueId.matches("^hh[a-z]{2}-[a-z0-9]{20,64}$") ? uniqueId : "";
+        } catch (Exception ignored) {
+            return "";
+        } finally {
+            if (landing != null) landing.disconnect();
+            if (extract != null) extract.disconnect();
+        }
+    }
+
     private Boolean fetchHabbowidgetsBannedStatus(String uniqueId) {
         String cleanId = uniqueId == null ? "" : uniqueId.trim();
         if (cleanId.isEmpty()) return null;
@@ -6211,6 +6403,21 @@ private int loadingProgressFor(String message) {
             String html = readAll(connection.getInputStream());
             if (html == null || html.trim().isEmpty()) return null;
             String lower = html.toLowerCase(Locale.ROOT);
+            boolean closedProfile = lower.contains("closed profile")
+                    || lower.contains("private profile")
+                    || lower.contains("perfil fechado")
+                    || lower.contains("perfil cerrado")
+                    || lower.contains("profil fermé")
+                    || lower.contains("privates profil")
+                    || lower.contains("profiel gesloten")
+                    || lower.contains("profilo chiuso")
+                    || lower.contains("gizli profil")
+                    || lower.contains("yksityinen profiili")
+                    || (lower.contains("btn-warning") && lower.contains("glyphicon-lock"));
+            if (closedProfile) return false;
+            if (lower.contains("btn-danger") && lower.contains("glyphicon-remove")) {
+                return true;
+            }
             if (
                     lower.contains("id=\"extract-banned\"")
                     || lower.contains("id='extract-banned'")
@@ -6820,14 +7027,15 @@ private int loadingProgressFor(String message) {
         if (selectedTab == 0 && activeDialog == null) bindSearchNavigationGestures(searchNavItem);
         nav.addView(searchNavItem, new LinearLayout.LayoutParams(0, -1, 1));
 
-        nav.addView(bottomNavItem("visuals", selectedTab == 1, () -> {
+        View visualsNavItem = bottomNavItem("visuals", selectedTab == 1, () -> {
             if (selectedTab == 1) return;
             maybeShowProfileInterstitial();
             showVisualEditorDialog();
             if (activeDialog != null) uiHandler.postDelayed(() -> {
                 try { activeDialog.dismiss(); } catch (Exception ignored) {}
             }, 120L);
-        }), new LinearLayout.LayoutParams(0, -1, 1));
+        });
+        nav.addView(visualsNavItem, new LinearLayout.LayoutParams(0, -1, 1));
 
         nav.addView(bottomNavItem("heart", selectedTab == 2, () -> {
             if (selectedTab == 2) return;
@@ -6837,13 +7045,18 @@ private int loadingProgressFor(String message) {
             }, 120L);
         }), new LinearLayout.LayoutParams(0, -1, 1));
 
-        nav.addView(bottomNavItem("settings", selectedTab == 3, () -> {
+        View settingsNavItem = bottomNavItem("settings", selectedTab == 3, () -> {
             if (selectedTab == 3) return;
             showSettingsDialog();
             if (activeDialog != null) uiHandler.postDelayed(() -> {
                 try { activeDialog.dismiss(); } catch (Exception ignored) {}
             }, 120L);
-        }), new LinearLayout.LayoutParams(0, -1, 1));
+        });
+        nav.addView(settingsNavItem, new LinearLayout.LayoutParams(0, -1, 1));
+        if (selectedTab == 0 && activeDialog == null) {
+            mainTutorialVisualsTarget = visualsNavItem;
+            mainTutorialSettingsTarget = settingsNavItem;
+        }
         return navWrap;
     }
 
@@ -9905,7 +10118,7 @@ private int loadingProgressFor(String message) {
             currentLoadedNick = normalizeNickKey(previous.name);
             setSearchTextProgrammatically(previous.name == null ? "" : previous.name);
             clearSearchFocus();
-            statusText.setText("");
+            setStatusMessage("");
             renderProfile(previous);
             return;
         }
@@ -12246,37 +12459,28 @@ private int loadingProgressFor(String message) {
 
     public class TutorialOverlayDrawable extends Drawable {
         private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final FrameLayout host;
+        private final View target;
+        private final int paddingDp;
         private final int step;
         private float pulse = 0f;
 
-        TutorialOverlayDrawable(int s) { step = s; }
+        TutorialOverlayDrawable(FrameLayout overlayHost, View targetView, int padding, int s) {
+            host = overlayHost;
+            target = targetView;
+            paddingDp = padding;
+            step = s;
+        }
 
         void setPulse(float value) {
             pulse = Math.max(0f, Math.min(1f, value));
             invalidateSelf();
         }
 
-        private RectF spotlightBounds(Rect b) {
-            if (step == 0) {
-                float navLeft = b.left + dp(12);
-                float navWidth = b.width() - dp(24);
-                float cx = navLeft + navWidth * (7f / 8f);
-                float cy = b.bottom - dp(28);
-                return new RectF(cx - dp(28), cy - dp(28), cx + dp(28), cy + dp(28));
-            }
-            if (step == 1) {
-                return new RectF(b.left + dp(12), b.top + dp(132), b.right - dp(12), b.top + dp(252));
-            }
-            float navLeft = b.left + dp(12);
-            float navWidth = b.width() - dp(24);
-            float cx = navLeft + navWidth * (3f / 8f);
-            float cy = b.bottom - dp(28);
-            return new RectF(cx - dp(34), cy - dp(34), cx + dp(34), cy + dp(34));
-        }
-
         @Override public void draw(Canvas c) {
             Rect b = getBounds();
-            RectF hole = spotlightBounds(b);
+            RectF hole = tutorialTargetBounds(host, target, paddingDp);
+            boolean hasHole = hole != null;
             float radius = step == 1 ? dp(26) : dp(24);
             int accent = tutorialAccentColor(step);
             int secondary = tutorialAccentSecondaryColor(step);
@@ -12284,7 +12488,7 @@ private int loadingProgressFor(String message) {
             Path overlayPath = new Path();
             overlayPath.setFillType(Path.FillType.EVEN_ODD);
             overlayPath.addRect(new RectF(b.left, b.top, b.right, b.bottom), Path.Direction.CW);
-            overlayPath.addRoundRect(hole, radius, radius, Path.Direction.CW);
+            if (hasHole) overlayPath.addRoundRect(hole, radius, radius, Path.Direction.CW);
 
             p.setStyle(Paint.Style.FILL);
             p.setShader(new LinearGradient(
@@ -12298,6 +12502,7 @@ private int loadingProgressFor(String message) {
             ));
             c.drawPath(overlayPath, p);
             p.setShader(null);
+            if (!hasHole) return;
 
             p.setStyle(Paint.Style.STROKE);
             p.setStrokeWidth(dp(8) + (dp(7) * pulse));
@@ -12342,12 +12547,21 @@ private int loadingProgressFor(String message) {
 
     public class ProfileTutorialOverlayDrawable extends Drawable {
         private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final RectF spotlight;
+        private final FrameLayout host;
+        private final View target;
+        private final int paddingDp;
         private final int step;
         private float pulse = 0f;
 
-        ProfileTutorialOverlayDrawable(RectF target, int tutorialStep) {
-            spotlight = new RectF(target);
+        ProfileTutorialOverlayDrawable(
+                FrameLayout overlayHost,
+                View targetView,
+                int padding,
+                int tutorialStep
+        ) {
+            host = overlayHost;
+            target = targetView;
+            paddingDp = padding;
             step = tutorialStep;
         }
 
@@ -12358,7 +12572,8 @@ private int loadingProgressFor(String message) {
 
         @Override public void draw(Canvas c) {
             Rect bounds = getBounds();
-            RectF hole = new RectF(spotlight);
+            RectF hole = tutorialTargetBounds(host, target, paddingDp);
+            boolean hasHole = hole != null;
             float radius = step == 3 ? dp(18) : dp(24);
             int accent = tutorialAccentColor(step);
             int secondary = tutorialAccentSecondaryColor(step);
@@ -12366,7 +12581,7 @@ private int loadingProgressFor(String message) {
             Path overlayPath = new Path();
             overlayPath.setFillType(Path.FillType.EVEN_ODD);
             overlayPath.addRect(new RectF(bounds.left, bounds.top, bounds.right, bounds.bottom), Path.Direction.CW);
-            overlayPath.addRoundRect(hole, radius, radius, Path.Direction.CW);
+            if (hasHole) overlayPath.addRoundRect(hole, radius, radius, Path.Direction.CW);
 
             p.setStyle(Paint.Style.FILL);
             p.setShader(new LinearGradient(
@@ -12380,6 +12595,7 @@ private int loadingProgressFor(String message) {
             ));
             c.drawPath(overlayPath, p);
             p.setShader(null);
+            if (!hasHole) return;
 
             p.setStyle(Paint.Style.STROKE);
             p.setStrokeWidth(dp(8) + (dp(7) * pulse));
