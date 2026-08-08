@@ -53,7 +53,7 @@ import java.util.concurrent.*;
 public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBOWIDGETS_BASE = "https://www.habbowidgets.com";
-    private static final String APP_VERSION = "1.3.9";
+    private static final String APP_VERSION = "1.3.10";
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
     // os ícones nunca desapareçam por bloqueio de rede ou cache externo.
@@ -2084,8 +2084,12 @@ public class MainActivity extends Activity {
         subtitleRow.setGravity(Gravity.CENTER);
         root.addView(subtitleRow, lp(-1, dp(42), 48, 0, 48, 18));
 
-        TextView subtitle = habboText(t(R.string.searching), 19, true);
-        subtitle.setTextColor(lightTheme ? Color.rgb(34,34,38) : Color.WHITE);
+        TextView subtitle = text(
+                t(R.string.searching),
+                19,
+                lightTheme ? Color.rgb(34,34,38) : Color.WHITE,
+                true
+        );
         subtitle.setGravity(Gravity.CENTER);
         subtitle.setLetterSpacing(0.015f);
         subtitleRow.addView(subtitle, new LinearLayout.LayoutParams(-2, -2));
@@ -3194,9 +3198,7 @@ public class MainActivity extends Activity {
                 String historicalId = "";
                 try { historicalId = historicalIdFuture.get(); } catch(Exception ignored) {}
                 if (!historicalId.isEmpty()) {
-                    complementByName = validProfileObject(
-                            unwrap(tryJson(complementProfileByUniqueUrl(historicalId)))
-                    );
+                    complementByName = fetchComplementProfileByUniqueWithRetry(historicalId);
                     if (complementByName == null) {
                         Boolean directlyBanned = fetchHabbowidgetsBannedStatus(historicalId);
                         if (Boolean.TRUE.equals(directlyBanned)) {
@@ -6135,6 +6137,26 @@ private int loadingProgressFor(String message) {
         return habbodexProfileByUniqueUrl(uniqueId) + "&complementOnly=true";
     }
 
+    private JSONObject fetchComplementProfileByUniqueWithRetry(String uniqueId) {
+        String cleanId = uniqueId == null ? "" : uniqueId.trim();
+        if (cleanId.isEmpty()) return null;
+        for (int attempt = 0; attempt < 3; attempt++) {
+            if (attempt > 0) {
+                try {
+                    Thread.sleep(attempt == 1 ? 700L : 1600L);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return null;
+                }
+            }
+            JSONObject profile = validProfileObject(
+                    unwrap(tryJson(complementProfileByUniqueUrl(cleanId)))
+            );
+            if (profile != null && isSameProfileId(cleanId, profile)) return profile;
+        }
+        return null;
+    }
+
     private String habbodexEndpointUrl(String uniqueId, String endpoint, int page, int limit) {
         return PROFILE_API + "/habboinfo/" + enc(uniqueId) + "/" + enc(endpoint) + "?page=" + page + "&limit=" + limit + "&hotel=" + enc(habbodexHotelCode(currentHotelKey));
     }
@@ -6304,6 +6326,22 @@ private int loadingProgressFor(String message) {
     }
 
     private String resolveHabbowidgetsUniqueIdByName(String name, String hotelKey) {
+        for (int attempt = 0; attempt < 3; attempt++) {
+            if (attempt > 0) {
+                try {
+                    Thread.sleep(attempt == 1 ? 700L : 1600L);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return "";
+                }
+            }
+            String uniqueId = resolveHabbowidgetsUniqueIdByNameOnce(name, hotelKey);
+            if (!uniqueId.isEmpty()) return uniqueId;
+        }
+        return "";
+    }
+
+    private String resolveHabbowidgetsUniqueIdByNameOnce(String name, String hotelKey) {
         String cleanName = name == null ? "" : name.trim();
         if (cleanName.isEmpty()) return "";
 
@@ -6380,6 +6418,22 @@ private int loadingProgressFor(String message) {
     }
 
     private Boolean fetchHabbowidgetsBannedStatus(String uniqueId) {
+        for (int attempt = 0; attempt < 3; attempt++) {
+            if (attempt > 0) {
+                try {
+                    Thread.sleep(attempt == 1 ? 500L : 1200L);
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    return null;
+                }
+            }
+            Boolean status = fetchHabbowidgetsBannedStatusOnce(uniqueId);
+            if (status != null) return status;
+        }
+        return null;
+    }
+
+    private Boolean fetchHabbowidgetsBannedStatusOnce(String uniqueId) {
         String cleanId = uniqueId == null ? "" : uniqueId.trim();
         if (cleanId.isEmpty()) return null;
 
@@ -11040,8 +11094,8 @@ private int loadingProgressFor(String message) {
         avatar.setPadding(dp(44), 0, dp(44), 0);
         avatarWrap.addView(avatar, new FrameLayout.LayoutParams(-1, -1));
         String initialFigure = fallbackFigure == null ? "" : fallbackFigure.trim();
+        avatar.setImageResource(R.drawable.pre_load);
         if (!initialFigure.isEmpty()) loadAvatarImage(avatar, avatarFull(initialFigure, 2));
-        else loadAvatarImage(avatar, avatarHeadByNameForHotel(nick, hotelKey));
 
         TextView favoriteBtn = text("", 22, Color.WHITE, true);
         favoriteBtn.setGravity(Gravity.CENTER);
