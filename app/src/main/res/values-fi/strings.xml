@@ -51,6 +51,7 @@
     <string name="image">Kuva</string>
     <string name="disclaimer1">Tämä sovellus ei ole Sulake Corporation Oy:n tai sen tytäryhtiöiden kanssa sidoksissa eikä niiden hyväksymä, sponsoroima tai erityisesti hyväksymä.</string>
     <string name="profile_private">Yksityinen</string>
+    <string name="profile_banned">Bannattu</string>
     <string name="status">Tila</string>
     <string name="online">Paikalla</string>
     <string name="offline">Poissa</string>

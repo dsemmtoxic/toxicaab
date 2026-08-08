@@ -1,4 +1,4 @@
-BACKEND DO TOXIC — VERSÃO 1.3.5
+BACKEND DO TOXIC — VERSÃO 1.4.1
 
 O aplicativo está configurado para usar:
 
@@ -7,6 +7,22 @@ https://atoxic.com.br/api.php
 O arquivo backend/api.php desta versão é a API de compatibilidade da Toxic.
 Dados atuais usam a API pública oficial do Habbo; históricos são usados apenas
 como complemento.
+
+PERFIS BANIDOS
+
+- Quando a API oficial não encontra o perfil, o HabboWidgets é consultado.
+- A API abre a página por nome com uma sessão temporária, consulta o endpoint
+  oficial do próprio HabboWidgets e resolve o HHID histórico antes de carregar
+  o perfil completo. Nenhum cookie é salvo em disco.
+- Se o HabboWidgets ainda estiver preparando o perfil e não responder na
+  primeira consulta, a API repete automaticamente o fluxo até três vezes, com
+  pequenas pausas, e só então informa que o perfil não foi encontrado.
+- O aviso técnico `extract-banned` só é convertido em `isBanned`/`banned`
+  quando a página não contém o estado de perfil fechado e o cadeado.
+- Se o usuário ainda existe em qualquer rota oficial do Habbo, o estado Banido
+  é descartado; perfil privado continua sendo exibido como privado.
+- O aplicativo também possui uma verificação direta de segurança para manter o
+  selo e as bordas vermelhas enquanto o backend publicado é atualizado.
 
 VISUAIS E RARIDADES
 
