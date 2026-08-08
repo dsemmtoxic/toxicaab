@@ -24,8 +24,8 @@ declare(strict_types=1);
  * roupa do HabboNews é usado: os nomes localizados continuam no HabboWidgets.
  */
 
-const TOXIC_API_VERSION = '1.4.0';
-const TOXIC_USER_AGENT = 'ToxicSearchTool/1.4.0 (+https://atoxic.com.br)';
+const TOXIC_API_VERSION = '1.4.1';
+const TOXIC_USER_AGENT = 'ToxicSearchTool/1.4.1 (+https://atoxic.com.br)';
 const HABBOWIDGETS_BASE = 'https://www.habbowidgets.com';
 const CACHE_ROOT = __DIR__ . '/cache/habbowidgets_api';
 const HABBONEWS_IFRAME_URL = 'https://lite.habbonews.net/iframes/iframe-clothing2-temp.php?nick=&direcao=2&genero=3&tutorial=3';
@@ -1359,6 +1359,28 @@ function fetchAndParseHabbowidgetsProfile(
 
 function fetchHabbowidgetsProfileByNameSession(array $config, string $name): ?array
 {
+    $lastError = null;
+    for ($attempt = 0; $attempt < 3; $attempt++) {
+        if ($attempt > 0) {
+            usleep($attempt === 1 ? 700_000 : 1_600_000);
+        }
+        try {
+            $response = fetchHabbowidgetsProfileByNameSessionAttempt($config, $name);
+            if ($response !== null) {
+                return $response;
+            }
+        } catch (Throwable $error) {
+            $lastError = $error;
+        }
+    }
+    if ($lastError instanceof Throwable) {
+        throw $lastError;
+    }
+    return null;
+}
+
+function fetchHabbowidgetsProfileByNameSessionAttempt(array $config, string $name): ?array
+{
     if (!function_exists('curl_init')) {
         throw new ApiProblem(
             500,
@@ -1466,7 +1488,7 @@ function fetchHabbowidgetsProfileByNameSession(array $config, string $name): ?ar
         curl_close($ch);
     }
 
-    return cachedHttpRequest(
+    $profileResponse = cachedHttpRequest(
         'GET',
         HABBOWIDGETS_BASE . '/habinfo/' . rawurlencode($resolvedId),
         [],
@@ -1474,6 +1496,10 @@ function fetchHabbowidgetsProfileByNameSession(array $config, string $name): ?ar
         MAX_HTML_BYTES,
         $language
     );
+    if (!preg_match('/id=["\']habinfo-summary-habbo["\']/i', $profileResponse['body'])) {
+        return null;
+    }
+    return $profileResponse;
 }
 
 function cachedHttpRequest(
