@@ -24,8 +24,8 @@ declare(strict_types=1);
  * roupa do HabboNews é usado: os nomes localizados continuam no HabboWidgets.
  */
 
-const TOXIC_API_VERSION = '1.3.5';
-const TOXIC_USER_AGENT = 'ToxicSearchTool/1.3.5 (+https://atoxic.com.br)';
+const TOXIC_API_VERSION = '1.3.9';
+const TOXIC_USER_AGENT = 'ToxicSearchTool/1.3.9 (+https://atoxic.com.br)';
 const HABBOWIDGETS_BASE = 'https://www.habbowidgets.com';
 const CACHE_ROOT = __DIR__ . '/cache/habbowidgets_api';
 const HABBONEWS_IFRAME_URL = 'https://lite.habbonews.net/iframes/iframe-clothing2-temp.php?nick=&direcao=2&genero=3&tutorial=3';
@@ -110,6 +110,7 @@ function sendCommonHeaders(): void
     header('Access-Control-Allow-Headers: Accept, Content-Type, X-Toxic-App');
     header('Content-Type: application/json; charset=utf-8');
     header('X-Content-Type-Options: nosniff');
+    header('X-Toxic-API-Version: ' . TOXIC_API_VERSION);
     header('Referrer-Policy: no-referrer');
     header('Cache-Control: no-store, no-cache, must-revalidate, max-age=0');
     header('Pragma: no-cache');
@@ -155,9 +156,6 @@ function sanitizePublicPayload(mixed $value, string $key = ''): mixed
         $out = [];
         foreach ($value as $childKey => $childValue) {
             $normalizedKey = strtolower((string) $childKey);
-            if (in_array($normalizedKey, ['isbanned', 'banned', 'ban', 'is_banned'], true)) {
-                continue;
-            }
             $publicKey = str_contains($normalizedKey, 'habbowidgets')
                 ? 'sourceCounts'
                 : $childKey;
@@ -660,11 +658,22 @@ function parseIncomingRequest(): array
         throw new ApiProblem(400, 'invalid_path', 'Caminho de API inválido.');
     }
 
+    $legacyQueryMode = !$gatewayMode
+        && $path === ''
+        && (
+            isset($params['endpoint'])
+            || isset($params['name'])
+            || isset($params['uniqueId'])
+            || isset($params['figureString'])
+        );
+
     if ($path === '') {
         $path = legacyPathFromQuery($params);
     }
 
-    return [$path, $params, $gatewayMode];
+    // Os clientes antigos do site consultam api.php?endpoint=... e esperam o
+    // envelope {ok,data}. As rotas modernas continuam devolvendo o JSON cru.
+    return [$path, $params, $gatewayMode || $legacyQueryMode];
 }
 
 function legacyPathFromQuery(array $params): string
@@ -811,6 +820,9 @@ function profileSection(
 
     [$profileKey, $responseKey] = $map[$endpoint];
     $items = is_array($profile[$profileKey] ?? null) ? $profile[$profileKey] : [];
+    if ($profileKey === 'previousStyles') {
+        $items = deduplicatePreviousStyles($items);
+    }
     return paginated($items, $responseKey, $page, $limit, $profile['_meta'] ?? []);
 }
 
@@ -1527,11 +1539,15 @@ function parseHabbowidgetsHtml(
     $figure = extractFigureFromImageUrl($avatarUrl);
     $motto = extractMotto($xpath, $summary);
     $summaryText = nodeText($summary);
-    $privateProfile = (bool) preg_match(
+    $banned = firstXpathNode($xpath, '//*[@id="extract-banned"]') instanceof DOMNode
+        || (bool) preg_match('/\bthis habbo is banned\b/i', normalizeText(
+            (string) ($document->textContent ?? '')
+        ));
+    $privateProfile = !$banned && (bool) preg_match(
         '/perfil fechado|private profile|closed profile|privates profil|profil fermé|perfil cerrado|profiel gesloten|profilo chiuso|gizli profil|yksityinen profiili/i',
         $summaryText
     );
-    if (!$privateProfile) {
+    if (!$banned && !$privateProfile) {
         $privateProfile = firstXpathNode(
             $xpath,
             './/a[contains(concat(" ", normalize-space(@class), " "), " btn-warning ")][.//*[contains(concat(" ", normalize-space(@class), " "), " glyphicon-lock ")]]',
@@ -1763,6 +1779,8 @@ function parseHabbowidgetsHtml(
         'avatarUrl' => $avatarUrl,
         'motto' => $motto,
         'mission' => $motto,
+        'isBanned' => $banned,
+        'banned' => $banned,
         'profileVisible' => !$privateProfile,
         'isProfileVisible' => !$privateProfile,
         'visible' => !$privateProfile,
@@ -2102,22 +2120,36 @@ function parseFriendNode(DOMXPath $xpath, DOMNode $node, bool $removed): array
     if (preg_match('#/habinfo/(hh[a-z]{2}-[a-z0-9]{20,64})#i', $href, $match)) {
         $uniqueId = strtolower($match[1]);
     }
-    $image = firstXpathNode($xpath, './/img[1]', $node);
+    $image = firstXpathNode(
+        $xpath,
+        './/img['
+            . 'contains(concat(" ", normalize-space(@class), " "), " avatar ")'
+            . ' or contains(concat(" ", normalize-space(@class), " "), " head ")'
+            . ' or contains(@src, "habbo-imaging")'
+            . ' or contains(@data-src, "habbo-imaging")'
+        . '][1]',
+        $node
+    ) ?: firstXpathNode($xpath, './/img[1]', $node);
     $headUrl = imageUrlFromNode($image);
-    $date = nodeAttribute(firstXpathNode($xpath, './/time[@datetime][1]', $node), 'datetime');
-    if ($date === '') {
+    $dateNodes = xpathNodes($xpath, './/time[@datetime]', $node);
+    $dateNode = $removed && $dateNodes !== []
+        ? $dateNodes[count($dateNodes) - 1]
+        : ($dateNodes[0] ?? null);
+    $rawDate = nodeAttribute($dateNode, 'datetime');
+    if ($rawDate === '') {
         foreach ($node->childNodes as $child) {
             if ($child->nodeType !== XML_TEXT_NODE) {
                 continue;
             }
             $candidate = normalizeText((string) $child->textContent);
             if ($candidate !== '' && preg_match('/\d{4}|\d{1,2}[\/.-]\d{1,2}/u', $candidate)) {
-                $date = $candidate;
+                $rawDate = $candidate;
                 break;
             }
         }
     }
-    $date = normalizeDate($date);
+    $dateHasTime = dateValueHasTime($rawDate);
+    $date = normalizeDate($rawDate);
     $friend = [
         'uniqueId' => $uniqueId,
         'id' => $uniqueId,
@@ -2131,7 +2163,8 @@ function parseFriendNode(DOMXPath $xpath, DOMNode $node, bool $removed): array
         'online' => false,
         'isOnline' => false,
         'source' => 'toxic-history',
-        'datePrecision' => 'observed',
+        'datePrecision' => $date === '' ? 'unknown' : ($dateHasTime ? 'datetime' : 'date'),
+        'dateHasTime' => $dateHasTime,
     ];
     if ($removed) {
         $friend['removedAt'] = $date;
@@ -2841,6 +2874,15 @@ function integersFromNode(?DOMNode $node): array
     return $values;
 }
 
+function dateValueHasTime(string $raw): bool
+{
+    $raw = normalizeText($raw);
+    if ($raw === '') {
+        return false;
+    }
+    return preg_match('/(?:T|\s|,)(\d{1,2}):(\d{2})(?::\d{2})?/u', $raw) === 1;
+}
+
 function normalizeDate(string $raw): string
 {
     $raw = normalizeText($raw);
@@ -2890,7 +2932,7 @@ function normalizeDate(string $raw): string
         if (!preg_match('/\b' . preg_quote($word, '/') . '\b/u', $normalized)) {
             continue;
         }
-        $time = '00:00:00';
+        $time = '';
         if (preg_match('/\b(\d{1,2}):(\d{2})(?::(\d{2}))?\b/', $normalized, $timeMatch)) {
             $time = sprintf(
                 '%02d:%02d:%02d',
@@ -2901,10 +2943,12 @@ function normalizeDate(string $raw): string
         }
         $withoutTime = preg_replace('/\b\d{1,2}:\d{2}(?::\d{2})?\b/', '', $normalized);
         if (preg_match('/\b(\d{1,2})\D+' . preg_quote($word, '/') . '\D+(\d{4})\b/u', (string) $withoutTime, $parts)) {
-            return sprintf('%04d-%02d-%02dT%s+00:00', (int) $parts[2], $month, (int) $parts[1], $time);
+            $date = sprintf('%04d-%02d-%02d', (int) $parts[2], $month, (int) $parts[1]);
+            return $time !== '' ? $date . 'T' . $time . '+00:00' : $date;
         }
         if (preg_match('/\b' . preg_quote($word, '/') . '\D+(\d{1,2})\D+(\d{4})\b/u', (string) $withoutTime, $parts)) {
-            return sprintf('%04d-%02d-%02dT%s+00:00', (int) $parts[2], $month, (int) $parts[1], $time);
+            $date = sprintf('%04d-%02d-%02d', (int) $parts[2], $month, (int) $parts[1]);
+            return $time !== '' ? $date . 'T' . $time . '+00:00' : $date;
         }
     }
     return $raw;
@@ -2981,11 +3025,15 @@ function mergeCurrentAndHistoricalData(
     $badges = mergeLists($widgetBadges, $selectedBadges, ['code']);
     $selectedBadges = enrichSelectedBadges($selectedBadges, $badges);
 
+    $officialFriendsAuthoritative = array_key_exists('friends', $officialProfile)
+        && is_array($officialProfile['friends']);
     $officialFriends = normalizeOfficialFriends(
         extractArrayFromKeys($officialProfile, ['friends'])
     );
     $widgetFriends = extractArrayFromKeys($widget, ['friends']);
-    $friends = mergeLists($widgetFriends, $officialFriends, ['uniqueId', 'name']);
+    $friends = $officialFriendsAuthoritative
+        ? enrichPrimaryList($officialFriends, $widgetFriends, ['uniqueId', 'name'])
+        : $widgetFriends;
 
     $officialRooms = normalizeOfficialRooms(
         extractArrayFromKeys($officialProfile, ['rooms'])
@@ -3033,6 +3081,9 @@ function mergeCurrentAndHistoricalData(
     $widgetCounts = is_array($widget['sourceCounts'] ?? null)
         ? $widget['sourceCounts']
         : [];
+    $banned = $officialUser === []
+        && $officialProfile === []
+        && firstBool($widget, ['isBanned', 'banned', 'is_banned'], false);
 
     return [
         'uniqueId' => $uniqueId,
@@ -3050,6 +3101,8 @@ function mergeCurrentAndHistoricalData(
         'mission' => $motto,
         'online' => firstBool($officialUser, ['online', 'isOnline'], false),
         'isOnline' => firstBool($officialUser, ['online', 'isOnline'], false),
+        'isBanned' => $banned,
+        'banned' => $banned,
         'profileVisible' => $visible,
         'isProfileVisible' => $visible,
         'visible' => $visible,
@@ -3076,7 +3129,9 @@ function mergeCurrentAndHistoricalData(
         'totalBadges' => $totalBadges,
         'badgeCount' => (int) $totalBadges,
         'badgesCount' => (int) $totalBadges,
-        'friendCount' => (int) ($widgetCounts['friends'] ?? count($friends)),
+        'friendCount' => $officialFriendsAuthoritative
+            ? count($friends)
+            : (int) ($widgetCounts['friends'] ?? count($friends)),
         'groupCount' => (int) ($widgetCounts['groups'] ?? count($groups)),
         'roomCount' => (int) ($widgetCounts['rooms'] ?? count($rooms)),
         'photoCount' => (int) ($widgetCounts['photos'] ?? count($photos)),
@@ -3421,6 +3476,99 @@ function mergeListsCompound(array $primary, array $secondary, array $keys): arra
     return array_values($out);
 }
 
+/**
+ * Completa somente os registros que já existem na lista principal.
+ *
+ * A lista oficial de amigos é autoritativa: um registro histórico ausente
+ * nela não pode ser recolocado como amigo atual.
+ */
+function enrichPrimaryList(array $primary, array $supplement, array $keys): array
+{
+    $out = array_values(array_filter($primary, 'is_array'));
+    $positions = [];
+
+    foreach ($out as $index => $item) {
+        $identity = listItemKey($item, $keys);
+        if ($identity !== '' && !isset($positions[$identity])) {
+            $positions[$identity] = $index;
+        }
+    }
+
+    foreach ($supplement as $item) {
+        if (!is_array($item)) {
+            continue;
+        }
+        $identity = listItemKey($item, $keys);
+        if ($identity !== '' && isset($positions[$identity])) {
+            $index = $positions[$identity];
+            $out[$index] = mergeRecord($out[$index], $item);
+        }
+    }
+
+    return array_values($out);
+}
+
+/**
+ * Remove repetições do mesmo visual observadas no mesmo minuto.
+ *
+ * A fonte histórica pode publicar o mesmo evento em blocos diferentes (lista
+ * de visuais e ticker) e representar o instante com formatos ou segundos
+ * distintos. Como a interface exibe data e hora até os minutos, esses registros
+ * representam a mesma ocorrência para o usuário.
+ */
+function deduplicatePreviousStyles(array $items): array
+{
+    $out = [];
+    $positions = [];
+
+    foreach ($items as $item) {
+        if (!is_array($item)) {
+            continue;
+        }
+
+        $figure = firstString($item, ['figureString', 'figure', 'look']);
+        if ($figure === '') {
+            continue;
+        }
+
+        $date = firstString($item, ['changedAt', 'date']);
+        $dateKey = previousStyleMinuteKey($date);
+
+        // Sem uma data não é seguro concluir que duas aparições são o mesmo evento.
+        if ($dateKey === '') {
+            $out[] = $item;
+            continue;
+        }
+
+        $key = normalizeKey($figure) . '|' . $dateKey;
+        if (isset($positions[$key])) {
+            $index = $positions[$key];
+            $out[$index] = mergeRecord($out[$index], $item);
+            continue;
+        }
+
+        $out[] = $item;
+        $positions[$key] = array_key_last($out);
+    }
+
+    return array_values($out);
+}
+
+function previousStyleMinuteKey(string $date): string
+{
+    $date = trim($date);
+    if ($date === '') {
+        return '';
+    }
+
+    $timestamp = strtotime($date);
+    if ($timestamp !== false) {
+        return gmdate('Y-m-d\\TH:i', $timestamp);
+    }
+
+    return normalizeKey($date);
+}
+
 function listItemKey(array $item, array $keys): string
 {
     if ($keys === []) {
@@ -3553,6 +3701,10 @@ function mapObservedRecords(array $items, array $keys): array
 
 function sortProfileLists(array &$profile): void
 {
+    if (is_array($profile['previousStyles'] ?? null)) {
+        $profile['previousStyles'] = deduplicatePreviousStyles($profile['previousStyles']);
+    }
+
     $dateKeys = [
         'previousNames' => ['changedAt', 'date'],
         'previousMottos' => ['changedAt', 'date'],
@@ -3743,60 +3895,22 @@ function parseClosetMetadataHtml(
 
 function suggestProfiles(string $query, string $hotel): array
 {
-    $queryKey = normalizeKey($query);
     $items = [];
-    $seen = [];
-    $cacheHit = false;
-
-    $files = [];
-    $checked = 0;
-    foreach ($files as $file) {
-        if ($checked++ >= 1_000) {
-            break;
-        }
-        $record = readJsonFile($file);
-        $profile = is_array($record['profile'] ?? null) ? $record['profile'] : null;
-        if ($profile === null || normalizeHotel((string) ($profile['hotel'] ?? 'br')) !== $hotel) {
-            continue;
-        }
-        $current = normalizeKey(firstString($profile, ['name', 'username']));
-        $previousMatch = false;
-        foreach (extractArrayFromKeys($profile, ['previousNames']) as $previous) {
-            if (normalizeKey(firstString($previous, ['name', 'oldName', 'username'])) === $queryKey) {
-                $previousMatch = true;
-                break;
-            }
-        }
-        if (!str_starts_with($current, $queryKey) && !$previousMatch) {
-            continue;
-        }
-        $suggestion = suggestionFromProfile($profile);
-        $key = firstString($suggestion, ['uniqueId', 'name']);
-        if ($key !== '' && !isset($seen[$key])) {
-            $seen[$key] = true;
-            $items[] = $suggestion;
-        }
-        if (count($items) >= 8) {
-            break;
-        }
-    }
 
     try {
         $official = fetchOfficialUserByName($query, hotelConfig($hotel));
         if (is_array($official)) {
-            $cacheHit = false;
-            $id = firstString($official, ['uniqueId', 'id']);
-            $loaded = loadProfile($hotel, $query, $id);
-            $suggestion = suggestionFromProfile($loaded['profile']);
-            $key = firstString($suggestion, ['uniqueId', 'name']);
-            if ($key !== '' && !isset($seen[$key])) {
-                array_unshift($items, $suggestion);
+            $suggestion = suggestionFromProfile($official);
+            if (firstString($suggestion, ['uniqueId', 'name']) !== '') {
+                $items[] = $suggestion;
             }
         }
     } catch (Throwable $ignored) {
     }
 
-    return [array_slice($items, 0, 8), $cacheHit];
+    // A sugestão é intencionalmente oficial e leve; o histórico só é carregado
+    // depois que o usuário abre um perfil.
+    return [$items, false];
 }
 
 function suggestionFromProfile(array $profile): array
