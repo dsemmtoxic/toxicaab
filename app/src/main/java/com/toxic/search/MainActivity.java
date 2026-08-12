@@ -53,7 +53,7 @@ import java.util.concurrent.*;
 public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBOWIDGETS_BASE = "https://www.habbowidgets.com";
-    private static final String APP_VERSION = "1.3.10";
+    private static final String APP_VERSION = "1.3.11";
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
     // os ícones nunca desapareçam por bloqueio de rede ou cache externo.
@@ -201,6 +201,30 @@ public class MainActivity extends Activity {
     private Runnable rewardedRetryRunnable = null;
     private TextView rewardAdBtn;
     private TextView rewardAdTimeLabel;
+    private LinearLayout sponsorsSection;
+    private LinearLayout sponsorsCarouselRow;
+    private TextView sponsorsEmptyText;
+    private TextView sponsorsSubscribeButton;
+    private boolean sponsorsLoading = false;
+    private static final String SUPPORTER_PRODUCT_ID = "tx_supporter";
+    private static final String SUPPORTER_BASE_PLAN_ID = "basic";
+    private static final String PREF_SUPPORTER_TUTORIAL_PENDING = "supporter_tutorial_pending";
+    private static final String PREF_SUPPORTER_TUTORIAL_VERSION = "supporter_tutorial_version";
+    private static final int CURRENT_SUPPORTER_TUTORIAL_VERSION = 1;
+    private static final long SUPPORTER_REVERIFY_INTERVAL_MS = 15L * 60L * 1000L;
+    private ProductDetails supporterProductDetails;
+    private boolean supporterActive = false;
+    private boolean supporterStatusRequestRunning = false;
+    private boolean supporterPurchaseQueryRunning = false;
+    private boolean billingEntitlementCheckPending = true;
+    private boolean pendingSupporterPurchaseLaunch = false;
+    private String supporterPurchaseToken = "";
+    private long supporterCanChangeAtMs = 0L;
+    private long supporterExpiresAtMs = 0L;
+    private long supporterNextVerificationAtMs = 0L;
+    private String supporterProfileNick = "";
+    private String supporterProfileHotel = "";
+    private Runnable billingEntitlementTimeoutRunnable;
     private boolean openingSplashShownThisSession = false;
     private JSONObject visualFigureDataCache = null;
     private long visualFigureDataLoadedAt = 0L;
@@ -220,6 +244,7 @@ public class MainActivity extends Activity {
     private long adFreeUntilMs = 0L;
     private final Runnable adFreeTicker = new Runnable() {
         @Override public void run() {
+            refreshSupporterEntitlementIfNeeded();
             consumeAdFreeElapsed();
             updateRewardButtonText();
             if (!removeAdsPurchased && !hasAdFreeAccess() && topSearchBannerAdView == null) {
@@ -389,11 +414,10 @@ public class MainActivity extends Activity {
         MobileAds.initialize(this, initializationStatus -> {});
         buildUi();
         startAccessGateMonitoring();
-        preloadBannerAds();
-        attachTopSearchBannerIfPossible();
         initBillingClient();
-        loadInterstitialAd();
-        loadRewardedAd();
+        billingEntitlementTimeoutRunnable = () -> finishBillingEntitlementCheck(false);
+        uiHandler.postDelayed(billingEntitlementTimeoutRunnable, 6500L);
+        refreshSponsors();
         requestFavoriteNotificationPermissionIfNeeded();
         startFavoriteOnlineWatcher();
         updateFavoriteOnlineAlarm();
@@ -863,7 +887,7 @@ public class MainActivity extends Activity {
     }
 
     private void scheduleRewardedAdRetry() {
-        if (removeAdsPurchased || !appInForeground || rewardedRetryRunnable != null) return;
+        if (removeAdsPurchased || supporterActive || billingEntitlementCheckPending || !appInForeground || rewardedRetryRunnable != null) return;
         long delay = Math.max(0L, nextRewardedLoadAllowedAt - System.currentTimeMillis());
         rewardedRetryRunnable = () -> {
             rewardedRetryRunnable = null;
@@ -877,7 +901,10 @@ public class MainActivity extends Activity {
     }
 
     private boolean canLoadRewardedAdNow() {
-        return !removeAdsPurchased && System.currentTimeMillis() >= nextRewardedLoadAllowedAt;
+        return !removeAdsPurchased
+                && !supporterActive
+                && !billingEntitlementCheckPending
+                && System.currentTimeMillis() >= nextRewardedLoadAllowedAt;
     }
 
     private void loadInterstitialAd() {
@@ -958,7 +985,7 @@ public class MainActivity extends Activity {
 
 
     private void loadRewardedAd() {
-        if (removeAdsPurchased) {
+        if (removeAdsPurchased || supporterActive || billingEntitlementCheckPending) {
             cancelRewardedAdRetry();
             return;
         }
@@ -1046,6 +1073,7 @@ public class MainActivity extends Activity {
                             int code = billingResult == null ? BillingClient.BillingResponseCode.ERROR : billingResult.getResponseCode();
                             if (code == BillingClient.BillingResponseCode.OK && purchases != null) {
                                 handleRemoveAdsPurchases(purchases, true);
+                                handleSupporterPurchases(purchases, true);
                             } else if (code != BillingClient.BillingResponseCode.USER_CANCELED) {
                                 showBillingFailure("onPurchasesUpdated", billingResult);
                             }
@@ -1073,9 +1101,14 @@ public class MainActivity extends Activity {
                     if (billingReady) {
                         queryRemoveAdsProductDetails();
                         queryRemoveAdsPurchases();
+                        querySupporterPurchases();
                         if (pendingRemoveAdsPurchaseLaunch && removeAdsProductDetails != null) runOnUiThread(() -> launchRemoveAdsPurchase());
+                        if (pendingSupporterPurchaseLaunch && supporterProductDetails != null) runOnUiThread(() -> launchSupporterPurchase());
                     } else if (pendingRemoveAdsPurchaseLaunch) {
                         pendingRemoveAdsPurchaseLaunch = false;
+                        showBillingFailure("onBillingSetupFinished", billingResult);
+                    } else if (pendingSupporterPurchaseLaunch) {
+                        pendingSupporterPurchaseLaunch = false;
                         showBillingFailure("onBillingSetupFinished", billingResult);
                     }
                 }
@@ -1098,6 +1131,10 @@ public class MainActivity extends Activity {
                     .setProductId(REMOVE_ADS_PRODUCT_ID)
                     .setProductType(BillingClient.ProductType.INAPP)
                     .build());
+            products.add(QueryProductDetailsParams.Product.newBuilder()
+                    .setProductId(SUPPORTER_PRODUCT_ID)
+                    .setProductType(BillingClient.ProductType.SUBS)
+                    .build());
             QueryProductDetailsParams params = QueryProductDetailsParams.newBuilder()
                     .setProductList(products)
                     .build();
@@ -1107,6 +1144,9 @@ public class MainActivity extends Activity {
                         if (pendingRemoveAdsPurchaseLaunch) {
                             pendingRemoveAdsPurchaseLaunch = false;
                             showBillingFailure("queryProductDetailsAsync", billingResult);
+                        } else if (pendingSupporterPurchaseLaunch) {
+                            pendingSupporterPurchaseLaunch = false;
+                            showBillingFailure("queryProductDetailsAsync", billingResult);
                         } else {
                             logBillingResult("queryProductDetailsAsync", billingResult);
                         }
@@ -1114,37 +1154,42 @@ public class MainActivity extends Activity {
                     }
                     List<ProductDetails> list = result.getProductDetailsList();
                     ProductDetails matchingProduct = null;
+                    ProductDetails matchingSupporter = null;
                     if (list != null) {
                         for (ProductDetails details : list) {
                             if (details != null && REMOVE_ADS_PRODUCT_ID.equals(details.getProductId())) {
                                 matchingProduct = details;
-                                break;
+                            } else if (details != null && SUPPORTER_PRODUCT_ID.equals(details.getProductId())) {
+                                matchingSupporter = details;
                             }
                         }
                     }
-                    if (matchingProduct != null) {
-                        removeAdsProductDetails = matchingProduct;
-                        if (pendingRemoveAdsPurchaseLaunch) runOnUiThread(() -> launchRemoveAdsPurchase());
-                        return;
-                    }
-
-                    removeAdsProductDetails = null;
+                    removeAdsProductDetails = matchingProduct;
+                    supporterProductDetails = matchingSupporter;
                     List<UnfetchedProduct> unfetchedProducts = result.getUnfetchedProductList();
                     if (unfetchedProducts != null) {
                         for (UnfetchedProduct product : unfetchedProducts) {
-                            if (product != null && REMOVE_ADS_PRODUCT_ID.equals(product.getProductId())) {
+                            if (product != null && (REMOVE_ADS_PRODUCT_ID.equals(product.getProductId())
+                                    || SUPPORTER_PRODUCT_ID.equals(product.getProductId()))) {
                                 android.util.Log.w(
                                         "ToxicBilling",
-                                        "remove_ads unfetched: status=" + product.getStatusCode()
+                                        product.getProductId() + " unfetched: status=" + product.getStatusCode()
                                                 + ", type=" + product.getProductType()
                                 );
-                                break;
                             }
                         }
                     }
-                    if (pendingRemoveAdsPurchaseLaunch) {
+                    if (pendingRemoveAdsPurchaseLaunch && removeAdsProductDetails == null) {
                         pendingRemoveAdsPurchaseLaunch = false;
                         runOnUiThread(() -> toast(t(R.string.purchase_unavailable)));
+                    } else if (pendingRemoveAdsPurchaseLaunch) {
+                        runOnUiThread(() -> launchRemoveAdsPurchase());
+                    }
+                    if (pendingSupporterPurchaseLaunch && supporterProductDetails == null) {
+                        pendingSupporterPurchaseLaunch = false;
+                        runOnUiThread(() -> toast(t(R.string.supporter_unavailable)));
+                    } else if (pendingSupporterPurchaseLaunch) {
+                        runOnUiThread(() -> launchSupporterPurchase());
                     }
                 }
             });
@@ -1171,6 +1216,212 @@ public class MainActivity extends Activity {
                 setRemoveAdsPurchased(owned);
             });
         } catch(Exception ignored) {}
+    }
+
+    private void querySupporterPurchases() {
+        try {
+            if (billingClient == null || !billingClient.isReady() || supporterPurchaseQueryRunning) return;
+            supporterPurchaseQueryRunning = true;
+            QueryPurchasesParams params = QueryPurchasesParams.newBuilder()
+                    .setProductType(BillingClient.ProductType.SUBS)
+                    .build();
+            billingClient.queryPurchasesAsync(params, (billingResult, purchases) -> {
+                supporterPurchaseQueryRunning = false;
+                if (billingResult == null || billingResult.getResponseCode() != BillingClient.BillingResponseCode.OK) return;
+                boolean owned = false;
+                if (purchases != null) {
+                    for (Purchase purchase : purchases) {
+                        if (isSupporterPurchase(purchase)
+                                && purchase.getPurchaseState() == Purchase.PurchaseState.PURCHASED) {
+                            owned = true;
+                            break;
+                        }
+                    }
+                    handleSupporterPurchases(purchases, false);
+                }
+                if (!owned) {
+                    supporterPurchaseToken = "";
+                    supporterExpiresAtMs = 0L;
+                    supporterNextVerificationAtMs = 0L;
+                    finishBillingEntitlementCheck(false);
+                }
+            });
+        } catch(Exception ignored) {
+            supporterPurchaseQueryRunning = false;
+        }
+    }
+
+    private boolean isSupporterPurchase(Purchase purchase) {
+        if (purchase == null) return false;
+        try {
+            return purchase.getProducts() != null
+                    && purchase.getProducts().contains(SUPPORTER_PRODUCT_ID);
+        } catch(Exception ignored) {
+            return false;
+        }
+    }
+
+    private void handleSupporterPurchases(List<Purchase> purchases, boolean showToast) {
+        if (purchases == null) return;
+        for (Purchase purchase : purchases) {
+            if (!isSupporterPurchase(purchase)) continue;
+            if (purchase.getPurchaseState() == Purchase.PurchaseState.PURCHASED) {
+                supporterPurchaseToken = purchase.getPurchaseToken() == null
+                        ? ""
+                        : purchase.getPurchaseToken().trim();
+                if (showToast) {
+                    getSharedPreferences(PREFS, MODE_PRIVATE)
+                            .edit()
+                            .putBoolean(PREF_SUPPORTER_TUTORIAL_PENDING, true)
+                            .apply();
+                }
+                if (!purchase.isAcknowledged() && billingClient != null) {
+                    try {
+                        AcknowledgePurchaseParams params = AcknowledgePurchaseParams.newBuilder()
+                                .setPurchaseToken(purchase.getPurchaseToken())
+                                .build();
+                        billingClient.acknowledgePurchase(params, billingResult -> {});
+                    } catch(Exception ignored) {}
+                }
+                syncSupporterStatusWithBackend(supporterPurchaseToken, showToast);
+            } else if (purchase.getPurchaseState() == Purchase.PurchaseState.PENDING && showToast) {
+                runOnUiThread(() -> toast(t(R.string.supporter_pending)));
+            }
+        }
+    }
+
+    private void finishBillingEntitlementCheck(boolean supporterOwned) {
+        billingEntitlementCheckPending = false;
+        if (billingEntitlementTimeoutRunnable != null) {
+            uiHandler.removeCallbacks(billingEntitlementTimeoutRunnable);
+            billingEntitlementTimeoutRunnable = null;
+        }
+        setSupporterActive(supporterOwned);
+        if (!hasAdFreeAccess()) {
+            preloadBannerAds();
+            attachTopSearchBannerIfPossible();
+            loadInterstitialAd();
+            loadRewardedAd();
+        }
+    }
+
+    private void setSupporterActive(boolean active) {
+        boolean changed = supporterActive != active;
+        supporterActive = active;
+        if (active) {
+            cancelInterstitialAdRetry();
+            cancelRewardedAdRetry();
+            destroyAllBannerAds();
+            interstitialAd = null;
+            rewardedAd = null;
+            interstitialLoading = false;
+            rewardedLoading = false;
+        } else if (changed && !billingEntitlementCheckPending && !hasAdFreeAccess()) {
+            preloadBannerAds();
+            attachTopSearchBannerIfPossible();
+            loadInterstitialAd();
+            loadRewardedAd();
+        }
+        runOnUiThread(() -> {
+            updateRewardButtonText();
+            updateSponsorsSubscribeButton();
+        });
+    }
+
+    private void refreshSupporterEntitlementIfNeeded() {
+        if (!supporterActive || !appInForeground) return;
+        long now = System.currentTimeMillis();
+        if (supporterExpiresAtMs > 0L && now >= supporterExpiresAtMs) {
+            supporterExpiresAtMs = 0L;
+            supporterNextVerificationAtMs = now + 60_000L;
+            setSupporterActive(false);
+            querySupporterPurchases();
+            return;
+        }
+        if (now >= supporterNextVerificationAtMs) {
+            supporterNextVerificationAtMs = now + SUPPORTER_REVERIFY_INTERVAL_MS;
+            querySupporterPurchases();
+        }
+    }
+
+    private ProductDetails.SubscriptionOfferDetails basicSupporterOffer() {
+        if (supporterProductDetails == null) return null;
+        try {
+            List<ProductDetails.SubscriptionOfferDetails> offers = supporterProductDetails.getSubscriptionOfferDetails();
+            if (offers == null) return null;
+            for (ProductDetails.SubscriptionOfferDetails offer : offers) {
+                if (offer != null && SUPPORTER_BASE_PLAN_ID.equals(offer.getBasePlanId())) return offer;
+            }
+        } catch(Exception ignored) {}
+        return null;
+    }
+
+    private String supporterPriceText() {
+        ProductDetails.SubscriptionOfferDetails offer = basicSupporterOffer();
+        if (offer == null) return "";
+        try {
+            List<ProductDetails.PricingPhase> phases = offer.getPricingPhases().getPricingPhaseList();
+            if (phases == null || phases.isEmpty()) return "";
+            ProductDetails.PricingPhase phase = phases.get(phases.size() - 1);
+            return phase == null ? "" : phase.getFormattedPrice();
+        } catch(Exception ignored) {
+            return "";
+        }
+    }
+
+    private void launchSupporterPurchase() {
+        try {
+            if (supporterActive) {
+                showSupporterManageDialog();
+                return;
+            }
+            if (billingClient == null || !billingClient.isReady()) {
+                pendingSupporterPurchaseLaunch = true;
+                ensureBillingReady();
+                uiHandler.postDelayed(() -> {
+                    if (pendingSupporterPurchaseLaunch && (billingClient == null || !billingClient.isReady())) {
+                        toast(t(R.string.purchase_loading));
+                    }
+                }, 1800L);
+                return;
+            }
+            if (supporterProductDetails == null) {
+                pendingSupporterPurchaseLaunch = true;
+                queryRemoveAdsProductDetails();
+                uiHandler.postDelayed(() -> {
+                    if (pendingSupporterPurchaseLaunch && supporterProductDetails != null) launchSupporterPurchase();
+                }, 900L);
+                uiHandler.postDelayed(() -> {
+                    if (pendingSupporterPurchaseLaunch && supporterProductDetails == null) toast(t(R.string.purchase_loading));
+                }, 2200L);
+                return;
+            }
+            ProductDetails.SubscriptionOfferDetails offer = basicSupporterOffer();
+            if (offer == null || offer.getOfferToken() == null || offer.getOfferToken().trim().isEmpty()) {
+                pendingSupporterPurchaseLaunch = false;
+                toast(t(R.string.supporter_unavailable));
+                return;
+            }
+            pendingSupporterPurchaseLaunch = false;
+            BillingFlowParams.ProductDetailsParams productParams = BillingFlowParams.ProductDetailsParams.newBuilder()
+                    .setProductDetails(supporterProductDetails)
+                    .setOfferToken(offer.getOfferToken())
+                    .build();
+            BillingFlowParams flowParams = BillingFlowParams.newBuilder()
+                    .setProductDetailsParamsList(Collections.singletonList(productParams))
+                    .build();
+            BillingResult result = billingClient.launchBillingFlow(this, flowParams);
+            if (result == null || result.getResponseCode() != BillingClient.BillingResponseCode.OK) {
+                if (result != null && result.getResponseCode() == BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED) {
+                    querySupporterPurchases();
+                } else {
+                    showBillingFailure("launchSupporterBillingFlow", result);
+                }
+            }
+        } catch(Exception e) {
+            android.util.Log.w("ToxicBilling", "launchSupporterPurchase exception", e);
+            toast(t(R.string.purchase_error));
+        }
     }
 
     private boolean isRemoveAdsPurchase(Purchase purchase) {
@@ -1487,7 +1738,10 @@ public class MainActivity extends Activity {
     }
 
     private boolean hasAdFreeAccess() {
-        return removeAdsPurchased || getAdFreeRemainingMs() > 0L;
+        return removeAdsPurchased
+                || supporterActive
+                || billingEntitlementCheckPending
+                || getAdFreeRemainingMs() > 0L;
     }
 
     private long getAdFreeRemainingMs() {
@@ -1521,12 +1775,26 @@ public class MainActivity extends Activity {
 
     private void updateRewardButtonText() {
         if (rewardAdBtn == null) return;
+        if (supporterActive) {
+            rewardAdBtn.setVisibility(View.VISIBLE);
+            rewardAdBtn.setText("");
+            rewardAdBtn.setBackground(new SupporterProfileButtonDrawable());
+            rewardAdBtn.setContentDescription(t(R.string.supporter_choose_profile));
+            if (rewardAdTimeLabel != null) {
+                rewardAdTimeLabel.setText(t(R.string.supporter_short));
+                rewardAdTimeLabel.setTextColor(lightTheme ? Color.rgb(73, 42, 115) : Color.WHITE);
+                rewardAdTimeLabel.setVisibility(View.VISIBLE);
+            }
+            return;
+        }
         if (removeAdsPurchased) {
             rewardAdBtn.setVisibility(View.GONE);
             if (rewardAdTimeLabel != null) rewardAdTimeLabel.setVisibility(View.GONE);
             return;
         }
         rewardAdBtn.setVisibility(View.VISIBLE);
+        rewardAdBtn.setBackground(new RewardVideoDrawable());
+        rewardAdBtn.setContentDescription(t(R.string.adfree_title));
         long remainingMs = getAdFreeRemainingMs();
 
         rewardAdBtn.setText("");
@@ -1578,7 +1846,9 @@ public class MainActivity extends Activity {
         startFavoriteOnlineWatcher();
         ensureBillingReady();
         queryRemoveAdsPurchases();
-        if (!removeAdsPurchased) {
+        querySupporterPurchases();
+        refreshSponsors();
+        if (!removeAdsPurchased && !supporterActive) {
             if (!hasAdFreeAccess()) loadInterstitialAd();
             loadRewardedAd();
         }
@@ -1620,6 +1890,7 @@ public class MainActivity extends Activity {
         cancelTutorialPulseAnimation();
         stopAccessGateMonitoring();
         if (suggestionDebounceTask != null) uiHandler.removeCallbacks(suggestionDebounceTask);
+        if (billingEntitlementTimeoutRunnable != null) uiHandler.removeCallbacks(billingEntitlementTimeoutRunnable);
         uiHandler.removeCallbacks(adFreeTicker);
         cancelInterstitialAdRetry();
         cancelRewardedAdRetry();
@@ -2061,7 +2332,10 @@ public class MainActivity extends Activity {
         rewardAdBtn.setPadding(0, 0, 0, 0);
         rewardAdBtn.setIncludeFontPadding(false);
         rewardAdBtn.setBackground(new RewardVideoDrawable());
-        rewardAdBtn.setOnClickListener(v -> showRewardedAdDialog());
+        rewardAdBtn.setOnClickListener(v -> {
+            if (supporterActive) showSponsorProfileDialog();
+            else showRewardedAdDialog();
+        });
         FrameLayout.LayoutParams rewardLp = new FrameLayout.LayoutParams(dp(38), dp(38), Gravity.TOP | Gravity.RIGHT);
         rewardLp.topMargin = dp(14);
         rewardLp.rightMargin = dp(10);
@@ -2182,6 +2456,8 @@ public class MainActivity extends Activity {
         resultWrap = new LinearLayout(this);
         resultWrap.setOrientation(LinearLayout.VERTICAL);
         root.addView(resultWrap, lp(-1, -2, 0, 0, 0, 0));
+        sponsorsSection = buildSponsorsSection();
+        root.addView(sponsorsSection, lp(-1, -2, 0, 4, 0, 18));
         setContentView(screen);
         applySafeAreaInsets(getWindow(), screen);
         searchBtn.setOnClickListener(v -> {
@@ -2206,6 +2482,547 @@ public class MainActivity extends Activity {
             );
         }
         maybeShowFirstRunTutorial();
+    }
+
+    private LinearLayout buildSponsorsSection() {
+        LinearLayout section = neutralCard(dp(24));
+        section.setOrientation(LinearLayout.VERTICAL);
+        section.setPadding(dp(16), dp(15), dp(16), dp(16));
+        if (Build.VERSION.SDK_INT >= 21) section.setElevation(dp(4));
+
+        LinearLayout heading = new LinearLayout(this);
+        heading.setOrientation(LinearLayout.HORIZONTAL);
+        heading.setGravity(Gravity.CENTER_VERTICAL);
+        section.addView(heading, lp(-1, dp(42), 0, 0, 0, 10));
+
+        TextView title = text(t(R.string.sponsors_title), 17, lightTheme ? Color.rgb(40, 32, 50) : Color.WHITE, true);
+        title.setGravity(Gravity.CENTER_VERTICAL);
+        title.setLetterSpacing(0.04f);
+        heading.addView(title, new LinearLayout.LayoutParams(0, -1, 1));
+
+        sponsorsSubscribeButton = text("+", 25, Color.WHITE, true);
+        sponsorsSubscribeButton.setGravity(Gravity.CENTER);
+        sponsorsSubscribeButton.setIncludeFontPadding(false);
+        sponsorsSubscribeButton.setContentDescription(t(R.string.supporter_subscribe));
+        sponsorsSubscribeButton.setOnClickListener(v -> {
+            if (supporterActive) showSupporterManageDialog();
+            else showSupporterOfferDialog();
+        });
+        heading.addView(sponsorsSubscribeButton, new LinearLayout.LayoutParams(dp(38), dp(38)));
+        updateSponsorsSubscribeButton();
+
+        HorizontalScrollView carousel = new HorizontalScrollView(this);
+        carousel.setHorizontalScrollBarEnabled(false);
+        carousel.setFillViewport(false);
+        sponsorsCarouselRow = new LinearLayout(this);
+        sponsorsCarouselRow.setOrientation(LinearLayout.HORIZONTAL);
+        sponsorsCarouselRow.setGravity(Gravity.CENTER_VERTICAL);
+        carousel.addView(sponsorsCarouselRow, new HorizontalScrollView.LayoutParams(-2, -1));
+        section.addView(carousel, lp(-1, dp(122), 0, 0, 0, 0));
+
+        sponsorsEmptyText = text(t(R.string.sponsors_loading), 13, themeMutedColor(), false);
+        sponsorsEmptyText.setGravity(Gravity.CENTER);
+        sponsorsEmptyText.setPadding(dp(8), dp(8), dp(8), dp(8));
+        section.addView(sponsorsEmptyText, lp(-1, dp(48), 0, 0, 0, 0));
+        return section;
+    }
+
+    private void updateSponsorsSubscribeButton() {
+        if (sponsorsSubscribeButton == null) return;
+        sponsorsSubscribeButton.setText("+");
+        sponsorsSubscribeButton.setTextColor(Color.WHITE);
+        sponsorsSubscribeButton.setBackground(supporterActive
+                ? grad(dp(12), Color.rgb(124, 58, 237), Color.rgb(192, 132, 252))
+                : round(lightTheme ? Color.rgb(108, 63, 176) : Color.rgb(74, 42, 105), dp(12), purple, 1));
+        sponsorsSubscribeButton.setContentDescription(t(supporterActive
+                ? R.string.supporter_manage
+                : R.string.supporter_subscribe));
+    }
+
+    private void refreshSponsors() {
+        if (sponsorsLoading) return;
+        sponsorsLoading = true;
+        runOnUiThread(() -> {
+            if (sponsorsEmptyText != null && (sponsorsCarouselRow == null || sponsorsCarouselRow.getChildCount() == 0)) {
+                sponsorsEmptyText.setText(t(R.string.sponsors_loading));
+                sponsorsEmptyText.setVisibility(View.VISIBLE);
+            }
+        });
+        executor.execute(() -> {
+            try {
+                JSONObject response = getJson(PROFILE_API + "/sponsors?limit=100");
+                JSONArray sponsors = response.optJSONArray("sponsors");
+                if (sponsors == null) sponsors = response.optJSONArray("items");
+                final JSONArray finalSponsors = sponsors == null ? new JSONArray() : sponsors;
+                runOnUiThread(() -> renderSponsors(finalSponsors));
+            } catch(Exception error) {
+                runOnUiThread(() -> {
+                    if (sponsorsCarouselRow != null && sponsorsCarouselRow.getChildCount() == 0 && sponsorsEmptyText != null) {
+                        sponsorsEmptyText.setText(t(R.string.sponsors_unavailable));
+                        sponsorsEmptyText.setVisibility(View.VISIBLE);
+                    }
+                });
+            } finally {
+                sponsorsLoading = false;
+            }
+        });
+    }
+
+    private void renderSponsors(JSONArray sponsors) {
+        if (sponsorsCarouselRow == null) return;
+        sponsorsCarouselRow.removeAllViews();
+        for (int i = 0; i < sponsors.length(); i++) {
+            JSONObject sponsor = sponsors.optJSONObject(i);
+            if (sponsor == null) continue;
+            String nick = sponsor.optString("nick", sponsor.optString("name", "")).trim();
+            String hotel = normalizeHotelKey(sponsor.optString("hotel", "br"));
+            String figure = sponsor.optString("figure", sponsor.optString("figureString", "")).trim();
+            String uniqueId = sponsor.optString("uniqueId", sponsor.optString("id", "")).trim();
+            if (nick.isEmpty() || figure.isEmpty()) continue;
+            sponsorsCarouselRow.addView(sponsorCard(nick, hotel, figure, uniqueId));
+        }
+        boolean empty = sponsorsCarouselRow.getChildCount() == 0;
+        if (sponsorsEmptyText != null) {
+            sponsorsEmptyText.setText(t(R.string.sponsors_empty));
+            sponsorsEmptyText.setVisibility(empty ? View.VISIBLE : View.GONE);
+        }
+    }
+
+    private View sponsorCard(String nick, String hotel, String figure, String uniqueId) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setGravity(Gravity.CENTER);
+        card.setPadding(dp(8), dp(6), dp(8), dp(7));
+        card.setBackground(round(
+                lightTheme ? Color.rgb(248, 246, 251) : Color.rgb(17, 14, 24),
+                dp(17),
+                lightTheme ? Color.rgb(223, 216, 233) : Color.rgb(62, 49, 79),
+                1
+        ));
+        LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(dp(108), dp(116));
+        cardParams.rightMargin = dp(10);
+        card.setLayoutParams(cardParams);
+
+        ImageView head = new ImageView(this);
+        head.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        String headUrl = "https://" + hotelDomain(hotel)
+                + "/habbo-imaging/avatarimage?figure=" + enc(figure)
+                + "&size=m&direction=2&head_direction=2&headonly=1";
+        loadHeadImage(head, headUrl);
+        card.addView(head, new LinearLayout.LayoutParams(dp(66), dp(72)));
+
+        LinearLayout identity = new LinearLayout(this);
+        identity.setOrientation(LinearLayout.HORIZONTAL);
+        identity.setGravity(Gravity.CENTER);
+        card.addView(identity, lp(-1, dp(28), 0, 1, 0, 0));
+        ImageView flag = new ImageView(this);
+        flag.setImageDrawable(new HotelFlagDrawable(hotel));
+        LinearLayout.LayoutParams flagParams = new LinearLayout.LayoutParams(dp(20), dp(13));
+        flagParams.rightMargin = dp(5);
+        identity.addView(flag, flagParams);
+        TextView name = habboText(nick, 12, true);
+        name.setSingleLine(true);
+        name.setEllipsize(TextUtils.TruncateAt.END);
+        name.setTextColor(lightTheme ? Color.rgb(39, 31, 47) : Color.WHITE);
+        identity.addView(name, new LinearLayout.LayoutParams(0, -2, 1));
+        card.setContentDescription(nick + " - " + hotel.toUpperCase(Locale.ROOT));
+        card.setOnClickListener(v -> openProfileReference(nick, uniqueId, figure, hotel));
+        return card;
+    }
+
+    private void showSupporterOfferDialog() {
+        if (supporterActive) {
+            showSupporterManageDialog();
+            return;
+        }
+        final Dialog dialog = new Dialog(this);
+        LinearLayout wrap = new LinearLayout(this);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+        wrap.setPadding(dp(20), dp(20), dp(20), dp(20));
+        wrap.setBackground(round(dialogFillColor(), dp(24), dialogStrokeColor(), 1));
+        dialog.setContentView(wrap);
+        applySafeAreaInsets(dialog.getWindow(), wrap);
+
+        TextView title = toxicLogoText(t(R.string.supporter_title), 22);
+        title.setGravity(Gravity.CENTER);
+        wrap.addView(title, lp(-1, -2, 0, 0, 0, 10));
+        TextView body = text(t(R.string.supporter_offer_body), 14, lightTheme ? Color.rgb(61, 52, 69) : Color.argb(226,255,255,255), false);
+        body.setGravity(Gravity.CENTER);
+        body.setLineSpacing(dp(3), 1f);
+        wrap.addView(body, lp(-1, -2, 4, 0, 4, 12));
+
+        String price = supporterPriceText();
+        TextView terms = text(price.isEmpty()
+                        ? t(R.string.supporter_recurring_terms)
+                        : tr(R.string.supporter_price_terms, price),
+                12, themeMutedColor(), false);
+        terms.setGravity(Gravity.CENTER);
+        terms.setLineSpacing(dp(2), 1f);
+        terms.setPadding(dp(10), dp(10), dp(10), dp(10));
+        terms.setBackground(round(lightTheme ? Color.rgb(246,244,249) : Color.argb(20,255,255,255), dp(14), dialogStrokeColor(), 1));
+        wrap.addView(terms, lp(-1, -2, 0, 0, 0, 14));
+
+        TextView subscribe = dialogButton(t(R.string.supporter_subscribe));
+        subscribe.setTextColor(Color.WHITE);
+        subscribe.setBackground(grad(dp(15), purple2, purple));
+        wrap.addView(subscribe, lp(-1, dp(50), 0, 0, 0, 8));
+        subscribe.setOnClickListener(v -> {
+            dialog.dismiss();
+            launchSupporterPurchase();
+        });
+        TextView cancel = dialogButton(t(R.string.cancel));
+        cancel.setTextColor(lightTheme ? Color.rgb(45,45,45) : Color.WHITE);
+        cancel.setBackground(round(lightTheme ? Color.rgb(242,242,244) : Color.argb(18,255,255,255), dp(14), dialogStrokeColor(), 1));
+        wrap.addView(cancel, lp(-1, dp(46), 0, 0, 0, 0));
+        cancel.setOnClickListener(v -> dialog.dismiss());
+        showCompactDialog(dialog, dp(430));
+    }
+
+    private void showSupporterManageDialog() {
+        final Dialog dialog = new Dialog(this);
+        LinearLayout wrap = new LinearLayout(this);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+        wrap.setPadding(dp(20), dp(20), dp(20), dp(20));
+        wrap.setBackground(round(dialogFillColor(), dp(24), dialogStrokeColor(), 1));
+        dialog.setContentView(wrap);
+        applySafeAreaInsets(dialog.getWindow(), wrap);
+        TextView title = toxicLogoText(t(R.string.supporter_active_title), 21);
+        title.setGravity(Gravity.CENTER);
+        wrap.addView(title, lp(-1, -2, 0, 0, 0, 10));
+        TextView body = text(t(R.string.supporter_active_body), 14, themeMutedColor(), false);
+        body.setGravity(Gravity.CENTER);
+        body.setLineSpacing(dp(3), 1f);
+        wrap.addView(body, lp(-1, -2, 0, 0, 0, 14));
+
+        TextView choose = dialogButton(t(R.string.supporter_choose_profile));
+        choose.setTextColor(Color.WHITE);
+        choose.setBackground(grad(dp(15), purple2, purple));
+        wrap.addView(choose, lp(-1, dp(50), 0, 0, 0, 8));
+        choose.setOnClickListener(v -> {
+            dialog.dismiss();
+            showSponsorProfileDialog();
+        });
+        TextView manage = dialogButton(t(R.string.supporter_manage_google));
+        manage.setTextColor(lightTheme ? Color.rgb(45,45,45) : Color.WHITE);
+        manage.setBackground(round(lightTheme ? Color.rgb(242,242,244) : Color.argb(18,255,255,255), dp(14), dialogStrokeColor(), 1));
+        wrap.addView(manage, lp(-1, dp(48), 0, 0, 0, 8));
+        manage.setOnClickListener(v -> openSupporterManagement());
+        TextView close = dialogButton(t(R.string.close));
+        close.setTextColor(themeMutedColor());
+        wrap.addView(close, lp(-1, dp(44), 0, 0, 0, 0));
+        close.setOnClickListener(v -> dialog.dismiss());
+        showCompactDialog(dialog, dp(430));
+    }
+
+    private void showCompactDialog(Dialog dialog, int maxWidth) {
+        dialog.show();
+        Window window = dialog.getWindow();
+        if (window == null) return;
+        window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+        WindowManager.LayoutParams params = new WindowManager.LayoutParams();
+        params.copyFrom(window.getAttributes());
+        params.width = Math.min(getResources().getDisplayMetrics().widthPixels - dp(28), maxWidth);
+        params.height = WindowManager.LayoutParams.WRAP_CONTENT;
+        window.setAttributes(params);
+    }
+
+    private void openSupporterManagement() {
+        try {
+            String url = "https://play.google.com/store/account/subscriptions?sku="
+                    + enc(SUPPORTER_PRODUCT_ID)
+                    + "&package=" + enc(getPackageName());
+            startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(url)));
+        } catch(Exception ignored) {
+            toast(t(R.string.purchase_error));
+        }
+    }
+
+    private void showSponsorProfileDialog() {
+        if (!supporterActive || supporterPurchaseToken.isEmpty()) {
+            toast(t(R.string.supporter_validation_pending));
+            querySupporterPurchases();
+            return;
+        }
+        final Dialog dialog = new Dialog(this);
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout wrap = new LinearLayout(this);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+        wrap.setPadding(dp(20), dp(20), dp(20), dp(20));
+        wrap.setBackground(round(dialogFillColor(), dp(24), dialogStrokeColor(), 1));
+        scroll.addView(wrap, new ScrollView.LayoutParams(-1, -2));
+        dialog.setContentView(scroll);
+        applySafeAreaInsets(dialog.getWindow(), scroll);
+
+        TextView title = toxicLogoText(t(R.string.supporter_choose_profile), 21);
+        title.setGravity(Gravity.CENTER);
+        wrap.addView(title, lp(-1, -2, 0, 0, 0, 8));
+        TextView body = text(t(R.string.supporter_profile_body), 13, themeMutedColor(), false);
+        body.setGravity(Gravity.CENTER);
+        body.setLineSpacing(dp(2), 1f);
+        wrap.addView(body, lp(-1, -2, 0, 0, 0, 12));
+
+        EditText nickInput = new EditText(this);
+        String initialNick = activeRenderedProfile != null && activeRenderedProfile.name != null
+                ? activeRenderedProfile.name
+                : supporterProfileNick;
+        nickInput.setText(initialNick == null ? "" : initialNick);
+        nickInput.setHint(t(R.string.search_hint));
+        nickInput.setSingleLine(true);
+        nickInput.setTextColor(lightTheme ? Color.rgb(33,33,33) : Color.WHITE);
+        nickInput.setHintTextColor(themeMutedColor());
+        nickInput.setTextSize(16);
+        nickInput.setTypeface(habboFont);
+        nickInput.setPadding(dp(14), 0, dp(14), 0);
+        nickInput.setBackground(round(lightTheme ? Color.rgb(247,247,249) : Color.rgb(13,14,21), dp(15), dialogStrokeColor(), 1));
+        wrap.addView(nickInput, lp(-1, dp(52), 0, 0, 0, 12));
+
+        String initialHotel = activeRenderedProfile != null
+                ? normalizeHotelKey(activeRenderedProfile.hotelKey)
+                : normalizeHotelKey(supporterProfileHotel);
+        if (initialHotel.isEmpty()) initialHotel = currentHotelKey;
+        final String[] selectedHotel = {initialHotel};
+        LinearLayout hotelGrid = new LinearLayout(this);
+        hotelGrid.setOrientation(LinearLayout.VERTICAL);
+        wrap.addView(hotelGrid, lp(-1, -2, 0, 0, 0, 12));
+        rebuildSponsorHotelGrid(hotelGrid, selectedHotel);
+
+        TextView cooldown = text("", 12, themeMutedColor(), false);
+        cooldown.setGravity(Gravity.CENTER);
+        long wait = Math.max(0L, supporterCanChangeAtMs - System.currentTimeMillis());
+        if (wait > 0L) {
+            cooldown.setText(tr(R.string.supporter_change_wait, formatSupporterCooldown(wait)));
+            cooldown.setVisibility(View.VISIBLE);
+        } else {
+            cooldown.setVisibility(View.GONE);
+        }
+        wrap.addView(cooldown, lp(-1, -2, 0, 0, 0, 10));
+
+        TextView save = dialogButton(t(R.string.supporter_save_profile));
+        save.setTextColor(Color.WHITE);
+        save.setBackground(grad(dp(15), purple2, purple));
+        save.setEnabled(wait <= 0L);
+        save.setAlpha(wait > 0L ? 0.5f : 1f);
+        wrap.addView(save, lp(-1, dp(50), 0, 0, 0, 8));
+        save.setOnClickListener(v -> {
+            String nick = nickInput.getText().toString().trim();
+            if (nick.isEmpty()) {
+                toast(t(R.string.type_nick_toast));
+                return;
+            }
+            save.setEnabled(false);
+            save.setText(t(R.string.supporter_saving));
+            submitSponsorProfile(dialog, save, nick, selectedHotel[0]);
+        });
+        TextView cancel = dialogButton(t(R.string.cancel));
+        cancel.setTextColor(themeMutedColor());
+        wrap.addView(cancel, lp(-1, dp(44), 0, 0, 0, 0));
+        cancel.setOnClickListener(v -> dialog.dismiss());
+        showCompactDialog(dialog, dp(440));
+    }
+
+    private void rebuildSponsorHotelGrid(LinearLayout grid, String[] selectedHotel) {
+        grid.removeAllViews();
+        addSponsorHotelChoiceRow(grid, selectedHotel, "br", "com", "es");
+        addSponsorHotelChoiceRow(grid, selectedHotel, "de", "fr", "fi");
+        addSponsorHotelChoiceRow(grid, selectedHotel, "it", "nl", "tr");
+    }
+
+    private void addSponsorHotelChoiceRow(LinearLayout grid, String[] selectedHotel, String a, String b, String c) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER);
+        grid.addView(row, lp(-1, dp(44), 0, 0, 0, 7));
+        addSponsorHotelChoice(row, grid, selectedHotel, a, 0);
+        addSponsorHotelChoice(row, grid, selectedHotel, b, 1);
+        addSponsorHotelChoice(row, grid, selectedHotel, c, 2);
+    }
+
+    private void addSponsorHotelChoice(LinearLayout row, LinearLayout grid, String[] selectedHotel, String hotel, int position) {
+        ImageView button = new ImageView(this);
+        button.setPadding(dp(12), dp(9), dp(12), dp(9));
+        button.setImageDrawable(new HotelFlagDrawable(hotel));
+        button.setBackground(hotel.equals(selectedHotel[0])
+                ? grad(dp(12), purple2, purple)
+                : round(lightTheme ? Color.rgb(248,248,250) : Color.argb(18,255,255,255), dp(12), dialogStrokeColor(), 1));
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(42), 1);
+        if (position > 0) params.leftMargin = dp(6);
+        row.addView(button, params);
+        button.setOnClickListener(v -> {
+            selectedHotel[0] = hotel;
+            rebuildSponsorHotelGrid(grid, selectedHotel);
+        });
+    }
+
+    private void submitSponsorProfile(Dialog dialog, TextView saveButton, String nick, String hotel) {
+        final String token = supporterPurchaseToken;
+        executor.execute(() -> {
+            try {
+                JSONObject payload = new JSONObject();
+                payload.put("purchaseToken", token);
+                payload.put("nick", nick);
+                payload.put("hotel", normalizeHotelKey(hotel));
+                JSONObject response = postJsonObject(PROFILE_API + "/sponsors/profile", payload);
+                applySupporterStatus(response);
+                runOnUiThread(() -> {
+                    dialog.dismiss();
+                    toast(t(R.string.supporter_profile_saved));
+                    refreshSponsors();
+                });
+            } catch(ApiHttpException error) {
+                JSONObject body = error.payload;
+                String next = body.optString("nextChangeAt", "");
+                Date nextDate = parseHabboDate(next);
+                if (nextDate != null) supporterCanChangeAtMs = nextDate.getTime();
+                final String message = "profile_change_cooldown".equals(body.optString("code"))
+                        ? tr(R.string.supporter_change_wait, formatSupporterCooldown(Math.max(0L, supporterCanChangeAtMs - System.currentTimeMillis())))
+                        : body.optString("error", t(R.string.supporter_save_error));
+                runOnUiThread(() -> {
+                    saveButton.setEnabled(true);
+                    saveButton.setText(t(R.string.supporter_save_profile));
+                    toast(message);
+                });
+            } catch(Exception error) {
+                runOnUiThread(() -> {
+                    saveButton.setEnabled(true);
+                    saveButton.setText(t(R.string.supporter_save_profile));
+                    toast(t(R.string.supporter_save_error));
+                });
+            }
+        });
+    }
+
+    private String formatSupporterCooldown(long millis) {
+        long totalMinutes = Math.max(1L, (long)Math.ceil(millis / 60000.0));
+        long hours = totalMinutes / 60L;
+        long minutes = totalMinutes % 60L;
+        if (hours > 0L) return tr(R.string.duration_short_hours, hours, minutes);
+        return totalMinutes + " min";
+    }
+
+    private void syncSupporterStatusWithBackend(String purchaseToken, boolean showActivation) {
+        if (purchaseToken == null || purchaseToken.trim().isEmpty() || supporterStatusRequestRunning) return;
+        supporterStatusRequestRunning = true;
+        executor.execute(() -> {
+            try {
+                JSONObject payload = new JSONObject();
+                payload.put("purchaseToken", purchaseToken);
+                JSONObject response = postJsonObject(PROFILE_API + "/sponsors/status", payload);
+                boolean active = response.optBoolean("active", false);
+                applySupporterStatus(response);
+                supporterNextVerificationAtMs = System.currentTimeMillis() + SUPPORTER_REVERIFY_INTERVAL_MS;
+                runOnUiThread(() -> {
+                    // A compra local apenas fornece o token. O direito e a
+                    // remoção de anúncios dependem desta confirmação segura.
+                    finishBillingEntitlementCheck(active);
+                    if (active && showActivation) toast(t(R.string.supporter_activated));
+                    if (active) maybeShowSupporterTutorial();
+                    refreshSponsors();
+                });
+            } catch(ApiHttpException error) {
+                supporterNextVerificationAtMs = System.currentTimeMillis() + 2L * 60L * 1000L;
+                if (error.statusCode == 401 || error.statusCode == 403 || error.statusCode == 410) {
+                    runOnUiThread(() -> finishBillingEntitlementCheck(false));
+                } else {
+                    runOnUiThread(() -> {
+                        // Em uma falha temporária, conserva somente um direito
+                        // que já havia sido confirmado nesta execução.
+                        finishBillingEntitlementCheck(supporterActive);
+                        if (showActivation) toast(t(R.string.supporter_server_unavailable));
+                    });
+                }
+            } catch(Exception error) {
+                supporterNextVerificationAtMs = System.currentTimeMillis() + 2L * 60L * 1000L;
+                runOnUiThread(() -> {
+                    finishBillingEntitlementCheck(supporterActive);
+                    if (showActivation) toast(t(R.string.supporter_server_unavailable));
+                });
+            } finally {
+                supporterStatusRequestRunning = false;
+            }
+        });
+    }
+
+    private void applySupporterStatus(JSONObject response) {
+        if (response == null) return;
+        Date nextDate = parseHabboDate(response.optString("canChangeAt", response.optString("nextChangeAt", "")));
+        supporterCanChangeAtMs = nextDate == null ? 0L : nextDate.getTime();
+        Date expiryDate = parseHabboDate(response.optString("expiresAt", ""));
+        supporterExpiresAtMs = expiryDate == null ? 0L : expiryDate.getTime();
+        JSONObject sponsor = response.optJSONObject("sponsor");
+        if (sponsor != null) {
+            supporterProfileNick = sponsor.optString("nick", "");
+            supporterProfileHotel = normalizeHotelKey(sponsor.optString("hotel", ""));
+        }
+    }
+
+    private void maybeShowSupporterTutorial() {
+        android.content.SharedPreferences preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
+        boolean pending = preferences.getBoolean(PREF_SUPPORTER_TUTORIAL_PENDING, false);
+        int shownVersion = preferences.getInt(PREF_SUPPORTER_TUTORIAL_VERSION, 0);
+        if (!supporterActive || (!pending && shownVersion >= CURRENT_SUPPORTER_TUTORIAL_VERSION)) return;
+        if (tutorialOverlayView != null || rewardAdBtn == null || rewardAdBtn.getWindowToken() == null) {
+            uiHandler.postDelayed(this::maybeShowSupporterTutorial, 450L);
+            return;
+        }
+        cancelTutorialPulseAnimation();
+        FrameLayout overlay = new FrameLayout(this);
+        overlay.setClickable(true);
+        overlay.setFocusable(true);
+        tutorialOverlayView = overlay;
+        ProfileTutorialOverlayDrawable drawable = new ProfileTutorialOverlayDrawable(
+                overlay,
+                rewardAdBtn,
+                8,
+                0
+        );
+        overlay.setBackground(drawable);
+
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setGravity(Gravity.CENTER);
+        card.setPadding(dp(18), dp(16), dp(18), dp(16));
+        card.setBackground(new TutorialCardDrawable(0));
+        FrameLayout.LayoutParams cardParams = new FrameLayout.LayoutParams(-1, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        cardParams.leftMargin = dp(22);
+        cardParams.rightMargin = dp(22);
+        cardParams.topMargin = dp(86);
+        overlay.addView(card, cardParams);
+
+        TextView title = habboText(t(R.string.supporter_tutorial_title), 20, true);
+        title.setGravity(Gravity.CENTER);
+        card.addView(title, lp(-1, -2, 0, 0, 0, 8));
+        TextView body = text(t(R.string.supporter_tutorial_body), 14, Color.argb(225,255,255,255), false);
+        body.setGravity(Gravity.CENTER);
+        body.setLineSpacing(dp(3), 1f);
+        card.addView(body, lp(-1, -2, 0, 0, 0, 12));
+        TextView choose = dialogButton(t(R.string.supporter_choose_now));
+        choose.setTextColor(Color.WHITE);
+        choose.setBackground(grad(dp(14), purple2, purple));
+        card.addView(choose, lp(-1, dp(48), 0, 0, 0, 0));
+
+        Runnable finish = () -> {
+            cancelTutorialPulseAnimation();
+            detachViewFromParent(overlay);
+            if (tutorialOverlayView == overlay) tutorialOverlayView = null;
+            preferences.edit()
+                    .putBoolean(PREF_SUPPORTER_TUTORIAL_PENDING, false)
+                    .putInt(PREF_SUPPORTER_TUTORIAL_VERSION, CURRENT_SUPPORTER_TUTORIAL_VERSION)
+                    .apply();
+            showSponsorProfileDialog();
+        };
+        choose.setOnClickListener(v -> finish.run());
+        screen.addView(overlay, new FrameLayout.LayoutParams(-1, -1));
+
+        ValueAnimator pulse = ValueAnimator.ofFloat(0f, 1f);
+        tutorialPulseAnimator = pulse;
+        pulse.setDuration(1150L);
+        pulse.setRepeatCount(ValueAnimator.INFINITE);
+        pulse.setRepeatMode(ValueAnimator.REVERSE);
+        pulse.addUpdateListener(animation -> {
+            drawable.setPulse((Float)animation.getAnimatedValue());
+            overlay.invalidate();
+        });
+        pulse.start();
     }
 
     private void showOpeningSplashOverlay() {
@@ -6172,6 +6989,50 @@ private int loadingProgressFor(String message) {
     private Object getJsonAny(String u) throws Exception { HttpURLConnection c = (HttpURLConnection)new URL(u).openConnection(); boolean complement = u != null && u.startsWith(PROFILE_API); c.setUseCaches(false); c.setDefaultUseCaches(false); c.setConnectTimeout(complement ? 10000 : 8000); c.setReadTimeout(complement ? 30000 : 15000); c.setRequestProperty("Accept", "application/json, text/plain, */*"); c.setRequestProperty("Cache-Control", "no-cache, no-store"); c.setRequestProperty("Pragma", "no-cache"); c.setRequestProperty("User-Agent", "ToxicSearchTool/" + APP_VERSION + " Android (+https://atoxic.com.br)"); c.setRequestProperty("X-Toxic-App", APP_VERSION); int code = c.getResponseCode(); InputStream is = code >= 200 && code < 300 ? c.getInputStream() : c.getErrorStream(); String body = readAll(is); if (code < 200 || code >= 300 || body == null || body.trim().isEmpty()) throw new IOException("HTTP " + code); String clean = body.trim(); return clean.startsWith("[") ? new JSONArray(clean) : new JSONObject(clean); }
     private JSONObject getJson(String u) throws Exception { Object any = getJsonAny(u); if (any instanceof JSONObject) return (JSONObject)any; JSONObject wrap = new JSONObject(); wrap.put("data", any); return wrap; }
     private JSONObject tryJson(String u) { try { return getJson(u); } catch (Exception e) { return null; } }
+
+    private static class ApiHttpException extends IOException {
+        final int statusCode;
+        final JSONObject payload;
+
+        ApiHttpException(int statusCode, JSONObject payload) {
+            super(payload == null ? "HTTP " + statusCode : payload.optString("error", "HTTP " + statusCode));
+            this.statusCode = statusCode;
+            this.payload = payload == null ? new JSONObject() : payload;
+        }
+    }
+
+    private JSONObject postJsonObject(String url, JSONObject payload) throws Exception {
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection)new URL(url).openConnection();
+            connection.setUseCaches(false);
+            connection.setDefaultUseCaches(false);
+            connection.setConnectTimeout(10000);
+            connection.setReadTimeout(30000);
+            connection.setRequestMethod("POST");
+            connection.setDoOutput(true);
+            connection.setRequestProperty("Accept", "application/json");
+            connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+            connection.setRequestProperty("Cache-Control", "no-cache, no-store");
+            connection.setRequestProperty("User-Agent", "ToxicSearchTool/" + APP_VERSION + " Android (+https://atoxic.com.br)");
+            connection.setRequestProperty("X-Toxic-App", APP_VERSION);
+            byte[] bytes = (payload == null ? "{}" : payload.toString()).getBytes("UTF-8");
+            connection.setFixedLengthStreamingMode(bytes.length);
+            try (OutputStream output = connection.getOutputStream()) {
+                output.write(bytes);
+            }
+            int code = connection.getResponseCode();
+            InputStream input = code >= 200 && code < 300
+                    ? connection.getInputStream()
+                    : connection.getErrorStream();
+            String body = readAll(input).trim();
+            JSONObject response = body.isEmpty() ? new JSONObject() : new JSONObject(body);
+            if (code < 200 || code >= 300) throw new ApiHttpException(code, response);
+            return response;
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
+    }
     private String readAll(InputStream is) throws IOException {
         if (is == null) return "";
         ByteArrayOutputStream out = new ByteArrayOutputStream();
@@ -12329,6 +13190,62 @@ private int loadingProgressFor(String message) {
             p.setStyle(Paint.Style.STROKE); p.setStrokeCap(Paint.Cap.ROUND); p.setStrokeJoin(Paint.Join.ROUND); p.setStrokeWidth(Math.max(2.4f,m*.08f)); p.setColor(Color.WHITE); Path a=new Path(); a.moveTo(cx-m*.09f,cy-m*.19f); a.lineTo(cx+m*.12f,cy); a.lineTo(cx-m*.09f,cy+m*.19f); c.drawPath(a,p);
         }
         @Override public void setAlpha(int a){p.setAlpha(a);} @Override public void setColorFilter(android.graphics.ColorFilter f){p.setColorFilter(f);} @Override public int getOpacity(){return PixelFormat.TRANSLUCENT;}
+    }
+
+    public class SupporterProfileButtonDrawable extends Drawable {
+        Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        @Override public void draw(Canvas canvas) {
+            Rect bounds = getBounds();
+            float size = Math.min(bounds.width(), bounds.height());
+            float cx = bounds.centerX();
+            float cy = bounds.centerY();
+            RectF background = new RectF(
+                    bounds.left + size * .08f,
+                    bounds.top + size * .08f,
+                    bounds.right - size * .08f,
+                    bounds.bottom - size * .08f
+            );
+            p.setStyle(Paint.Style.FILL);
+            p.setShader(new LinearGradient(
+                    background.left,
+                    background.top,
+                    background.right,
+                    background.bottom,
+                    Color.rgb(91, 33, 182),
+                    Color.rgb(192, 132, 252),
+                    Shader.TileMode.CLAMP
+            ));
+            canvas.drawRoundRect(background, size * .25f, size * .25f, p);
+            p.setShader(null);
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeWidth(Math.max(1f, size * .035f));
+            p.setColor(Color.argb(105,255,255,255));
+            canvas.drawRoundRect(background, size * .25f, size * .25f, p);
+
+            p.setStyle(Paint.Style.FILL);
+            p.setColor(Color.WHITE);
+            canvas.drawCircle(cx, cy - size * .10f, size * .105f, p);
+            RectF shoulders = new RectF(
+                    cx - size * .20f,
+                    cy + size * .035f,
+                    cx + size * .20f,
+                    cy + size * .27f
+            );
+            canvas.drawRoundRect(shoulders, size * .12f, size * .12f, p);
+
+            p.setColor(Color.rgb(255, 207, 64));
+            Path crown = new Path();
+            crown.moveTo(cx - size * .18f, cy - size * .25f);
+            crown.lineTo(cx - size * .10f, cy - size * .37f);
+            crown.lineTo(cx, cy - size * .29f);
+            crown.lineTo(cx + size * .10f, cy - size * .37f);
+            crown.lineTo(cx + size * .18f, cy - size * .25f);
+            crown.close();
+            canvas.drawPath(crown, p);
+        }
+        @Override public void setAlpha(int alpha){p.setAlpha(alpha);}
+        @Override public void setColorFilter(android.graphics.ColorFilter filter){p.setColorFilter(filter);}
+        @Override public int getOpacity(){return PixelFormat.TRANSLUCENT;}
     }
 
     public class RewardVideoDrawable extends Drawable {
