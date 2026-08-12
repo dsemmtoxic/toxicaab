@@ -53,7 +53,7 @@ import java.util.concurrent.*;
 public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBOWIDGETS_BASE = "https://www.habbowidgets.com";
-    private static final String APP_VERSION = "1.3.11";
+    private static final String APP_VERSION = "1.3.14";
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
     // os ícones nunca desapareçam por bloqueio de rede ou cache externo.
@@ -202,10 +202,13 @@ public class MainActivity extends Activity {
     private TextView rewardAdBtn;
     private TextView rewardAdTimeLabel;
     private LinearLayout sponsorsSection;
+    private Space sponsorsStartSpacer;
+    private FrameLayout sponsorsCarouselHost;
     private LinearLayout sponsorsCarouselRow;
-    private TextView sponsorsEmptyText;
+    private ProgressBar sponsorsLoadingIndicator;
     private TextView sponsorsSubscribeButton;
-    private boolean sponsorsLoading = false;
+    private volatile boolean sponsorsLoading = false;
+    private volatile String sponsorsCacheJson = null;
     private static final String SUPPORTER_PRODUCT_ID = "tx_supporter";
     private static final String SUPPORTER_BASE_PLAN_ID = "basic";
     private static final String PREF_SUPPORTER_TUTORIAL_PENDING = "supporter_tutorial_pending";
@@ -216,6 +219,7 @@ public class MainActivity extends Activity {
     private boolean supporterActive = false;
     private boolean supporterStatusRequestRunning = false;
     private boolean supporterPurchaseQueryRunning = false;
+    private boolean supporterProductDetailsQueryRunning = false;
     private boolean billingEntitlementCheckPending = true;
     private boolean pendingSupporterPurchaseLaunch = false;
     private String supporterPurchaseToken = "";
@@ -262,6 +266,7 @@ public class MainActivity extends Activity {
     private boolean removeAdsPurchased = false;
     private BillingClient billingClient;
     private ProductDetails removeAdsProductDetails;
+    private boolean removeAdsProductDetailsQueryRunning = false;
     private boolean billingConnecting = false;
     private boolean billingReady = false;
     private boolean pendingRemoveAdsPurchaseLaunch = false;
@@ -1083,14 +1088,36 @@ public class MainActivity extends Activity {
                     .enableAutoServiceReconnection()
                     .build();
             ensureBillingReady();
-        } catch(Exception ignored) {}
+        } catch(Exception e) {
+            billingClient = null;
+            billingReady = false;
+            billingConnecting = false;
+            boolean purchaseWasPending = pendingRemoveAdsPurchaseLaunch || pendingSupporterPurchaseLaunch;
+            pendingRemoveAdsPurchaseLaunch = false;
+            pendingSupporterPurchaseLaunch = false;
+            android.util.Log.w("ToxicBilling", "initBillingClient exception", e);
+            if (purchaseWasPending) showBillingFailure("initBillingClient", null);
+        }
     }
 
     private void ensureBillingReady() {
         try {
-            if (billingClient == null) initBillingClient();
-            if (billingClient == null || billingReady || billingConnecting || billingClient.isReady()) {
-                billingReady = billingClient != null && billingClient.isReady();
+            if (billingClient == null) {
+                initBillingClient();
+                return;
+            }
+            if (billingClient.isReady()) {
+                billingReady = true;
+                if (pendingRemoveAdsPurchaseLaunch && removeAdsProductDetails == null) {
+                    queryRemoveAdsProductDetails();
+                }
+                if (pendingSupporterPurchaseLaunch && supporterProductDetails == null) {
+                    querySupporterProductDetails();
+                }
+                return;
+            }
+            billingReady = false;
+            if (billingConnecting) {
                 return;
             }
             billingConnecting = true;
@@ -1100,16 +1127,16 @@ public class MainActivity extends Activity {
                     billingReady = billingResult != null && billingResult.getResponseCode() == BillingClient.BillingResponseCode.OK;
                     if (billingReady) {
                         queryRemoveAdsProductDetails();
+                        querySupporterProductDetails();
                         queryRemoveAdsPurchases();
                         querySupporterPurchases();
                         if (pendingRemoveAdsPurchaseLaunch && removeAdsProductDetails != null) runOnUiThread(() -> launchRemoveAdsPurchase());
                         if (pendingSupporterPurchaseLaunch && supporterProductDetails != null) runOnUiThread(() -> launchSupporterPurchase());
-                    } else if (pendingRemoveAdsPurchaseLaunch) {
+                    } else {
+                        boolean purchaseWasPending = pendingRemoveAdsPurchaseLaunch || pendingSupporterPurchaseLaunch;
                         pendingRemoveAdsPurchaseLaunch = false;
-                        showBillingFailure("onBillingSetupFinished", billingResult);
-                    } else if (pendingSupporterPurchaseLaunch) {
                         pendingSupporterPurchaseLaunch = false;
-                        showBillingFailure("onBillingSetupFinished", billingResult);
+                        if (purchaseWasPending) showBillingFailure("onBillingSetupFinished", billingResult);
                     }
                 }
                 @Override public void onBillingServiceDisconnected() {
@@ -1117,60 +1144,55 @@ public class MainActivity extends Activity {
                     billingReady = false;
                 }
             });
-        } catch(Exception ignored) {
+        } catch(Exception e) {
             billingConnecting = false;
             billingReady = false;
+            boolean purchaseWasPending = pendingRemoveAdsPurchaseLaunch || pendingSupporterPurchaseLaunch;
+            pendingRemoveAdsPurchaseLaunch = false;
+            pendingSupporterPurchaseLaunch = false;
+            android.util.Log.w("ToxicBilling", "startConnection exception", e);
+            if (purchaseWasPending) showBillingFailure("startConnection", null);
         }
     }
 
     private void queryRemoveAdsProductDetails() {
         try {
-            if (billingClient == null || !billingClient.isReady()) return;
+            if (billingClient == null || !billingClient.isReady() || removeAdsProductDetailsQueryRunning) return;
+            removeAdsProductDetailsQueryRunning = true;
             ArrayList<QueryProductDetailsParams.Product> products = new ArrayList<>();
             products.add(QueryProductDetailsParams.Product.newBuilder()
                     .setProductId(REMOVE_ADS_PRODUCT_ID)
                     .setProductType(BillingClient.ProductType.INAPP)
-                    .build());
-            products.add(QueryProductDetailsParams.Product.newBuilder()
-                    .setProductId(SUPPORTER_PRODUCT_ID)
-                    .setProductType(BillingClient.ProductType.SUBS)
                     .build());
             QueryProductDetailsParams params = QueryProductDetailsParams.newBuilder()
                     .setProductList(products)
                     .build();
             billingClient.queryProductDetailsAsync(params, new ProductDetailsResponseListener() {
                 @Override public void onProductDetailsResponse(BillingResult billingResult, QueryProductDetailsResult result) {
+                    removeAdsProductDetailsQueryRunning = false;
                     if (billingResult == null || billingResult.getResponseCode() != BillingClient.BillingResponseCode.OK || result == null) {
                         if (pendingRemoveAdsPurchaseLaunch) {
                             pendingRemoveAdsPurchaseLaunch = false;
-                            showBillingFailure("queryProductDetailsAsync", billingResult);
-                        } else if (pendingSupporterPurchaseLaunch) {
-                            pendingSupporterPurchaseLaunch = false;
-                            showBillingFailure("queryProductDetailsAsync", billingResult);
+                            showBillingFailure("queryRemoveAdsProductDetails", billingResult);
                         } else {
-                            logBillingResult("queryProductDetailsAsync", billingResult);
+                            logBillingResult("queryRemoveAdsProductDetails", billingResult);
                         }
                         return;
                     }
                     List<ProductDetails> list = result.getProductDetailsList();
                     ProductDetails matchingProduct = null;
-                    ProductDetails matchingSupporter = null;
                     if (list != null) {
                         for (ProductDetails details : list) {
                             if (details != null && REMOVE_ADS_PRODUCT_ID.equals(details.getProductId())) {
                                 matchingProduct = details;
-                            } else if (details != null && SUPPORTER_PRODUCT_ID.equals(details.getProductId())) {
-                                matchingSupporter = details;
                             }
                         }
                     }
                     removeAdsProductDetails = matchingProduct;
-                    supporterProductDetails = matchingSupporter;
                     List<UnfetchedProduct> unfetchedProducts = result.getUnfetchedProductList();
                     if (unfetchedProducts != null) {
                         for (UnfetchedProduct product : unfetchedProducts) {
-                            if (product != null && (REMOVE_ADS_PRODUCT_ID.equals(product.getProductId())
-                                    || SUPPORTER_PRODUCT_ID.equals(product.getProductId()))) {
+                            if (product != null && REMOVE_ADS_PRODUCT_ID.equals(product.getProductId())) {
                                 android.util.Log.w(
                                         "ToxicBilling",
                                         product.getProductId() + " unfetched: status=" + product.getStatusCode()
@@ -1185,6 +1207,70 @@ public class MainActivity extends Activity {
                     } else if (pendingRemoveAdsPurchaseLaunch) {
                         runOnUiThread(() -> launchRemoveAdsPurchase());
                     }
+                }
+            });
+        } catch(Exception e) {
+            removeAdsProductDetailsQueryRunning = false;
+            android.util.Log.w("ToxicBilling", "queryRemoveAdsProductDetails exception", e);
+            if (pendingRemoveAdsPurchaseLaunch) {
+                pendingRemoveAdsPurchaseLaunch = false;
+                showBillingFailure("queryRemoveAdsProductDetails", null);
+            }
+        }
+    }
+
+    private void querySupporterProductDetails() {
+        try {
+            if (billingClient == null || !billingClient.isReady() || supporterProductDetailsQueryRunning) return;
+            supporterProductDetailsQueryRunning = true;
+            ArrayList<QueryProductDetailsParams.Product> products = new ArrayList<>();
+            products.add(QueryProductDetailsParams.Product.newBuilder()
+                    .setProductId(SUPPORTER_PRODUCT_ID)
+                    .setProductType(BillingClient.ProductType.SUBS)
+                    .build());
+            QueryProductDetailsParams params = QueryProductDetailsParams.newBuilder()
+                    .setProductList(products)
+                    .build();
+            billingClient.queryProductDetailsAsync(params, new ProductDetailsResponseListener() {
+                @Override public void onProductDetailsResponse(BillingResult billingResult, QueryProductDetailsResult result) {
+                    supporterProductDetailsQueryRunning = false;
+                    if (billingResult == null || billingResult.getResponseCode() != BillingClient.BillingResponseCode.OK || result == null) {
+                        if (pendingSupporterPurchaseLaunch) {
+                            pendingSupporterPurchaseLaunch = false;
+                            if (billingResult != null
+                                    && billingResult.getResponseCode() == BillingClient.BillingResponseCode.ITEM_UNAVAILABLE) {
+                                runOnUiThread(() -> toast(t(R.string.supporter_unavailable)));
+                            } else {
+                                showBillingFailure("querySupporterProductDetails", billingResult);
+                            }
+                        } else {
+                            logBillingResult("querySupporterProductDetails", billingResult);
+                        }
+                        return;
+                    }
+                    ProductDetails matchingSupporter = null;
+                    List<ProductDetails> list = result.getProductDetailsList();
+                    if (list != null) {
+                        for (ProductDetails details : list) {
+                            if (details != null && SUPPORTER_PRODUCT_ID.equals(details.getProductId())) {
+                                matchingSupporter = details;
+                                break;
+                            }
+                        }
+                    }
+                    supporterProductDetails = matchingSupporter;
+                    List<UnfetchedProduct> unfetchedProducts = result.getUnfetchedProductList();
+                    if (unfetchedProducts != null) {
+                        for (UnfetchedProduct product : unfetchedProducts) {
+                            if (product != null && SUPPORTER_PRODUCT_ID.equals(product.getProductId())) {
+                                android.util.Log.w(
+                                        "ToxicBilling",
+                                        product.getProductId() + " unfetched: status=" + product.getStatusCode()
+                                                + ", type=" + product.getProductType()
+                                );
+                            }
+                        }
+                    }
                     if (pendingSupporterPurchaseLaunch && supporterProductDetails == null) {
                         pendingSupporterPurchaseLaunch = false;
                         runOnUiThread(() -> toast(t(R.string.supporter_unavailable)));
@@ -1193,7 +1279,14 @@ public class MainActivity extends Activity {
                     }
                 }
             });
-        } catch(Exception ignored) {}
+        } catch(Exception e) {
+            supporterProductDetailsQueryRunning = false;
+            android.util.Log.w("ToxicBilling", "querySupporterProductDetails exception", e);
+            if (pendingSupporterPurchaseLaunch) {
+                pendingSupporterPurchaseLaunch = false;
+                showBillingFailure("querySupporterProductDetails", null);
+            }
+        }
     }
 
     private void queryRemoveAdsPurchases() {
@@ -1387,13 +1480,7 @@ public class MainActivity extends Activity {
             }
             if (supporterProductDetails == null) {
                 pendingSupporterPurchaseLaunch = true;
-                queryRemoveAdsProductDetails();
-                uiHandler.postDelayed(() -> {
-                    if (pendingSupporterPurchaseLaunch && supporterProductDetails != null) launchSupporterPurchase();
-                }, 900L);
-                uiHandler.postDelayed(() -> {
-                    if (pendingSupporterPurchaseLaunch && supporterProductDetails == null) toast(t(R.string.purchase_loading));
-                }, 2200L);
+                querySupporterProductDetails();
                 return;
             }
             ProductDetails.SubscriptionOfferDetails offer = basicSupporterOffer();
@@ -1485,8 +1572,6 @@ public class MainActivity extends Activity {
             if (removeAdsProductDetails == null) {
                 pendingRemoveAdsPurchaseLaunch = true;
                 queryRemoveAdsProductDetails();
-                uiHandler.postDelayed(() -> { if (pendingRemoveAdsPurchaseLaunch && removeAdsProductDetails != null) launchRemoveAdsPurchase(); }, 900L);
-                uiHandler.postDelayed(() -> { if (pendingRemoveAdsPurchaseLaunch && removeAdsProductDetails == null) toast(t(R.string.purchase_loading)); }, 2200L);
                 return;
             }
             pendingRemoveAdsPurchaseLaunch = false;
@@ -2456,6 +2541,11 @@ public class MainActivity extends Activity {
         resultWrap = new LinearLayout(this);
         resultWrap.setOrientation(LinearLayout.VERTICAL);
         root.addView(resultWrap, lp(-1, -2, 0, 0, 0, 0));
+
+        sponsorsStartSpacer = new Space(this);
+        root.addView(sponsorsStartSpacer, new LinearLayout.LayoutParams(-1, 0));
+        updateSponsorsStartSpacing();
+
         sponsorsSection = buildSponsorsSection();
         root.addView(sponsorsSection, lp(-1, -2, 0, 4, 0, 18));
         setContentView(screen);
@@ -2487,13 +2577,13 @@ public class MainActivity extends Activity {
     private LinearLayout buildSponsorsSection() {
         LinearLayout section = neutralCard(dp(24));
         section.setOrientation(LinearLayout.VERTICAL);
-        section.setPadding(dp(16), dp(15), dp(16), dp(16));
+        section.setPadding(dp(14), dp(11), dp(14), dp(11));
         if (Build.VERSION.SDK_INT >= 21) section.setElevation(dp(4));
 
         LinearLayout heading = new LinearLayout(this);
         heading.setOrientation(LinearLayout.HORIZONTAL);
         heading.setGravity(Gravity.CENTER_VERTICAL);
-        section.addView(heading, lp(-1, dp(42), 0, 0, 0, 10));
+        section.addView(heading, lp(-1, dp(38), 0, 0, 0, 4));
 
         TextView title = text(t(R.string.sponsors_title), 17, lightTheme ? Color.rgb(40, 32, 50) : Color.WHITE, true);
         title.setGravity(Gravity.CENTER_VERTICAL);
@@ -2511,20 +2601,67 @@ public class MainActivity extends Activity {
         heading.addView(sponsorsSubscribeButton, new LinearLayout.LayoutParams(dp(38), dp(38)));
         updateSponsorsSubscribeButton();
 
+        sponsorsCarouselHost = new FrameLayout(this);
+        sponsorsCarouselHost.setClipChildren(false);
+        sponsorsCarouselHost.setClipToPadding(false);
+        section.addView(sponsorsCarouselHost, lp(-1, dp(96), 0, 0, 0, 0));
+
         HorizontalScrollView carousel = new HorizontalScrollView(this);
         carousel.setHorizontalScrollBarEnabled(false);
         carousel.setFillViewport(false);
+        carousel.setClipChildren(false);
+        carousel.setClipToPadding(false);
         sponsorsCarouselRow = new LinearLayout(this);
         sponsorsCarouselRow.setOrientation(LinearLayout.HORIZONTAL);
         sponsorsCarouselRow.setGravity(Gravity.CENTER_VERTICAL);
+        sponsorsCarouselRow.setPadding(dp(2), 0, dp(6), 0);
         carousel.addView(sponsorsCarouselRow, new HorizontalScrollView.LayoutParams(-2, -1));
-        section.addView(carousel, lp(-1, dp(122), 0, 0, 0, 0));
+        sponsorsCarouselHost.addView(carousel, new FrameLayout.LayoutParams(-1, -1));
 
-        sponsorsEmptyText = text(t(R.string.sponsors_loading), 13, themeMutedColor(), false);
-        sponsorsEmptyText.setGravity(Gravity.CENTER);
-        sponsorsEmptyText.setPadding(dp(8), dp(8), dp(8), dp(8));
-        section.addView(sponsorsEmptyText, lp(-1, dp(48), 0, 0, 0, 0));
+        sponsorsLoadingIndicator = new ProgressBar(this, null, android.R.attr.progressBarStyleSmall);
+        sponsorsLoadingIndicator.setIndeterminate(true);
+        if (Build.VERSION.SDK_INT >= 21) {
+            sponsorsLoadingIndicator.setIndeterminateTintList(ColorStateList.valueOf(purple));
+        }
+        FrameLayout.LayoutParams spinnerParams = new FrameLayout.LayoutParams(dp(30), dp(30), Gravity.CENTER);
+        sponsorsCarouselHost.addView(sponsorsLoadingIndicator, spinnerParams);
+
+        String cached = sponsorsCacheJson;
+        if (cached == null) {
+            setSponsorsLoadingVisible(true);
+        } else {
+            try {
+                renderSponsors(new JSONArray(cached));
+            } catch(Exception ignored) {
+                sponsorsCacheJson = null;
+                setSponsorsLoadingVisible(true);
+            }
+        }
         return section;
+    }
+
+    private void updateSponsorsStartSpacing() {
+        if (sponsorsStartSpacer == null) return;
+        ViewGroup.LayoutParams rawParams = sponsorsStartSpacer.getLayoutParams();
+        LinearLayout.LayoutParams params = rawParams instanceof LinearLayout.LayoutParams
+                ? (LinearLayout.LayoutParams) rawParams
+                : new LinearLayout.LayoutParams(-1, 0);
+        params.height = 0;
+        params.weight = activeRenderedProfile == null ? 1f : 0f;
+        sponsorsStartSpacer.setLayoutParams(params);
+    }
+
+    private void setSponsorsLoadingVisible(boolean visible) {
+        if (sponsorsLoadingIndicator == null) return;
+        if (visible && sponsorsCarouselHost != null) sponsorsCarouselHost.setVisibility(View.VISIBLE);
+        sponsorsLoadingIndicator.setVisibility(visible ? View.VISIBLE : View.GONE);
+    }
+
+    private void finishSponsorsDisplay(boolean hasSponsors) {
+        setSponsorsLoadingVisible(false);
+        if (sponsorsCarouselHost != null) {
+            sponsorsCarouselHost.setVisibility(hasSponsors ? View.VISIBLE : View.GONE);
+        }
     }
 
     private void updateSponsorsSubscribeButton() {
@@ -2540,12 +2677,19 @@ public class MainActivity extends Activity {
     }
 
     private void refreshSponsors() {
-        if (sponsorsLoading) return;
+        if (sponsorsLoading) {
+            runOnUiThread(() -> {
+                if (sponsorsCacheJson == null
+                        && (sponsorsCarouselRow == null || sponsorsCarouselRow.getChildCount() == 0)) {
+                    setSponsorsLoadingVisible(true);
+                }
+            });
+            return;
+        }
         sponsorsLoading = true;
         runOnUiThread(() -> {
-            if (sponsorsEmptyText != null && (sponsorsCarouselRow == null || sponsorsCarouselRow.getChildCount() == 0)) {
-                sponsorsEmptyText.setText(t(R.string.sponsors_loading));
-                sponsorsEmptyText.setVisibility(View.VISIBLE);
+            if (sponsorsCarouselRow == null || sponsorsCarouselRow.getChildCount() == 0) {
+                setSponsorsLoadingVisible(true);
             }
         });
         executor.execute(() -> {
@@ -2554,14 +2698,12 @@ public class MainActivity extends Activity {
                 JSONArray sponsors = response.optJSONArray("sponsors");
                 if (sponsors == null) sponsors = response.optJSONArray("items");
                 final JSONArray finalSponsors = sponsors == null ? new JSONArray() : sponsors;
+                sponsorsCacheJson = finalSponsors.toString();
                 runOnUiThread(() -> renderSponsors(finalSponsors));
             } catch(Exception error) {
-                runOnUiThread(() -> {
-                    if (sponsorsCarouselRow != null && sponsorsCarouselRow.getChildCount() == 0 && sponsorsEmptyText != null) {
-                        sponsorsEmptyText.setText(t(R.string.sponsors_unavailable));
-                        sponsorsEmptyText.setVisibility(View.VISIBLE);
-                    }
-                });
+                runOnUiThread(() -> finishSponsorsDisplay(
+                        sponsorsCarouselRow != null && sponsorsCarouselRow.getChildCount() > 0
+                ));
             } finally {
                 sponsorsLoading = false;
             }
@@ -2581,53 +2723,70 @@ public class MainActivity extends Activity {
             if (nick.isEmpty() || figure.isEmpty()) continue;
             sponsorsCarouselRow.addView(sponsorCard(nick, hotel, figure, uniqueId));
         }
-        boolean empty = sponsorsCarouselRow.getChildCount() == 0;
-        if (sponsorsEmptyText != null) {
-            sponsorsEmptyText.setText(t(R.string.sponsors_empty));
-            sponsorsEmptyText.setVisibility(empty ? View.VISIBLE : View.GONE);
-        }
+        finishSponsorsDisplay(sponsorsCarouselRow.getChildCount() > 0);
     }
 
     private View sponsorCard(String nick, String hotel, String figure, String uniqueId) {
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setGravity(Gravity.CENTER);
-        card.setPadding(dp(8), dp(6), dp(8), dp(7));
-        card.setBackground(round(
-                lightTheme ? Color.rgb(248, 246, 251) : Color.rgb(17, 14, 24),
-                dp(17),
-                lightTheme ? Color.rgb(223, 216, 233) : Color.rgb(62, 49, 79),
-                1
+        LinearLayout item = new LinearLayout(this);
+        item.setOrientation(LinearLayout.VERTICAL);
+        item.setGravity(Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        item.setPadding(dp(3), 0, dp(3), 0);
+        item.setBackgroundColor(Color.TRANSPARENT);
+        item.setClipChildren(false);
+        LinearLayout.LayoutParams itemParams = new LinearLayout.LayoutParams(dp(88), dp(96));
+        itemParams.rightMargin = dp(7);
+        item.setLayoutParams(itemParams);
+
+        FrameLayout avatarHost = new FrameLayout(this);
+        avatarHost.setClipChildren(false);
+        avatarHost.setClipToPadding(false);
+        item.addView(avatarHost, new LinearLayout.LayoutParams(dp(80), dp(72)));
+
+        FrameLayout ring = new FrameLayout(this);
+        ring.setBackground(round(
+                Color.TRANSPARENT,
+                dp(999),
+                lightTheme ? Color.rgb(124, 58, 189) : Color.rgb(178, 120, 255),
+                3
         ));
-        LinearLayout.LayoutParams cardParams = new LinearLayout.LayoutParams(dp(108), dp(116));
-        cardParams.rightMargin = dp(10);
-        card.setLayoutParams(cardParams);
+        FrameLayout.LayoutParams ringParams = new FrameLayout.LayoutParams(dp(70), dp(70), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        avatarHost.addView(ring, ringParams);
 
         ImageView head = new ImageView(this);
         head.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        head.setPadding(dp(3), dp(3), dp(3), dp(3));
         String headUrl = "https://" + hotelDomain(hotel)
                 + "/habbo-imaging/avatarimage?figure=" + enc(figure)
                 + "&size=m&direction=2&head_direction=2&headonly=1";
         loadHeadImage(head, headUrl);
-        card.addView(head, new LinearLayout.LayoutParams(dp(66), dp(72)));
+        ring.addView(head, new FrameLayout.LayoutParams(-1, -1));
 
-        LinearLayout identity = new LinearLayout(this);
-        identity.setOrientation(LinearLayout.HORIZONTAL);
-        identity.setGravity(Gravity.CENTER);
-        card.addView(identity, lp(-1, dp(28), 0, 1, 0, 0));
+        FrameLayout flagBadge = new FrameLayout(this);
+        flagBadge.setBackground(round(
+                lightTheme ? Color.WHITE : Color.rgb(26, 19, 37),
+                dp(999),
+                lightTheme ? Color.rgb(124, 58, 189) : Color.rgb(178, 120, 255),
+                2
+        ));
+        FrameLayout.LayoutParams flagBadgeParams = new FrameLayout.LayoutParams(dp(29), dp(29), Gravity.TOP | Gravity.RIGHT);
+        flagBadgeParams.topMargin = dp(1);
+        flagBadgeParams.rightMargin = dp(1);
+        avatarHost.addView(flagBadge, flagBadgeParams);
         ImageView flag = new ImageView(this);
         flag.setImageDrawable(new HotelFlagDrawable(hotel));
-        LinearLayout.LayoutParams flagParams = new LinearLayout.LayoutParams(dp(20), dp(13));
-        flagParams.rightMargin = dp(5);
-        identity.addView(flag, flagParams);
+        flagBadge.addView(flag, new FrameLayout.LayoutParams(dp(20), dp(13), Gravity.CENTER));
+
         TextView name = habboText(nick, 12, true);
         name.setSingleLine(true);
         name.setEllipsize(TextUtils.TruncateAt.END);
+        name.setGravity(Gravity.CENTER);
+        name.setIncludeFontPadding(false);
         name.setTextColor(lightTheme ? Color.rgb(39, 31, 47) : Color.WHITE);
-        identity.addView(name, new LinearLayout.LayoutParams(0, -2, 1));
-        card.setContentDescription(nick + " - " + hotel.toUpperCase(Locale.ROOT));
-        card.setOnClickListener(v -> openProfileReference(nick, uniqueId, figure, hotel));
-        return card;
+        item.addView(name, new LinearLayout.LayoutParams(dp(84), dp(23)));
+
+        item.setContentDescription(nick + " - " + hotel.toUpperCase(Locale.ROOT));
+        item.setOnClickListener(v -> openProfileReference(nick, uniqueId, figure, hotel));
+        return item;
     }
 
     private void showSupporterOfferDialog() {
@@ -3688,6 +3847,7 @@ public class MainActivity extends Activity {
         resultWrap.removeAllViews();
         LinearLayout c = sectionCard(t(R.string.ready_search), 0, false);
         c.addView(centerNote(t(R.string.start_note)));
+        updateSponsorsStartSpacing();
     }
 
     private void setSearchTextProgrammatically(String value) {
@@ -4821,6 +4981,7 @@ public class MainActivity extends Activity {
     private void renderProfile(ProfileResult r) {
         normalizeProfileState(r);
         activeRenderedProfile = r;
+        updateSponsorsStartSpacing();
         rememberOpenedProfile(r);
         currentProfilePrivate = r != null && (r.privateProfile || r.banned);
         profileAvatarTutorialTarget = null;
@@ -7792,6 +7953,7 @@ private int loadingProgressFor(String message) {
         ProfileResult keep = activeRenderedProfile;
         buildUi();
         if (keep != null) renderProfile(keep);
+        refreshSponsors();
     }
 
     private void clearProfileCache() {
