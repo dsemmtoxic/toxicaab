@@ -58,7 +58,7 @@ public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_PROXY_API = "https://atoxic.com.br/habbodex.php";
     private static final String HABBOWIDGETS_BASE = "https://www.habbowidgets.com";
-    private static final String APP_VERSION = "1.3.15";
+    private static final String APP_VERSION = "1.3.16";
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
     // os ícones nunca desapareçam por bloqueio de rede ou cache externo.
@@ -133,7 +133,9 @@ public class MainActivity extends Activity {
     private boolean visualItemTutorialScheduled = false;
     private boolean visualItemTutorialRunning = false;
     private static final long PROFILE_REFRESH_COOLDOWN_MS = 60L * 1000L;
+    private static final long PROFILE_SEARCH_COOLDOWN_MS = 20L * 1000L;
     private static final long FAVORITES_REFRESH_COOLDOWN_MS = 15L * 1000L;
+    private long lastProfileSearchStartedAt = 0L;
     private ScrollView mainScroll;
     private LinearLayout pullRefreshChip;
     private CircularPullProgressView pullRefreshSpinner;
@@ -203,6 +205,7 @@ public class MainActivity extends Activity {
     private Runnable rewardedRetryRunnable = null;
     private TextView rewardAdBtn;
     private TextView rewardAdTimeLabel;
+    private ImageView selectedHotelFlag;
     private LinearLayout sponsorsSection;
     private FrameLayout sponsorsCarouselHost;
     private HorizontalScrollView sponsorsCarouselScroll;
@@ -210,8 +213,8 @@ public class MainActivity extends Activity {
     private ProgressBar sponsorsLoadingIndicator;
     private View sponsorsSubscribeButton;
     private TextView sponsorsActionIcon;
-    private TextView sponsorsActionLabel;
     private View sponsorsActionGlow;
+    private static final long SPONSOR_GLOW_CYCLE_MS = 7_000L;
     private FrameLayout startNativeAdContainer;
     private NativeAd startNativeAd;
     private boolean startNativeAdLoading = false;
@@ -2602,7 +2605,7 @@ public class MainActivity extends Activity {
         subtitle.setLetterSpacing(0.015f);
         subtitleRow.addView(subtitle, new LinearLayout.LayoutParams(-2, -2));
 
-        ImageView selectedHotelFlag = new ImageView(this);
+        selectedHotelFlag = new ImageView(this);
         selectedHotelFlag.setImageDrawable(new HotelFlagDrawable(currentHotelKey));
         LinearLayout.LayoutParams selectedFlagLp = new LinearLayout.LayoutParams(dp(28), dp(18));
         selectedFlagLp.leftMargin = dp(8);
@@ -2801,11 +2804,6 @@ public class MainActivity extends Activity {
             sponsorsActionIcon.setText(supporterActive ? "✦" : "+");
             sponsorsActionIcon.setTextSize(supporterActive ? 26 : 34);
         }
-        if (sponsorsActionLabel != null) {
-            sponsorsActionLabel.setText(t(supporterActive
-                    ? R.string.sponsor_manage_carousel
-                    : R.string.sponsor_join_carousel));
-        }
         if (sponsorsActionGlow != null) sponsorsActionGlow.invalidate();
         sponsorsSubscribeButton.setContentDescription(t(supporterActive
                 ? R.string.supporter_manage
@@ -2856,7 +2854,6 @@ public class MainActivity extends Activity {
         sponsorsCarouselRow.removeAllViews();
         sponsorsSubscribeButton = null;
         sponsorsActionIcon = null;
-        sponsorsActionLabel = null;
         sponsorsActionGlow = null;
         for (int i = 0; i < sponsors.length(); i++) {
             JSONObject sponsor = sponsors.optJSONObject(i);
@@ -2890,7 +2887,7 @@ public class MainActivity extends Activity {
         avatarHost.setClipToPadding(false);
         item.addView(avatarHost, new LinearLayout.LayoutParams(dp(82), dp(80)));
 
-        SponsorHeadGlowView glow = new SponsorHeadGlowView(this, false);
+        SponsorHeadGlowView glow = new SponsorHeadGlowView(this);
         FrameLayout.LayoutParams glowParams = new FrameLayout.LayoutParams(dp(74), dp(74), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
         avatarHost.addView(glow, glowParams);
 
@@ -2922,7 +2919,7 @@ public class MainActivity extends Activity {
         item.addView(name, new LinearLayout.LayoutParams(dp(86), dp(23)));
 
         item.setContentDescription(nick + " - " + hotel.toUpperCase(Locale.ROOT));
-        item.setOnClickListener(v -> openProfileReference(nick, uniqueId, figure, hotel));
+        item.setOnClickListener(v -> openSponsorProfile(nick, uniqueId, figure, hotel));
         return item;
     }
 
@@ -2942,7 +2939,7 @@ public class MainActivity extends Activity {
         avatarHost.setClipToPadding(false);
         item.addView(avatarHost, new LinearLayout.LayoutParams(dp(82), dp(80)));
 
-        SponsorHeadGlowView glow = new SponsorHeadGlowView(this, true);
+        SponsorHeadGlowView glow = new SponsorHeadGlowView(this);
         sponsorsActionGlow = glow;
         FrameLayout.LayoutParams glowParams = new FrameLayout.LayoutParams(dp(74), dp(74), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
         avatarHost.addView(glow, glowParams);
@@ -2953,16 +2950,6 @@ public class MainActivity extends Activity {
         FrameLayout.LayoutParams iconParams = new FrameLayout.LayoutParams(dp(70), dp(70), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
         iconParams.bottomMargin = dp(2);
         avatarHost.addView(sponsorsActionIcon, iconParams);
-
-        sponsorsActionLabel = habboText(t(supporterActive
-                ? R.string.sponsor_manage_carousel
-                : R.string.sponsor_join_carousel), 11, true);
-        sponsorsActionLabel.setSingleLine(true);
-        sponsorsActionLabel.setEllipsize(TextUtils.TruncateAt.END);
-        sponsorsActionLabel.setGravity(Gravity.CENTER);
-        sponsorsActionLabel.setIncludeFontPadding(false);
-        sponsorsActionLabel.setTextColor(lightTheme ? Color.rgb(79, 48, 101) : Color.rgb(232, 216, 255));
-        item.addView(sponsorsActionLabel, new LinearLayout.LayoutParams(dp(86), dp(23)));
 
         sponsorsSubscribeButton = item;
         updateSponsorsSubscribeButton();
@@ -4048,6 +4035,10 @@ public class MainActivity extends Activity {
     }
 
     private void search() {
+        search(false);
+    }
+
+    private void search(boolean searchSlotClaimed) {
         suppressSuggestions = true;
         suggestionRequestId++;
         setSuggestionsVisible(false);
@@ -4073,6 +4064,8 @@ public class MainActivity extends Activity {
                 return;
             }
         }
+
+        if (!searchSlotClaimed && !claimProfileSearchSlot()) return;
 
         clearSearchFocus();
         setSuggestionsVisible(false);
@@ -4158,12 +4151,67 @@ public class MainActivity extends Activity {
         return token == activeSearchToken;
     }
 
+    private boolean claimProfileSearchSlot() {
+        long now = System.currentTimeMillis();
+        long wait = PROFILE_SEARCH_COOLDOWN_MS - (now - lastProfileSearchStartedAt);
+        if (lastProfileSearchStartedAt > 0L && wait > 0L) {
+            hidePullRefreshIndicator();
+            toast(tr(R.string.wait_new_search, Math.max(1, (int)Math.ceil(wait / 1000.0))));
+            return false;
+        }
+        lastProfileSearchStartedAt = now;
+        return true;
+    }
+
+    private boolean isSameLoadedProfileReference(String name, String uniqueId, String hotelKey) {
+        if (activeRenderedProfile == null) return false;
+        String targetHotel = normalizeHotelKey(hotelKey);
+        String loadedHotel = normalizeHotelKey(activeRenderedProfile.hotelKey);
+        if (!targetHotel.equals(loadedHotel)) return false;
+
+        String targetId = normalizeNickKey(uniqueId);
+        String loadedId = normalizeNickKey(activeRenderedProfile.uniqueId);
+        if (!targetId.isEmpty() && !loadedId.isEmpty()) return targetId.equals(loadedId);
+
+        String targetName = normalizeNickKey(name);
+        String loadedName = normalizeNickKey(
+                activeRenderedProfile.name == null || activeRenderedProfile.name.trim().isEmpty()
+                        ? activeRenderedProfile.searchedNick
+                        : activeRenderedProfile.name
+        );
+        return !targetName.isEmpty() && targetName.equals(loadedName);
+    }
+
+    private boolean blockRepeatedProfileOpen(String name, String uniqueId, String hotelKey) {
+        if (!isSameLoadedProfileReference(name, uniqueId, hotelKey)) return false;
+        long wait = PROFILE_REFRESH_COOLDOWN_MS - (System.currentTimeMillis() - lastSameNickRefreshAt);
+        if (wait <= 0L) return false;
+        hidePullRefreshIndicator();
+        toast(tr(R.string.wait_refresh, Math.max(1, (int)Math.ceil(wait / 1000.0))));
+        return true;
+    }
+
+    private void openSponsorProfile(String name, String uniqueId, String figure, String hotelKey) {
+        openProfileReference(name, uniqueId, figure, hotelKey);
+    }
+
+    private void updateSelectedHotelHeaderFlag() {
+        if (selectedHotelFlag == null) return;
+        selectedHotelFlag.setImageDrawable(new HotelFlagDrawable(currentHotelKey));
+        selectedHotelFlag.setContentDescription(currentHotelKey.toUpperCase(Locale.ROOT));
+        selectedHotelFlag.invalidate();
+    }
+
     private void openProfileReference(String name, String uniqueId, String figure, String hotelKey) {
         String hotel = normalizeHotelKey(hotelKey);
+        String targetHotel = hotel.isEmpty() ? currentHotelKey : hotel;
+        if (blockRepeatedProfileOpen(name, uniqueId, targetHotel)) return;
+        if (!claimProfileSearchSlot()) return;
         if (!hotel.isEmpty()) {
             currentHotelKey = hotel;
             getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PREF_HOTEL, currentHotelKey).apply();
         }
+        updateSelectedHotelHeaderFlag();
         String id = uniqueId == null ? "" : uniqueId.trim();
         loadingProfileUniqueIdHint = id;
         loadingProfileFigureHint = figure == null ? "" : figure.trim();
@@ -4172,11 +4220,15 @@ public class MainActivity extends Activity {
         if (display.isEmpty()) display = id;
         setSearchTextProgrammatically(display);
         clearSearchFocus();
-        if (!id.isEmpty()) searchByUniqueId(id, display);
-        else search();
+        if (!id.isEmpty()) searchByUniqueId(id, display, true);
+        else search(true);
     }
 
     private void searchByUniqueId(final String uniqueId, final String displayNick) {
+        searchByUniqueId(uniqueId, displayNick, false);
+    }
+
+    private void searchByUniqueId(final String uniqueId, final String displayNick, boolean searchSlotClaimed) {
         suppressSuggestions = true;
         suggestionRequestId++;
         setSuggestionsVisible(false);
@@ -4194,6 +4246,12 @@ public class MainActivity extends Activity {
             toast(t(R.string.same_profile_loading));
             return;
         }
+
+        if (!searchInProgress && blockRepeatedProfileOpen(shownNick, id, currentHotelKey)) {
+            return;
+        }
+
+        if (!searchSlotClaimed && !claimProfileSearchSlot()) return;
 
         clearSearchFocus();
         setSuggestionsVisible(false);
@@ -4274,11 +4332,6 @@ public class MainActivity extends Activity {
         r.searchedNick = fallbackName == null || fallbackName.trim().isEmpty() ? uniqueId : fallbackName.trim();
         r.uniqueId = uniqueId == null ? "" : uniqueId.trim();
         r.hotelKey = currentHotelKey;
-        Future<JSONObject> previousNamesFuture = null;
-        if (!r.searchedNick.isEmpty() && !r.searchedNick.toLowerCase(Locale.ROOT).startsWith("hh")) {
-            final String lookupName = r.searchedNick;
-            previousNamesFuture = executor.submit(() -> fetchHabbodexSuggestions(lookupName));
-        }
 
         JSONObject officialUser = r.uniqueId.isEmpty() ? null : validProfileObject(
                 tryJson(habboApiUrl("/api/public/users/" + enc(r.uniqueId)))
@@ -4288,7 +4341,12 @@ public class MainActivity extends Activity {
         JSONObject base = validProfileObject(officialUser);
         JSONObject dexProfile = null;
         if (base == null && !r.uniqueId.isEmpty()) {
-            dexProfile = validProfileObject(unwrap(tryJson(complementProfileByUniqueUrl(r.uniqueId))));
+            dexProfile = fetchDirectHabbodexProfile(r.uniqueId);
+            if (dexProfile == null) {
+                dexProfile = validProfileObject(
+                        unwrap(tryJson(complementProfileByUniqueUrl(r.uniqueId)))
+                );
+            }
             if (dexProfile != null && !isSameProfileId(r.uniqueId, dexProfile)) dexProfile = null;
             base = validProfileObject(dexProfile);
         }
@@ -4320,18 +4378,7 @@ public class MainActivity extends Activity {
         if (r.starGems.isEmpty()) r.starGems = firstText(dexProfile, "starGemCount", "starGems");
         r.totalBadges = firstText(base, "totalBadges", "badgeCount", "badgesCount", "badgesTotal");
         if (r.totalBadges.isEmpty()) r.totalBadges = firstText(dexProfile, "totalBadges", "badgeCount", "badgesCount", "badgesTotal");
-        JSONObject namesPayload = null;
-        if (previousNamesFuture != null) {
-            try { namesPayload = previousNamesFuture.get(15, TimeUnit.SECONDS); }
-            catch(Exception ignored) { previousNamesFuture.cancel(true); }
-        }
-        if (namesPayload == null && previousNamesFuture == null && !r.name.isEmpty()) {
-            namesPayload = fetchHabbodexSuggestions(r.name);
-        }
-        r.previousNames = mergeLists(
-                extractList(dexProfile, "previousNames"),
-                extractPreviousNamesFromSuggest(namesPayload, r.name)
-        );
+        r.previousNames = extractList(dexProfile, "previousNames");
         r.selectedBadges = mergeLists(extractList(officialUser, "selectedBadges"), extractList(dexProfile, "selectedBadges"));
         r.dexProfile = dexProfile;
         r.officialProfile = officialProfile;
@@ -4349,17 +4396,14 @@ public class MainActivity extends Activity {
         r.searchedNick = nick;
         r.hotelKey = currentHotelKey;
 
-        // Nomes anteriores vêm diretamente do proxy habbodex.php. A chamada
-        // roda em paralelo à API oficial para não atrasar o perfil aberto.
-        Future<JSONObject> suggestFuture = executor.submit(
-                () -> fetchHabbodexSuggestions(nick)
-        );
-
         // Uma busca normal começa exclusivamente pela API oficial. O servidor
         // complementar só participa desta fase quando o nome não é encontrado.
         JSONObject habboPublic = validProfileObject(
                 tryJson(habboApiUrl("/api/public/users?name=" + enc(nick)))
         );
+        Future<JSONObject> suggestFuture = habboPublic == null
+                ? executor.submit(() -> fetchHabbodexSuggestions(nick))
+                : null;
         if (habboPublic != null) {
             updateLoadingProfileFigureHint(
                     firstText(habboPublic, "figureString", "figure", "figure_string"),
@@ -4398,8 +4442,10 @@ public class MainActivity extends Activity {
                 }
             }
         }
-        try { suggest = suggestFuture.get(15, TimeUnit.SECONDS); }
-        catch(Exception ignored) { suggestFuture.cancel(true); }
+        if (suggestFuture != null) {
+            try { suggest = suggestFuture.get(30, TimeUnit.SECONDS); }
+            catch(Exception ignored) { suggestFuture.cancel(true); }
+        }
 
         JSONObject base = firstObject(habboPublic, complementByName);
         if (base == null) {
@@ -4472,6 +4518,15 @@ public class MainActivity extends Activity {
                 new ExecutorCompletionService<>(executor);
         int tasks = 0;
 
+        if (r.name != null && !r.name.trim().isEmpty()) {
+            final String historicalName = r.name.trim();
+            completion.submit(() -> ProfileSectionPayload.object(
+                    "historical_names",
+                    fetchHabbodexSuggestions(historicalName)
+            ));
+            tasks++;
+        }
+
         if (r.officialProfile != null) {
             r.officialProfileAttempted = true;
             applyOfficialProfileData(r, r.officialProfile);
@@ -4502,18 +4557,22 @@ public class MainActivity extends Activity {
         });
         tasks++;
 
-        if (r.dexProfile != null) {
-            applyComplementProfileData(r, r.dexProfile);
-        } else {
-            completion.submit(() -> {
-                JSONObject data = validProfileObject(
-                        unwrap(tryJson(complementProfileByUniqueUrl(r.uniqueId)))
-                );
-                if (data != null && !isSameProfileId(r.uniqueId, data)) data = null;
-                return ProfileSectionPayload.object("complement", data);
-            });
-            tasks++;
-        }
+        // O proxy habbodex.php é a fonte histórica principal. Se ele falhar ou
+        // responder parcialmente, o perfil já existente/api.php completa apenas
+        // o que estiver faltando (especialmente nos perfis privados).
+        final JSONObject existingComplement = r.dexProfile;
+        if (existingComplement != null) applyComplementProfileData(r, existingComplement);
+        final String complementId = r.uniqueId;
+        final boolean includePrivateSections = r.privateProfile;
+        completion.submit(() -> ProfileSectionPayload.object(
+                "complement",
+                fetchPreferredHistoricalComplement(
+                        complementId,
+                        includePrivateSections,
+                        existingComplement
+                )
+        ));
+        tasks++;
 
         int completed = 0;
         while (completed < tasks && isActiveToken(token)) {
@@ -4527,6 +4586,11 @@ public class MainActivity extends Activity {
                     if (payload.object != null) applyOfficialProfileData(r, payload.object);
                 } else if ("official_photos".equals(payload.kind)) {
                     applyOfficialPhotosData(r, payload.items, payload.success);
+                } else if ("historical_names".equals(payload.kind) && payload.object != null) {
+                    r.previousNames = mergeLists(
+                            r.previousNames,
+                            extractPreviousNamesFromSuggest(payload.object, r.name)
+                    );
                 } else if ("complement".equals(payload.kind) && payload.object != null) {
                     applyComplementProfileData(r, payload.object);
                 }
@@ -5188,6 +5252,14 @@ public class MainActivity extends Activity {
     }
 
     private void renderProfile(ProfileResult r) {
+        String renderedHotel = r == null ? "" : normalizeHotelKey(r.hotelKey);
+        if (!renderedHotel.isEmpty() && !renderedHotel.equals(currentHotelKey)) {
+            currentHotelKey = renderedHotel;
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                    .putString(PREF_HOTEL, currentHotelKey)
+                    .apply();
+        }
+        updateSelectedHotelHeaderFlag();
         normalizeProfileState(r);
         activeRenderedProfile = r;
         startScreenVisible = false;
@@ -5468,8 +5540,8 @@ public class MainActivity extends Activity {
         c.addView(sv, lp(-1, dp(Math.min(220, Math.max(64, 68 * Math.min(list.size(), 4)))), 0, 0, 0, 0));
         for (int i=0; i<Math.min(list.size(), 40); i++) {
             JSONObject o = list.get(i);
-            String n = firstText(o, "name");
-            String d = firstText(o, "changedAt");
+            String n = firstText(o, "name", "oldName", "username");
+            String d = firstText(o, "changedAt", "date", "timestamp", "createdAt");
             inner.addView(historyItem(n.isEmpty() ? t(R.string.previous_name_fallback) : n, niceDate(d)));
         }
     }
@@ -5479,7 +5551,7 @@ public class MainActivity extends Activity {
 
         ArrayList<JSONObject> valid = new ArrayList<>();
         for (JSONObject item : list) {
-            String m = firstText(item, "text");
+            String m = firstText(item, "text", "motto", "mission");
             if (!m.isEmpty()) valid.add(item);
         }
         if (valid.isEmpty()) return;
@@ -5499,8 +5571,8 @@ public class MainActivity extends Activity {
         c.addView(sv, lp(-1, dp(Math.min(260, Math.max(74, 76 * Math.min(valid.size(), 4)))), 0, 0, 0, 0));
         for (int i=0; i<valid.size(); i++) {
             JSONObject o = valid.get(i);
-            String m = firstText(o, "text");
-            String d = firstText(o, "changedAt");
+            String m = firstText(o, "text", "motto", "mission");
+            String d = firstText(o, "changedAt", "date", "timestamp", "createdAt");
             inner.addView(historyItem(m, niceDate(d)));
         }
     }
@@ -7007,7 +7079,7 @@ public class MainActivity extends Activity {
         ArrayList<JSONObject> out = new ArrayList<>();
         String q = normalizeNickKey(query);
         if (q.length() < 2 || suggest == null) return out;
-        ArrayList<JSONObject> users = extractList(suggest, null);
+        ArrayList<JSONObject> users = extractSuggestionUsers(suggest);
         for (JSONObject user : users) {
             String current = firstText(user, "name", "username", "habboName");
             String currentKey = normalizeNickKey(current);
@@ -7032,7 +7104,7 @@ public class MainActivity extends Activity {
 
     private JSONObject getExactPreviousNameMatch(JSONObject user, String query) {
         String q = query == null ? "" : query.trim().toLowerCase(Locale.ROOT);
-        for (JSONObject prev : extractList(user, "previousNames")) {
+        for (JSONObject prev : extractPreviousNamesFromUser(user)) {
             String old = firstText(prev, "name", "oldName", "username");
             if (!old.isEmpty() && old.trim().toLowerCase(Locale.ROOT).equals(q)) return prev;
         }
@@ -7363,6 +7435,24 @@ private int loadingProgressFor(String message) {
         return PROFILE_API + "/furnidex/furni/from-figure-string?figureString=" + enc(figure) + "&hotel=" + enc(habbodexHotelCode(currentHotelKey));
     }
 
+    private String habbodexBatchUrl(String uniqueId, boolean includePrivate) {
+        return HABBODEX_PROXY_API
+                + "?action=batch&id=" + enc(uniqueId)
+                + "&includePrivate=" + (includePrivate ? "true" : "false");
+    }
+
+    private String habbodexListUrl(String uniqueId, String endpoint, int page, int limit) {
+        return HABBODEX_PROXY_API
+                + "?action=list&id=" + enc(uniqueId)
+                + "&endpoint=" + enc(endpoint)
+                + "&page=" + Math.max(1, page)
+                + "&limit=" + Math.max(1, Math.min(100, limit));
+    }
+
+    private String habbodexProfileUrl(String uniqueId) {
+        return HABBODEX_PROXY_API + "?action=profile&id=" + enc(uniqueId);
+    }
+
     private String habbodexSuggestUrl(String name) {
         return HABBODEX_PROXY_API
                 + "?action=search&name=" + enc(name)
@@ -7375,11 +7465,202 @@ private int loadingProgressFor(String message) {
                 + "&includePreviousNames=true&hotel=" + enc(habbodexHotelCode(currentHotelKey));
     }
 
+    private JSONObject fetchDirectHabbodexSuggestions(String name) {
+        String clean = name == null ? "" : name.trim();
+        if (clean.isEmpty()) return null;
+        return unwrap(tryJson(habbodexSuggestUrl(clean)));
+    }
+
+    private JSONObject suggestionsFromProfile(JSONObject profile) {
+        if (profile == null) return null;
+        try {
+            JSONObject wrapped = new JSONObject();
+            JSONArray users = new JSONArray();
+            users.put(profile);
+            wrapped.put("habbos", users);
+            return wrapped;
+        } catch(Exception ignored) {
+            return null;
+        }
+    }
+
     private JSONObject fetchHabbodexSuggestions(String name) {
-        JSONObject direct = unwrap(tryJson(habbodexSuggestUrl(name)));
-        if (direct != null && !extractList(direct, null).isEmpty()) return direct;
+        JSONObject direct = fetchDirectHabbodexSuggestions(name);
+        if (direct != null) {
+            if (!extractSuggestionUsers(direct).isEmpty()) return direct;
+            JSONObject single = validProfileObject(direct);
+            if (single != null) return suggestionsFromProfile(single);
+        }
         if (Thread.currentThread().isInterrupted()) return null;
+        // O fallback precisa carregar o perfil complementar: a rota leve de
+        // sugestões do api.php é intencionalmente oficial e não contém histórico.
+        JSONObject fallback = validProfileObject(
+                unwrap(tryJson(complementProfileByNameUrl(name)))
+        );
+        if (fallback != null) return suggestionsFromProfile(fallback);
         return unwrap(tryJson(legacyHabbodexSuggestUrl(name)));
+    }
+
+    private JSONObject fetchDirectHabbodexProfile(String uniqueId) {
+        String cleanId = uniqueId == null ? "" : uniqueId.trim();
+        if (cleanId.isEmpty()) return null;
+        JSONObject profile = validProfileObject(unwrap(tryJson(habbodexProfileUrl(cleanId))));
+        return profile != null && isSameProfileId(cleanId, profile) ? profile : null;
+    }
+
+    private JSONObject fetchDirectHabbodexHistoricalComplement(
+            String uniqueId,
+            boolean includePrivate
+    ) {
+        String cleanId = uniqueId == null ? "" : uniqueId.trim();
+        if (cleanId.isEmpty()) return null;
+
+        Future<JSONObject> batchFuture = executor.submit(
+                () -> unwrap(getJson(habbodexBatchUrl(cleanId, includePrivate)))
+        );
+        Future<JSONObject> previousFriendsFuture = executor.submit(
+                () -> unwrap(getJson(habbodexListUrl(cleanId, "previous-friends", 1, 100)))
+        );
+
+        JSONObject batch;
+        try {
+            batch = batchFuture.get();
+        } catch(Exception error) {
+            batchFuture.cancel(true);
+            previousFriendsFuture.cancel(true);
+            return null;
+        }
+        if (batch == null) return null;
+
+        boolean partial = batch.optBoolean("partial", false);
+        JSONObject errors = batch.optJSONObject("errors");
+        if (errors != null && errors.length() > 0) partial = true;
+
+        JSONObject directProfile = batch.optJSONObject("profile");
+        if (directProfile != null) {
+            String returnedId = firstText(directProfile, "uniqueId", "id", "habboId");
+            if (!returnedId.isEmpty() && !normalizeNickKey(cleanId).equals(normalizeNickKey(returnedId))) {
+                return null;
+            }
+        }
+
+        JSONObject out;
+        try {
+            out = directProfile == null
+                    ? new JSONObject()
+                    : new JSONObject(directProfile.toString());
+            copyJsonArray(batch, "friends", out, "friends");
+            copyJsonArray(batch, "previousMottos", out, "previousMottos");
+            copyJsonArray(batch, "previousStyles", out, "previousStyles");
+            copyJsonArray(batch, "rooms", out, "rooms");
+            copyJsonArray(batch, "groups", out, "groups");
+            copyJsonArray(batch, "photos", out, "photos");
+
+            try {
+                JSONObject previousFriends = previousFriendsFuture.get();
+                if (previousFriends == null) {
+                    partial = true;
+                } else {
+                    ArrayList<JSONObject> removedFriends = extractList(
+                            previousFriends,
+                            "previousFriends"
+                    );
+                    if (removedFriends.isEmpty()) {
+                        removedFriends = extractList(previousFriends, "friends");
+                    }
+                    out.put("previousFriends", jsonArrayFromObjects(
+                            removedFriends
+                    ));
+                }
+            } catch(Exception error) {
+                previousFriendsFuture.cancel(true);
+                partial = true;
+            }
+
+            if (includePrivate
+                    && extractList(out, "friends").isEmpty()
+                    && extractList(out, "rooms").isEmpty()
+                    && extractList(out, "groups").isEmpty()
+                    && extractList(out, "photos").isEmpty()) {
+                // Alguns perfis privados retornam HTTP 200, porém todas as listas
+                // vêm vazias. Trata-se como resposta incompleta para ativar o
+                // complemento do HabboWidgets em api.php.
+                partial = true;
+            }
+
+            out.put("_toxicHabbodexDirect", true);
+            out.put("_toxicHabbodexPartial", partial);
+            return out;
+        } catch(Exception ignored) {
+            return null;
+        }
+    }
+
+    private void copyJsonArray(JSONObject source, String sourceKey, JSONObject target, String targetKey) {
+        if (source == null || target == null) return;
+        JSONArray array = source.optJSONArray(sourceKey);
+        if (array == null) return;
+        try { target.put(targetKey, array); } catch(Exception ignored) {}
+    }
+
+    private JSONArray jsonArrayFromObjects(ArrayList<JSONObject> items) {
+        JSONArray out = new JSONArray();
+        if (items != null) for (JSONObject item : items) if (item != null) out.put(item);
+        return out;
+    }
+
+    private JSONObject mergeComplementPayloads(JSONObject primary, JSONObject fallback) {
+        if (primary == null) return fallback;
+        if (fallback == null) return primary;
+        try {
+            JSONObject merged = new JSONObject(primary.toString());
+            fillMissingJsonFields(merged, fallback);
+            String[] listKeys = new String[]{
+                    "previousNames", "previousMottos", "previousStyles", "previousFriends",
+                    "friends", "rooms", "groups", "photos", "badges", "selectedBadges"
+            };
+            for (String key : listKeys) {
+                ArrayList<JSONObject> combined = mergeListsEnrichingPrimary(
+                        extractList(primary, key),
+                        extractList(fallback, key),
+                        true
+                );
+                if (!combined.isEmpty() || primary.has(key) || fallback.has(key)) {
+                    merged.put(key, jsonArrayFromObjects(combined));
+                }
+            }
+            return merged;
+        } catch(Exception ignored) {
+            return primary;
+        }
+    }
+
+    private JSONObject fetchPreferredHistoricalComplement(
+            String uniqueId,
+            boolean includePrivate,
+            JSONObject existingFallback
+    ) {
+        JSONObject direct = fetchDirectHabbodexHistoricalComplement(
+                uniqueId,
+                includePrivate
+        );
+        boolean needsFallback = direct == null
+                || direct.optBoolean("_toxicHabbodexPartial", false);
+        if (!needsFallback) return direct;
+
+        // Só aciona o HabboWidgets depois de uma falha/resposta parcial do
+        // HabboDex, evitando duplicar chamadas quando a fonte principal funciona.
+        JSONObject fallback = existingFallback;
+        JSONObject loadedFallback = fetchApiHistoricalFallback(uniqueId);
+        fallback = mergeComplementPayloads(fallback, loadedFallback);
+        return mergeComplementPayloads(direct, fallback);
+    }
+
+    private JSONObject fetchApiHistoricalFallback(String uniqueId) {
+        JSONObject fallback = validProfileObject(
+                unwrap(tryJson(complementProfileByUniqueUrl(uniqueId)))
+        );
+        return fallback != null && isSameProfileId(uniqueId, fallback) ? fallback : null;
     }
 
     private Object getJsonAny(String u) throws Exception {
@@ -7781,8 +8062,90 @@ private int loadingProgressFor(String message) {
     private JSONObject unwrap(JSONObject obj) { if (obj == null) return null; if (obj.has("ok") && obj.has("data")) { Object data = obj.opt("data"); return data instanceof JSONObject ? (JSONObject)data : obj; } return obj; }
     private JSONObject firstObject(JSONObject... objects) { for (JSONObject o : objects) if (o != null && o.length() > 0) return o; return null; }
     private JSONObject firstFromList(JSONObject obj) { ArrayList<JSONObject> list = extractList(obj, null); return list.isEmpty() ? null : list.get(0); }
-    private ArrayList<JSONObject> extractPreviousNamesFromSuggest(JSONObject suggest, String currentName) { ArrayList<JSONObject> out = new ArrayList<>(); ArrayList<JSONObject> users = extractList(suggest, null); String low = currentName == null ? "" : currentName.toLowerCase(Locale.ROOT); for (JSONObject user : users) { String uname = firstText(user, "name", "username").toLowerCase(Locale.ROOT); if (!low.isEmpty() && !uname.equals(low)) continue; out.addAll(extractList(user, "previousNames")); } return out; }
-    private ArrayList<JSONObject> extractList(JSONObject data, String primaryKey) { ArrayList<JSONObject> out = new ArrayList<>(); if (data == null) return out; JSONArray arr = null; if (primaryKey != null && !primaryKey.isEmpty()) arr = data.optJSONArray(primaryKey); if (arr == null) arr = data.optJSONArray("result"); if (arr == null) arr = data.optJSONArray("results"); if (arr == null) arr = data.optJSONArray("data"); if (arr == null) arr = data.optJSONArray("items"); JSONObject d = data.optJSONObject("data"); if (arr == null && d != null) { if (primaryKey != null && !primaryKey.isEmpty()) arr = d.optJSONArray(primaryKey); if (arr == null) arr = d.optJSONArray("result"); if (arr == null) arr = d.optJSONArray("results"); if (arr == null) arr = d.optJSONArray("items"); } if (arr != null) for (int i=0; i<arr.length(); i++) { JSONObject o = arr.optJSONObject(i); if (o != null) out.add(o); } return out; }
+
+    private ArrayList<JSONObject> extractSuggestionUsers(JSONObject suggest) {
+        ArrayList<JSONObject> users = extractList(suggest, "habbos");
+        if (users.isEmpty()) users = extractList(suggest, "users");
+        if (users.isEmpty()) users = extractList(suggest, "profiles");
+        if (users.isEmpty()) users = extractList(suggest, null);
+        if (users.isEmpty()) {
+            JSONObject single = validProfileObject(suggest);
+            if (single != null) users.add(single);
+        }
+        return users;
+    }
+
+    private ArrayList<JSONObject> extractPreviousNamesFromUser(JSONObject user) {
+        ArrayList<JSONObject> out = new ArrayList<>();
+        if (user == null) return out;
+        JSONArray values = user.optJSONArray("previousNames");
+        JSONObject data = user.optJSONObject("data");
+        if (values == null && data != null) values = data.optJSONArray("previousNames");
+        if (values == null) return out;
+        for (int i = 0; i < values.length(); i++) {
+            Object value = values.opt(i);
+            if (value instanceof JSONObject) {
+                JSONObject item = (JSONObject)value;
+                String oldName = firstText(item, "name", "oldName", "username");
+                if (!oldName.isEmpty() && firstText(item, "name").isEmpty()) {
+                    try { item.put("name", oldName); } catch(Exception ignored) {}
+                }
+                out.add(item);
+            } else if (value != null && value != JSONObject.NULL) {
+                String oldName = String.valueOf(value).trim();
+                if (!oldName.isEmpty() && !"null".equalsIgnoreCase(oldName)) {
+                    try {
+                        JSONObject item = new JSONObject();
+                        item.put("name", oldName);
+                        out.add(item);
+                    } catch(Exception ignored) {}
+                }
+            }
+        }
+        return out;
+    }
+
+    private ArrayList<JSONObject> extractPreviousNamesFromSuggest(JSONObject suggest, String currentName) {
+        ArrayList<JSONObject> out = new ArrayList<>();
+        String low = normalizeNickKey(currentName);
+        for (JSONObject user : extractSuggestionUsers(suggest)) {
+            String uname = normalizeNickKey(firstText(user, "name", "username", "habboName"));
+            if (!low.isEmpty() && !uname.isEmpty() && !uname.equals(low)) continue;
+            out = mergeLists(out, extractPreviousNamesFromUser(user));
+        }
+        return out;
+    }
+
+    private ArrayList<JSONObject> extractList(JSONObject data, String primaryKey) {
+        ArrayList<JSONObject> out = new ArrayList<>();
+        if (data == null) return out;
+        JSONArray arr = null;
+        if (primaryKey != null && !primaryKey.isEmpty()) arr = data.optJSONArray(primaryKey);
+        if (arr == null) arr = data.optJSONArray("result");
+        if (arr == null) arr = data.optJSONArray("results");
+        if (arr == null) arr = data.optJSONArray("data");
+        if (arr == null) arr = data.optJSONArray("items");
+        if (arr == null) arr = data.optJSONArray("habbos");
+        if (arr == null) arr = data.optJSONArray("users");
+        if (arr == null) arr = data.optJSONArray("profiles");
+        JSONObject d = data.optJSONObject("data");
+        if (arr == null && d != null) {
+            if (primaryKey != null && !primaryKey.isEmpty()) arr = d.optJSONArray(primaryKey);
+            if (arr == null) arr = d.optJSONArray("result");
+            if (arr == null) arr = d.optJSONArray("results");
+            if (arr == null) arr = d.optJSONArray("items");
+            if (arr == null) arr = d.optJSONArray("habbos");
+            if (arr == null) arr = d.optJSONArray("users");
+            if (arr == null) arr = d.optJSONArray("profiles");
+        }
+        if (arr != null) {
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject item = arr.optJSONObject(i);
+                if (item != null) out.add(item);
+            }
+        }
+        return out;
+    }
     private ArrayList<JSONObject> mergeLists(ArrayList<JSONObject> a, ArrayList<JSONObject> b) { ArrayList<JSONObject> out = new ArrayList<>(); HashSet<String> seen = new HashSet<>(); if (a != null) addUnique(out, seen, a); if (b != null) addUnique(out, seen, b); return out; }
     private void addUnique(ArrayList<JSONObject> out, HashSet<String> seen, ArrayList<JSONObject> src) { for (JSONObject o : src) { String key = stableItemKey(o); if (seen.add(key)) out.add(o); } }
     private String stableItemKey(JSONObject o) {
@@ -11448,6 +11811,7 @@ private int loadingProgressFor(String message) {
                 currentHotelKey = previousHotel;
                 getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PREF_HOTEL, currentHotelKey).apply();
             }
+            updateSelectedHotelHeaderFlag();
             activeRenderedProfile = previous;
             currentLoadedNick = normalizeNickKey(previous.name);
             setSearchTextProgrammatically(previous.name == null ? "" : previous.name);
@@ -13027,36 +13391,15 @@ private int loadingProgressFor(String message) {
 
     private class SponsorHeadGlowView extends View {
         private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
-        private final boolean actionCard;
-        private ValueAnimator animator;
-        private float phase = 0f;
 
-        SponsorHeadGlowView(Context context, boolean action) {
+        SponsorHeadGlowView(Context context) {
             super(context);
-            actionCard = action;
             setLayerType(View.LAYER_TYPE_SOFTWARE, null);
         }
 
         @Override protected void onAttachedToWindow() {
             super.onAttachedToWindow();
-            if (animator != null && animator.isRunning()) return;
-            animator = ValueAnimator.ofFloat(0f, 1f);
-            animator.setDuration(actionCard ? 1700L : 2400L);
-            animator.setRepeatCount(ValueAnimator.INFINITE);
-            animator.setRepeatMode(ValueAnimator.RESTART);
-            animator.addUpdateListener(value -> {
-                phase = (Float)value.getAnimatedValue();
-                invalidate();
-            });
-            animator.start();
-        }
-
-        @Override protected void onDetachedFromWindow() {
-            if (animator != null) {
-                try { animator.cancel(); } catch(Exception ignored) {}
-                animator = null;
-            }
-            super.onDetachedFromWindow();
+            postInvalidateOnAnimation();
         }
 
         @Override protected void onDraw(Canvas canvas) {
@@ -13064,18 +13407,25 @@ private int loadingProgressFor(String message) {
             float w = getWidth();
             float h = getHeight();
             if (w <= 0f || h <= 0f) return;
-            RectF r = new RectF(dp(4), dp(4), w - dp(4), h - dp(4));
-            float radius = dp(21);
-            boolean activeAction = actionCard && supporterActive;
-            int first = activeAction ? Color.rgb(113, 46, 232) : Color.rgb(71, 29, 126);
-            int middle = actionCard ? Color.rgb(153, 74, 245) : Color.rgb(116, 62, 185);
-            int last = activeAction ? Color.rgb(224, 150, 255) : Color.rgb(74, 168, 228);
+            // A fase vem do mesmo relógio para todos os itens: os brilhos ficam
+            // perfeitamente juntos mesmo quando um head é criado depois dos outros.
+            float phase = (SystemClock.uptimeMillis() % SPONSOR_GLOW_CYCLE_MS)
+                    / (float)SPONSOR_GLOW_CYCLE_MS;
+            float pulse = .5f - .5f * (float)Math.cos(phase * Math.PI * 2f);
+            float size = Math.min(w, h) - dp(8);
+            float cx = w / 2f;
+            float cy = h / 2f;
+            float radius = Math.max(1f, size / 2f);
+            RectF r = new RectF(cx - radius, cy - radius, cx + radius, cy + radius);
+            int first = Color.rgb(71, 29, 126);
+            int middle = Color.rgb(134, 63, 213);
+            int last = Color.rgb(74, 168, 228);
 
             p.setShader(null);
             p.setStyle(Paint.Style.FILL);
-            p.setColor(Color.argb(actionCard ? 135 : 96, 160, 78, 255));
-            p.setShadowLayer(dp(7) + dp(2) * (float)Math.sin(phase * Math.PI), 0, dp(2), p.getColor());
-            canvas.drawRoundRect(r, radius, radius, p);
+            p.setColor(Color.argb(112, 160, 78, 255));
+            p.setShadowLayer(dp(7) + dp(2) * pulse, 0, dp(2), p.getColor());
+            canvas.drawCircle(cx, cy, radius, p);
             p.clearShadowLayer();
 
             float shift = (phase - .5f) * r.width() * .35f;
@@ -13088,7 +13438,7 @@ private int loadingProgressFor(String message) {
                     new float[]{0f, .55f, 1f},
                     Shader.TileMode.CLAMP
             ));
-            canvas.drawRoundRect(r, radius, radius, p);
+            canvas.drawCircle(cx, cy, radius, p);
             p.setShader(null);
 
             p.setShader(new RadialGradient(
@@ -13099,12 +13449,12 @@ private int loadingProgressFor(String message) {
                     new float[]{0f, .36f, 1f},
                     Shader.TileMode.CLAMP
             ));
-            canvas.drawRoundRect(r, radius, radius, p);
+            canvas.drawCircle(cx, cy, radius, p);
             p.setShader(null);
 
             canvas.save();
             Path clip = new Path();
-            clip.addRoundRect(r, radius, radius, Path.Direction.CW);
+            clip.addCircle(cx, cy, radius, Path.Direction.CW);
             canvas.clipPath(clip);
             float shimmerX = r.left - r.width() * .55f + phase * r.width() * 2.1f;
             p.setShader(new LinearGradient(
@@ -13112,7 +13462,7 @@ private int loadingProgressFor(String message) {
                     r.top,
                     shimmerX + dp(14),
                     r.bottom,
-                    new int[]{Color.TRANSPARENT, Color.argb(actionCard ? 95 : 68,255,255,255), Color.TRANSPARENT},
+                    new int[]{Color.TRANSPARENT, Color.argb(76,255,255,255), Color.TRANSPARENT},
                     new float[]{0f, .5f, 1f},
                     Shader.TileMode.CLAMP
             ));
@@ -13123,13 +13473,14 @@ private int loadingProgressFor(String message) {
             p.setStyle(Paint.Style.STROKE);
             p.setStrokeWidth(dp(1));
             p.setColor(Color.argb(110, 245, 222, 255));
-            canvas.drawRoundRect(new RectF(r.left + 1, r.top + 1, r.right - 1, r.bottom - 1), radius, radius, p);
+            canvas.drawCircle(cx, cy, Math.max(1f, radius - 1f), p);
 
             p.setStyle(Paint.Style.FILL);
-            float blink = .45f + .55f * (float)Math.sin(phase * Math.PI);
+            float blink = .45f + .55f * pulse;
             p.setColor(Color.argb((int)(185 * blink), 255, 255, 255));
             canvas.drawCircle(r.right - dp(8), r.top + dp(9), dp(2), p);
             canvas.drawCircle(r.left + dp(9), r.bottom - dp(10), dp(1), p);
+            if (isAttachedToWindow() && isShown()) postInvalidateOnAnimation();
         }
     }
 
