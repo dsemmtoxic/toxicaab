@@ -18,6 +18,7 @@ import org.json.*;
 import com.bumptech.glide.Glide;
 import com.bumptech.glide.load.engine.DiskCacheStrategy;
 import com.google.android.gms.ads.AdError;
+import com.google.android.gms.ads.AdLoader;
 import com.google.android.gms.ads.AdListener;
 import com.google.android.gms.ads.AdRequest;
 import com.google.android.gms.ads.AdSize;
@@ -30,6 +31,9 @@ import com.google.android.gms.ads.interstitial.InterstitialAdLoadCallback;
 import com.google.android.gms.ads.rewarded.RewardItem;
 import com.google.android.gms.ads.rewarded.RewardedAd;
 import com.google.android.gms.ads.rewarded.RewardedAdLoadCallback;
+import com.google.android.gms.ads.nativead.MediaView;
+import com.google.android.gms.ads.nativead.NativeAd;
+import com.google.android.gms.ads.nativead.NativeAdView;
 import com.android.billingclient.api.AcknowledgePurchaseParams;
 import com.android.billingclient.api.BillingClient;
 import com.android.billingclient.api.BillingClientStateListener;
@@ -52,8 +56,9 @@ import java.util.concurrent.*;
 
 public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
+    private static final String HABBODEX_PROXY_API = "https://atoxic.com.br/habbodex.php";
     private static final String HABBOWIDGETS_BASE = "https://www.habbowidgets.com";
-    private static final String APP_VERSION = "1.3.14";
+    private static final String APP_VERSION = "1.3.15";
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
     // os ícones nunca desapareçam por bloqueio de rede ou cache externo.
@@ -111,7 +116,7 @@ public class MainActivity extends Activity {
     private static final int MAX_SAVED_VISUALS = 6;
     private static final int MAX_FAVORITES = 12;
     private static final String PREF_TUTORIAL_VERSION = "tutorial_version";
-    private static final int CURRENT_TUTORIAL_VERSION = 5;
+    private static final int CURRENT_TUTORIAL_VERSION = 6;
     private static final String PREF_PROFILE_FEATURES_TUTORIAL_VERSION = "profile_features_tutorial_version";
     private static final String PREF_FRIEND_CARD_TUTORIAL_VERSION = "friend_card_tutorial_version";
     private static final String PREF_VISUAL_ITEM_TUTORIAL_VERSION = "visual_item_tutorial_version";
@@ -153,7 +158,8 @@ public class MainActivity extends Activity {
     private static final String TEST_INTERSTITIAL_AD_UNIT_ID = "ca-app-pub-3940256099942544/1033173712";
     private static final String REAL_REWARDED_AD_UNIT_ID = "ca-app-pub-8079226281001828/1283312609";
     private static final String TEST_REWARDED_AD_UNIT_ID = "ca-app-pub-3940256099942544/5224354917";
-    private static final String REAL_TOP_SEARCH_BANNER_AD_UNIT_ID = "ca-app-pub-8079226281001828/8377352885";
+    private static final String REAL_START_NATIVE_AD_UNIT_ID = "ca-app-pub-8079226281001828/4100478754";
+    private static final String TEST_START_NATIVE_AD_UNIT_ID = "ca-app-pub-3940256099942544/2247696110";
     private static final String REAL_PREVIOUS_STYLES_BANNER_AD_UNIT_ID = "ca-app-pub-8079226281001828/1381533840";
     private static final String REAL_FRIENDS_REMOVED_BANNER_AD_UNIT_ID = "ca-app-pub-8079226281001828/5249048126";
     private static final String REAL_VISUAL_COLORS_BANNER_AD_UNIT_ID = "ca-app-pub-8079226281001828/6444755891";
@@ -162,15 +168,11 @@ public class MainActivity extends Activity {
     private static final boolean USE_TEST_ADS = false;
     private static final String INTERSTITIAL_AD_UNIT_ID = USE_TEST_ADS ? TEST_INTERSTITIAL_AD_UNIT_ID : REAL_INTERSTITIAL_AD_UNIT_ID;
     private static final String REWARDED_AD_UNIT_ID = USE_TEST_ADS ? TEST_REWARDED_AD_UNIT_ID : REAL_REWARDED_AD_UNIT_ID;
-    private static final String TOP_SEARCH_BANNER_AD_UNIT_ID = USE_TEST_ADS ? TEST_BANNER_AD_UNIT_ID : REAL_TOP_SEARCH_BANNER_AD_UNIT_ID;
+    private static final String START_NATIVE_AD_UNIT_ID = USE_TEST_ADS ? TEST_START_NATIVE_AD_UNIT_ID : REAL_START_NATIVE_AD_UNIT_ID;
     private static final String PREVIOUS_STYLES_BANNER_AD_UNIT_ID = USE_TEST_ADS ? TEST_BANNER_AD_UNIT_ID : REAL_PREVIOUS_STYLES_BANNER_AD_UNIT_ID;
     private static final String FRIENDS_REMOVED_BANNER_AD_UNIT_ID = USE_TEST_ADS ? TEST_BANNER_AD_UNIT_ID : REAL_FRIENDS_REMOVED_BANNER_AD_UNIT_ID;
     private static final String VISUAL_COLORS_BANNER_AD_UNIT_ID = USE_TEST_ADS ? TEST_BANNER_AD_UNIT_ID : REAL_VISUAL_COLORS_BANNER_AD_UNIT_ID;
     private static final String VISUAL_NICK_SEARCH_BANNER_AD_UNIT_ID = USE_TEST_ADS ? TEST_BANNER_AD_UNIT_ID : REAL_VISUAL_NICK_SEARCH_BANNER_AD_UNIT_ID;
-    private static final String TAG_SEARCH_BOX_ANCHOR = "search_box_anchor";
-    private AdView topSearchBannerAdView;
-    private FrameLayout topSearchBannerAdContainer;
-    private boolean topSearchBannerLoadStarted = false;
     private AdView previousStylesBannerAdView;
     private FrameLayout previousStylesBannerAdContainer;
     private boolean previousStylesBannerLoadStarted = false;
@@ -202,18 +204,26 @@ public class MainActivity extends Activity {
     private TextView rewardAdBtn;
     private TextView rewardAdTimeLabel;
     private LinearLayout sponsorsSection;
-    private Space sponsorsStartSpacer;
     private FrameLayout sponsorsCarouselHost;
+    private HorizontalScrollView sponsorsCarouselScroll;
     private LinearLayout sponsorsCarouselRow;
     private ProgressBar sponsorsLoadingIndicator;
-    private TextView sponsorsSubscribeButton;
+    private View sponsorsSubscribeButton;
+    private TextView sponsorsActionIcon;
+    private TextView sponsorsActionLabel;
+    private View sponsorsActionGlow;
+    private FrameLayout startNativeAdContainer;
+    private NativeAd startNativeAd;
+    private boolean startNativeAdLoading = false;
+    private long startNativeAdRetryAfterMs = 0L;
+    private boolean startScreenVisible = true;
     private volatile boolean sponsorsLoading = false;
     private volatile String sponsorsCacheJson = null;
     private static final String SUPPORTER_PRODUCT_ID = "tx_supporter";
     private static final String SUPPORTER_BASE_PLAN_ID = "basic";
     private static final String PREF_SUPPORTER_TUTORIAL_PENDING = "supporter_tutorial_pending";
     private static final String PREF_SUPPORTER_TUTORIAL_VERSION = "supporter_tutorial_version";
-    private static final int CURRENT_SUPPORTER_TUTORIAL_VERSION = 1;
+    private static final int CURRENT_SUPPORTER_TUTORIAL_VERSION = 2;
     private static final long SUPPORTER_REVERIFY_INTERVAL_MS = 15L * 60L * 1000L;
     private ProductDetails supporterProductDetails;
     private boolean supporterActive = false;
@@ -251,11 +261,12 @@ public class MainActivity extends Activity {
             refreshSupporterEntitlementIfNeeded();
             consumeAdFreeElapsed();
             updateRewardButtonText();
-            if (!removeAdsPurchased && !hasAdFreeAccess() && topSearchBannerAdView == null) {
+            if (!removeAdsPurchased && !hasAdFreeAccess()) {
                 preloadBannerAds();
-                attachTopSearchBannerIfPossible();
                 loadInterstitialAd();
+                loadStartNativeAdIfNeeded();
             }
+            updateStartNativeAdVisibility();
             uiHandler.postDelayed(this, 1000L);
         }
     };
@@ -519,8 +530,7 @@ public class MainActivity extends Activity {
 
     private boolean isCurrentBannerAdView(AdView adView) {
         return adView != null && (
-                adView == topSearchBannerAdView
-                        || adView == previousStylesBannerAdView
+                adView == previousStylesBannerAdView
                         || adView == friendsRemovedBannerAdView
                         || adView == visualColorsBannerAdView
                         || adView == visualNickSearchBannerAdView
@@ -528,8 +538,7 @@ public class MainActivity extends Activity {
     }
 
     private void setBannerLoadStarted(AdView adView, boolean started) {
-        if (adView == topSearchBannerAdView) topSearchBannerLoadStarted = started;
-        else if (adView == previousStylesBannerAdView) previousStylesBannerLoadStarted = started;
+        if (adView == previousStylesBannerAdView) previousStylesBannerLoadStarted = started;
         else if (adView == friendsRemovedBannerAdView) friendsRemovedBannerLoadStarted = started;
         else if (adView == visualColorsBannerAdView) visualColorsBannerLoadStarted = started;
         else if (adView == visualNickSearchBannerAdView) visualNickSearchBannerLoadStarted = started;
@@ -663,12 +672,6 @@ public class MainActivity extends Activity {
         });
     }
 
-    private void requestTopSearchBannerLoadIfNeeded() {
-        if (topSearchBannerLoadStarted || topSearchBannerAdView == null || topSearchBannerAdContainer == null) return;
-        topSearchBannerLoadStarted = true;
-        loadBannerAfterAttach(topSearchBannerAdView, topSearchBannerAdContainer);
-    }
-
     private void requestPreviousStylesBannerLoadIfNeeded() {
         if (previousStylesBannerLoadStarted || previousStylesBannerAdView == null || previousStylesBannerAdContainer == null) return;
         previousStylesBannerLoadStarted = true;
@@ -694,20 +697,10 @@ public class MainActivity extends Activity {
     }
 
     private void requestBannerLoadForContainer(View banner) {
-        if (banner == topSearchBannerAdContainer) requestTopSearchBannerLoadIfNeeded();
-        else if (banner == previousStylesBannerAdContainer) requestPreviousStylesBannerLoadIfNeeded();
+        if (banner == previousStylesBannerAdContainer) requestPreviousStylesBannerLoadIfNeeded();
         else if (banner == friendsRemovedBannerAdContainer) requestFriendsRemovedBannerLoadIfNeeded();
         else if (banner == visualColorsBannerAdContainer) requestVisualColorsBannerLoadIfNeeded();
         else if (banner == visualNickSearchBannerAdContainer) requestVisualNickSearchBannerLoadIfNeeded();
-    }
-
-    private void ensureTopSearchBannerAd() {
-        if (removeAdsPurchased || hasAdFreeAccess()) return;
-        if (topSearchBannerAdContainer == null || topSearchBannerAdView == null) {
-            topSearchBannerAdContainer = newBannerContainer();
-            topSearchBannerAdView = newBannerAdView(TOP_SEARCH_BANNER_AD_UNIT_ID, topSearchBannerAdContainer);
-            topSearchBannerLoadStarted = false;
-        }
     }
 
     private void ensurePreviousStylesBannerAd() {
@@ -746,13 +739,6 @@ public class MainActivity extends Activity {
         }
     }
 
-    private View buildTopSearchBannerAd() {
-        ensureTopSearchBannerAd();
-        if (topSearchBannerAdContainer == null) return null;
-        detachViewFromParent(topSearchBannerAdContainer);
-        return topSearchBannerAdContainer;
-    }
-
     private View buildPreviousStylesBannerAd() {
         ensurePreviousStylesBannerAd();
         if (previousStylesBannerAdContainer == null) return null;
@@ -788,28 +774,8 @@ public class MainActivity extends Activity {
         requestBannerLoadForContainer(banner);
     }
 
-    private void attachTopSearchBannerIfPossible() {
-        if (root == null || removeAdsPurchased || hasAdFreeAccess()) return;
-        View banner = buildTopSearchBannerAd();
-        if (banner == null) return;
-        detachViewFromParent(banner);
-        int insertAt = -1;
-        for (int i = 0; i < root.getChildCount(); i++) {
-            Object tag = root.getChildAt(i).getTag();
-            if (TAG_SEARCH_BOX_ANCHOR.equals(tag)) {
-                insertAt = i;
-                break;
-            }
-        }
-        LinearLayout.LayoutParams params = lp(-1, dp(68), 0, 0, 0, 12);
-        if (insertAt >= 0) root.addView(banner, Math.min(insertAt + 1, root.getChildCount()), params);
-        else root.addView(banner, params);
-        requestTopSearchBannerLoadIfNeeded();
-    }
-
     private void preloadBannerAds() {
         if (removeAdsPurchased || hasAdFreeAccess()) return;
-        ensureTopSearchBannerAd();
         ensurePreviousStylesBannerAd();
         ensureFriendsRemovedBannerAd();
         ensureVisualColorsBannerAd();
@@ -817,7 +783,6 @@ public class MainActivity extends Activity {
     }
 
     private void pauseBannerAds() {
-        try { if (topSearchBannerAdView != null) topSearchBannerAdView.pause(); } catch(Exception ignored) {}
         try { if (previousStylesBannerAdView != null) previousStylesBannerAdView.pause(); } catch(Exception ignored) {}
         try { if (friendsRemovedBannerAdView != null) friendsRemovedBannerAdView.pause(); } catch(Exception ignored) {}
         try { if (visualColorsBannerAdView != null) visualColorsBannerAdView.pause(); } catch(Exception ignored) {}
@@ -825,12 +790,10 @@ public class MainActivity extends Activity {
     }
 
     private void resumeBannerAds() {
-        try { if (topSearchBannerAdView != null) topSearchBannerAdView.resume(); } catch(Exception ignored) {}
         try { if (previousStylesBannerAdView != null) previousStylesBannerAdView.resume(); } catch(Exception ignored) {}
         try { if (friendsRemovedBannerAdView != null) friendsRemovedBannerAdView.resume(); } catch(Exception ignored) {}
         try { if (visualColorsBannerAdView != null) visualColorsBannerAdView.resume(); } catch(Exception ignored) {}
         try { if (visualNickSearchBannerAdView != null) visualNickSearchBannerAdView.resume(); } catch(Exception ignored) {}
-        if (topSearchBannerAdContainer != null && topSearchBannerAdContainer.getParent() != null) requestTopSearchBannerLoadIfNeeded();
         if (previousStylesBannerAdContainer != null && previousStylesBannerAdContainer.getParent() != null) requestPreviousStylesBannerLoadIfNeeded();
         if (friendsRemovedBannerAdContainer != null && friendsRemovedBannerAdContainer.getParent() != null) requestFriendsRemovedBannerLoadIfNeeded();
         if (visualColorsBannerAdContainer != null && visualColorsBannerAdContainer.getParent() != null) requestVisualColorsBannerLoadIfNeeded();
@@ -847,14 +810,10 @@ public class MainActivity extends Activity {
 
     private void destroyAllBannerAds() {
         cancelAllBannerAdRetries();
-        destroyBannerAd(topSearchBannerAdView, topSearchBannerAdContainer);
         destroyBannerAd(previousStylesBannerAdView, previousStylesBannerAdContainer);
         destroyBannerAd(friendsRemovedBannerAdView, friendsRemovedBannerAdContainer);
         destroyBannerAd(visualColorsBannerAdView, visualColorsBannerAdContainer);
         destroyBannerAd(visualNickSearchBannerAdView, visualNickSearchBannerAdContainer);
-        topSearchBannerAdView = null;
-        topSearchBannerAdContainer = null;
-        topSearchBannerLoadStarted = false;
         previousStylesBannerAdView = null;
         previousStylesBannerAdContainer = null;
         previousStylesBannerLoadStarted = false;
@@ -867,6 +826,194 @@ public class MainActivity extends Activity {
         visualNickSearchBannerAdView = null;
         visualNickSearchBannerAdContainer = null;
         visualNickSearchBannerLoadStarted = false;
+        destroyStartNativeAd();
+    }
+
+    private void destroyStartNativeAd() {
+        try {
+            if (startNativeAd != null) startNativeAd.destroy();
+        } catch(Exception ignored) {}
+        startNativeAd = null;
+        startNativeAdLoading = false;
+        if (startNativeAdContainer != null) {
+            startNativeAdContainer.removeAllViews();
+            startNativeAdContainer.setVisibility(View.GONE);
+        }
+    }
+
+    private void updateStartNativeAdVisibility() {
+        if (startNativeAdContainer == null) return;
+        boolean visible = startScreenVisible
+                && startNativeAd != null
+                && !removeAdsPurchased
+                && !hasAdFreeAccess();
+        startNativeAdContainer.setVisibility(visible ? View.VISIBLE : View.GONE);
+    }
+
+    private void loadStartNativeAdIfNeeded() {
+        if (!startScreenVisible || removeAdsPurchased || hasAdFreeAccess()) {
+            updateStartNativeAdVisibility();
+            return;
+        }
+        if (startNativeAd != null) {
+            renderStartNativeAd();
+            return;
+        }
+        long now = System.currentTimeMillis();
+        if (startNativeAdLoading || now < startNativeAdRetryAfterMs) return;
+        startNativeAdLoading = true;
+        try {
+            new AdLoader.Builder(this, START_NATIVE_AD_UNIT_ID)
+                    .forNativeAd(ad -> {
+                        startNativeAdLoading = false;
+                        startNativeAdRetryAfterMs = 0L;
+                        if (removeAdsPurchased || hasAdFreeAccess()) {
+                            try { ad.destroy(); } catch(Exception ignored) {}
+                            updateStartNativeAdVisibility();
+                            return;
+                        }
+                        try {
+                            if (startNativeAd != null) startNativeAd.destroy();
+                        } catch(Exception ignored) {}
+                        startNativeAd = ad;
+                        renderStartNativeAd();
+                    })
+                    .withAdListener(new AdListener() {
+                        @Override public void onAdFailedToLoad(LoadAdError error) {
+                            startNativeAdLoading = false;
+                            startNativeAdRetryAfterMs = System.currentTimeMillis() + 2L * 60L * 1000L;
+                            updateStartNativeAdVisibility();
+                        }
+                    })
+                    .build()
+                    .loadAd(new AdRequest.Builder().build());
+        } catch(Exception ignored) {
+            startNativeAdLoading = false;
+            startNativeAdRetryAfterMs = System.currentTimeMillis() + 2L * 60L * 1000L;
+            updateStartNativeAdVisibility();
+        }
+    }
+
+    private void renderStartNativeAd() {
+        if (startNativeAdContainer == null || startNativeAd == null) {
+            updateStartNativeAdVisibility();
+            return;
+        }
+        startNativeAdContainer.removeAllViews();
+        startNativeAdContainer.addView(
+                buildStartNativeAdView(startNativeAd),
+                new FrameLayout.LayoutParams(-1, -2)
+        );
+        updateStartNativeAdVisibility();
+    }
+
+    private NativeAdView buildStartNativeAdView(NativeAd ad) {
+        NativeAdView adView = new NativeAdView(this);
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(13), dp(12), dp(13), dp(13));
+        card.setBackground(round(
+                lightTheme ? Color.WHITE : Color.rgb(20, 18, 28),
+                dp(22),
+                lightTheme ? Color.rgb(224, 216, 232) : Color.rgb(54, 46, 70),
+                1
+        ));
+        if (Build.VERSION.SDK_INT >= 21) card.setElevation(dp(3));
+        adView.addView(card, new FrameLayout.LayoutParams(-1, -2));
+
+        LinearLayout top = new LinearLayout(this);
+        top.setOrientation(LinearLayout.HORIZONTAL);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        card.addView(top, new LinearLayout.LayoutParams(-1, -2));
+
+        TextView badge = text(t(R.string.ad_badge), 9, Color.WHITE, true);
+        badge.setGravity(Gravity.CENTER);
+        badge.setIncludeFontPadding(false);
+        badge.setPadding(dp(8), 0, dp(8), 0);
+        badge.setBackground(grad(dp(999), purple2, purple));
+        top.addView(badge, new LinearLayout.LayoutParams(-2, dp(22)));
+
+        TextView headline = text(ad.getHeadline(), 16, lightTheme ? Color.rgb(36, 31, 41) : Color.WHITE, true);
+        headline.setMaxLines(2);
+        headline.setEllipsize(TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams headlineLp = new LinearLayout.LayoutParams(0, -2, 1f);
+        headlineLp.leftMargin = dp(9);
+        top.addView(headline, headlineLp);
+        adView.setHeadlineView(headline);
+
+        MediaView media = new MediaView(this);
+        media.setImageScaleType(ImageView.ScaleType.CENTER_CROP);
+        media.setBackgroundColor(lightTheme ? Color.rgb(244, 241, 247) : Color.rgb(13, 12, 19));
+        applyRoundedClip(media, dp(16));
+        LinearLayout.LayoutParams mediaLp = new LinearLayout.LayoutParams(-1, dp(170));
+        mediaLp.topMargin = dp(10);
+        card.addView(media, mediaLp);
+        adView.setMediaView(media);
+
+        TextView body = text(
+                ad.getBody() == null ? "" : ad.getBody(),
+                13,
+                lightTheme ? Color.rgb(89, 79, 97) : Color.argb(210,255,255,255),
+                false
+        );
+        body.setMaxLines(2);
+        body.setEllipsize(TextUtils.TruncateAt.END);
+        body.setLineSpacing(dp(2), 1f);
+        LinearLayout.LayoutParams bodyLp = new LinearLayout.LayoutParams(-1, -2);
+        bodyLp.topMargin = dp(9);
+        card.addView(body, bodyLp);
+        adView.setBodyView(body);
+        body.setVisibility(ad.getBody() == null || ad.getBody().trim().isEmpty() ? View.GONE : View.VISIBLE);
+
+        LinearLayout bottom = new LinearLayout(this);
+        bottom.setOrientation(LinearLayout.HORIZONTAL);
+        bottom.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams bottomLp = new LinearLayout.LayoutParams(-1, dp(48));
+        bottomLp.topMargin = dp(10);
+        card.addView(bottom, bottomLp);
+
+        ImageView icon = new ImageView(this);
+        icon.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        applyRoundedClip(icon, dp(11));
+        bottom.addView(icon, new LinearLayout.LayoutParams(dp(42), dp(42)));
+        adView.setIconView(icon);
+        if (ad.getIcon() != null && ad.getIcon().getDrawable() != null) {
+            icon.setImageDrawable(ad.getIcon().getDrawable());
+        } else {
+            icon.setVisibility(View.GONE);
+        }
+
+        TextView advertiser = text(
+                ad.getAdvertiser() == null ? "" : ad.getAdvertiser(),
+                12,
+                lightTheme ? Color.rgb(91, 78, 101) : Color.argb(190,255,255,255),
+                true
+        );
+        advertiser.setSingleLine(true);
+        advertiser.setEllipsize(TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams advertiserLp = new LinearLayout.LayoutParams(0, -2, 1f);
+        advertiserLp.leftMargin = icon.getVisibility() == View.GONE ? 0 : dp(9);
+        advertiserLp.rightMargin = dp(9);
+        bottom.addView(advertiser, advertiserLp);
+        adView.setAdvertiserView(advertiser);
+        advertiser.setVisibility(ad.getAdvertiser() == null || ad.getAdvertiser().trim().isEmpty() ? View.INVISIBLE : View.VISIBLE);
+
+        TextView action = text(
+                ad.getCallToAction() == null ? "" : ad.getCallToAction(),
+                12,
+                Color.WHITE,
+                true
+        );
+        action.setGravity(Gravity.CENTER);
+        action.setSingleLine(true);
+        action.setPadding(dp(14), 0, dp(14), 0);
+        action.setBackground(grad(dp(13), purple2, purple));
+        bottom.addView(action, new LinearLayout.LayoutParams(-2, dp(42)));
+        adView.setCallToActionView(action);
+        action.setVisibility(ad.getCallToAction() == null || ad.getCallToAction().trim().isEmpty() ? View.GONE : View.VISIBLE);
+
+        adView.setNativeAd(ad);
+        return adView;
     }
 
     private void registerInterstitialLoadFailure() {
@@ -1392,9 +1539,9 @@ public class MainActivity extends Activity {
         setSupporterActive(supporterOwned);
         if (!hasAdFreeAccess()) {
             preloadBannerAds();
-            attachTopSearchBannerIfPossible();
             loadInterstitialAd();
             loadRewardedAd();
+            loadStartNativeAdIfNeeded();
         }
     }
 
@@ -1411,9 +1558,9 @@ public class MainActivity extends Activity {
             rewardedLoading = false;
         } else if (changed && !billingEntitlementCheckPending && !hasAdFreeAccess()) {
             preloadBannerAds();
-            attachTopSearchBannerIfPossible();
             loadInterstitialAd();
             loadRewardedAd();
+            loadStartNativeAdIfNeeded();
         }
         runOnUiThread(() -> {
             updateRewardButtonText();
@@ -1866,9 +2013,8 @@ public class MainActivity extends Activity {
             rewardAdBtn.setBackground(new SupporterProfileButtonDrawable());
             rewardAdBtn.setContentDescription(t(R.string.supporter_choose_profile));
             if (rewardAdTimeLabel != null) {
-                rewardAdTimeLabel.setText(t(R.string.supporter_short));
-                rewardAdTimeLabel.setTextColor(lightTheme ? Color.rgb(73, 42, 115) : Color.WHITE);
-                rewardAdTimeLabel.setVisibility(View.VISIBLE);
+                rewardAdTimeLabel.setText("");
+                rewardAdTimeLabel.setVisibility(View.GONE);
             }
             return;
         }
@@ -1923,7 +2069,10 @@ public class MainActivity extends Activity {
         if (!accessProbeRunning) requestAccessGateCheck();
         resumeBannerAds();
         if (removeAdsPurchased || hasAdFreeAccess()) destroyAllBannerAds();
-        else { preloadBannerAds(); attachTopSearchBannerIfPossible(); }
+        else {
+            preloadBannerAds();
+            loadStartNativeAdIfNeeded();
+        }
         loadFavoriteOnlineStatesFromPrefs();
         updateFavoriteOnlineBadgeText();
         uiHandler.removeCallbacks(adFreeTicker);
@@ -2460,17 +2609,10 @@ public class MainActivity extends Activity {
         subtitleRow.addView(selectedHotelFlag, selectedFlagLp);
 
         LinearLayout searchOuter = neutralCard(dp(22));
-        searchOuter.setTag(TAG_SEARCH_BOX_ANCHOR);
         searchOuter.setPadding(dp(16), dp(16), dp(16), dp(16));
         if (Build.VERSION.SDK_INT >= 21) searchOuter.setElevation(dp(5));
         root.addView(searchOuter, lp(-1, -2, 0, 2, 0, 12));
         mainTutorialSearchTarget = searchOuter;
-
-        View topSearchBanner = buildTopSearchBannerAd();
-        if (topSearchBanner != null) {
-            root.addView(topSearchBanner, lp(-1, dp(68), 0, 0, 0, 12));
-            requestTopSearchBannerLoadIfNeeded();
-        }
 
         LinearLayout searchCard = neutralCard(dp(18));
         searchCard.setBackgroundColor(Color.TRANSPARENT);
@@ -2530,6 +2672,14 @@ public class MainActivity extends Activity {
         if (Build.VERSION.SDK_INT >= 21) searchBtn.setElevation(dp(3));
         searchCard.addView(searchBtn, lp(-1, dp(54), 0, 0, 0, 0));
 
+        sponsorsSection = buildSponsorsSection();
+        root.addView(sponsorsSection, lp(-1, -2, 0, 4, 0, 14));
+
+        startNativeAdContainer = new FrameLayout(this);
+        startNativeAdContainer.setVisibility(View.GONE);
+        root.addView(startNativeAdContainer, lp(-1, -2, 0, 0, 0, 16));
+        if (startNativeAd != null) renderStartNativeAd();
+
         progress = new ProgressBar(this, null, android.R.attr.progressBarStyleSmall);
         progress.setVisibility(View.GONE);
         root.addView(progress, lp(-1, dp(34), 0, 0, 0, 2));
@@ -2541,13 +2691,6 @@ public class MainActivity extends Activity {
         resultWrap = new LinearLayout(this);
         resultWrap.setOrientation(LinearLayout.VERTICAL);
         root.addView(resultWrap, lp(-1, -2, 0, 0, 0, 0));
-
-        sponsorsStartSpacer = new Space(this);
-        root.addView(sponsorsStartSpacer, new LinearLayout.LayoutParams(-1, 0));
-        updateSponsorsStartSpacing();
-
-        sponsorsSection = buildSponsorsSection();
-        root.addView(sponsorsSection, lp(-1, -2, 0, 4, 0, 18));
         setContentView(screen);
         applySafeAreaInsets(getWindow(), screen);
         searchBtn.setOnClickListener(v -> {
@@ -2575,46 +2718,45 @@ public class MainActivity extends Activity {
     }
 
     private LinearLayout buildSponsorsSection() {
-        LinearLayout section = neutralCard(dp(24));
+        LinearLayout section = new LinearLayout(this);
         section.setOrientation(LinearLayout.VERTICAL);
-        section.setPadding(dp(14), dp(11), dp(14), dp(11));
-        if (Build.VERSION.SDK_INT >= 21) section.setElevation(dp(4));
+        section.setPadding(0, dp(3), 0, 0);
+        section.setBackgroundColor(Color.TRANSPARENT);
+        section.setClipChildren(false);
+        section.setClipToPadding(false);
 
         LinearLayout heading = new LinearLayout(this);
         heading.setOrientation(LinearLayout.HORIZONTAL);
         heading.setGravity(Gravity.CENTER_VERTICAL);
-        section.addView(heading, lp(-1, dp(38), 0, 0, 0, 4));
+        section.addView(heading, lp(-1, dp(36), 2, 0, 2, 2));
 
-        TextView title = text(t(R.string.sponsors_title), 17, lightTheme ? Color.rgb(40, 32, 50) : Color.WHITE, true);
+        TextView sparkle = text("✦", 16, pink, true);
+        sparkle.setGravity(Gravity.CENTER);
+        sparkle.setIncludeFontPadding(false);
+        heading.addView(sparkle, new LinearLayout.LayoutParams(dp(25), dp(30)));
+
+        TextView title = text(t(R.string.sponsors_title), 18, lightTheme ? Color.rgb(56, 35, 70) : Color.WHITE, true);
         title.setGravity(Gravity.CENTER_VERTICAL);
-        title.setLetterSpacing(0.04f);
+        title.setLetterSpacing(0.01f);
         heading.addView(title, new LinearLayout.LayoutParams(0, -1, 1));
-
-        sponsorsSubscribeButton = text("+", 25, Color.WHITE, true);
-        sponsorsSubscribeButton.setGravity(Gravity.CENTER);
-        sponsorsSubscribeButton.setIncludeFontPadding(false);
-        sponsorsSubscribeButton.setContentDescription(t(R.string.supporter_subscribe));
-        sponsorsSubscribeButton.setOnClickListener(v -> {
-            if (supporterActive) showSupporterManageDialog();
-            else showSupporterOfferDialog();
-        });
-        heading.addView(sponsorsSubscribeButton, new LinearLayout.LayoutParams(dp(38), dp(38)));
-        updateSponsorsSubscribeButton();
 
         sponsorsCarouselHost = new FrameLayout(this);
         sponsorsCarouselHost.setClipChildren(false);
         sponsorsCarouselHost.setClipToPadding(false);
-        section.addView(sponsorsCarouselHost, lp(-1, dp(96), 0, 0, 0, 0));
+        section.addView(sponsorsCarouselHost, lp(-1, dp(106), 0, 0, 0, 0));
 
         HorizontalScrollView carousel = new HorizontalScrollView(this);
+        sponsorsCarouselScroll = carousel;
         carousel.setHorizontalScrollBarEnabled(false);
         carousel.setFillViewport(false);
         carousel.setClipChildren(false);
         carousel.setClipToPadding(false);
+        carousel.setHorizontalFadingEdgeEnabled(true);
+        carousel.setFadingEdgeLength(dp(22));
         sponsorsCarouselRow = new LinearLayout(this);
         sponsorsCarouselRow.setOrientation(LinearLayout.HORIZONTAL);
         sponsorsCarouselRow.setGravity(Gravity.CENTER_VERTICAL);
-        sponsorsCarouselRow.setPadding(dp(2), 0, dp(6), 0);
+        sponsorsCarouselRow.setPadding(dp(1), 0, dp(18), 0);
         carousel.addView(sponsorsCarouselRow, new HorizontalScrollView.LayoutParams(-2, -1));
         sponsorsCarouselHost.addView(carousel, new FrameLayout.LayoutParams(-1, -1));
 
@@ -2640,17 +2782,6 @@ public class MainActivity extends Activity {
         return section;
     }
 
-    private void updateSponsorsStartSpacing() {
-        if (sponsorsStartSpacer == null) return;
-        ViewGroup.LayoutParams rawParams = sponsorsStartSpacer.getLayoutParams();
-        LinearLayout.LayoutParams params = rawParams instanceof LinearLayout.LayoutParams
-                ? (LinearLayout.LayoutParams) rawParams
-                : new LinearLayout.LayoutParams(-1, 0);
-        params.height = 0;
-        params.weight = activeRenderedProfile == null ? 1f : 0f;
-        sponsorsStartSpacer.setLayoutParams(params);
-    }
-
     private void setSponsorsLoadingVisible(boolean visible) {
         if (sponsorsLoadingIndicator == null) return;
         if (visible && sponsorsCarouselHost != null) sponsorsCarouselHost.setVisibility(View.VISIBLE);
@@ -2666,11 +2797,16 @@ public class MainActivity extends Activity {
 
     private void updateSponsorsSubscribeButton() {
         if (sponsorsSubscribeButton == null) return;
-        sponsorsSubscribeButton.setText("+");
-        sponsorsSubscribeButton.setTextColor(Color.WHITE);
-        sponsorsSubscribeButton.setBackground(supporterActive
-                ? grad(dp(12), Color.rgb(124, 58, 237), Color.rgb(192, 132, 252))
-                : round(lightTheme ? Color.rgb(108, 63, 176) : Color.rgb(74, 42, 105), dp(12), purple, 1));
+        if (sponsorsActionIcon != null) {
+            sponsorsActionIcon.setText(supporterActive ? "✦" : "+");
+            sponsorsActionIcon.setTextSize(supporterActive ? 26 : 34);
+        }
+        if (sponsorsActionLabel != null) {
+            sponsorsActionLabel.setText(t(supporterActive
+                    ? R.string.sponsor_manage_carousel
+                    : R.string.sponsor_join_carousel));
+        }
+        if (sponsorsActionGlow != null) sponsorsActionGlow.invalidate();
         sponsorsSubscribeButton.setContentDescription(t(supporterActive
                 ? R.string.supporter_manage
                 : R.string.supporter_subscribe));
@@ -2701,9 +2837,14 @@ public class MainActivity extends Activity {
                 sponsorsCacheJson = finalSponsors.toString();
                 runOnUiThread(() -> renderSponsors(finalSponsors));
             } catch(Exception error) {
-                runOnUiThread(() -> finishSponsorsDisplay(
-                        sponsorsCarouselRow != null && sponsorsCarouselRow.getChildCount() > 0
-                ));
+                runOnUiThread(() -> {
+                    if (sponsorsCarouselRow != null && sponsorsCarouselRow.getChildCount() == 0) {
+                        sponsorsCarouselRow.addView(sponsorActionCard());
+                    }
+                    finishSponsorsDisplay(
+                            sponsorsCarouselRow != null && sponsorsCarouselRow.getChildCount() > 0
+                    );
+                });
             } finally {
                 sponsorsLoading = false;
             }
@@ -2713,6 +2854,10 @@ public class MainActivity extends Activity {
     private void renderSponsors(JSONArray sponsors) {
         if (sponsorsCarouselRow == null) return;
         sponsorsCarouselRow.removeAllViews();
+        sponsorsSubscribeButton = null;
+        sponsorsActionIcon = null;
+        sponsorsActionLabel = null;
+        sponsorsActionGlow = null;
         for (int i = 0; i < sponsors.length(); i++) {
             JSONObject sponsor = sponsors.optJSONObject(i);
             if (sponsor == null) continue;
@@ -2723,6 +2868,9 @@ public class MainActivity extends Activity {
             if (nick.isEmpty() || figure.isEmpty()) continue;
             sponsorsCarouselRow.addView(sponsorCard(nick, hotel, figure, uniqueId));
         }
+        // O convite para assinar faz parte do próprio carrossel e permanece
+        // sempre por último, com o mesmo formato visual dos patrocinadores.
+        sponsorsCarouselRow.addView(sponsorActionCard());
         finishSponsorsDisplay(sponsorsCarouselRow.getChildCount() > 0);
     }
 
@@ -2730,51 +2878,40 @@ public class MainActivity extends Activity {
         LinearLayout item = new LinearLayout(this);
         item.setOrientation(LinearLayout.VERTICAL);
         item.setGravity(Gravity.TOP | Gravity.CENTER_HORIZONTAL);
-        item.setPadding(dp(3), 0, dp(3), 0);
+        item.setPadding(dp(2), 0, dp(2), 0);
         item.setBackgroundColor(Color.TRANSPARENT);
         item.setClipChildren(false);
-        LinearLayout.LayoutParams itemParams = new LinearLayout.LayoutParams(dp(88), dp(96));
-        itemParams.rightMargin = dp(7);
+        LinearLayout.LayoutParams itemParams = new LinearLayout.LayoutParams(dp(90), dp(104));
+        itemParams.rightMargin = dp(5);
         item.setLayoutParams(itemParams);
 
         FrameLayout avatarHost = new FrameLayout(this);
         avatarHost.setClipChildren(false);
         avatarHost.setClipToPadding(false);
-        item.addView(avatarHost, new LinearLayout.LayoutParams(dp(80), dp(72)));
+        item.addView(avatarHost, new LinearLayout.LayoutParams(dp(82), dp(80)));
 
-        FrameLayout ring = new FrameLayout(this);
-        ring.setBackground(round(
-                Color.TRANSPARENT,
-                dp(999),
-                lightTheme ? Color.rgb(124, 58, 189) : Color.rgb(178, 120, 255),
-                3
-        ));
-        FrameLayout.LayoutParams ringParams = new FrameLayout.LayoutParams(dp(70), dp(70), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
-        avatarHost.addView(ring, ringParams);
+        SponsorHeadGlowView glow = new SponsorHeadGlowView(this, false);
+        FrameLayout.LayoutParams glowParams = new FrameLayout.LayoutParams(dp(74), dp(74), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        avatarHost.addView(glow, glowParams);
 
         ImageView head = new ImageView(this);
         head.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        head.setPadding(dp(3), dp(3), dp(3), dp(3));
+        head.setPadding(dp(3), dp(2), dp(3), dp(2));
         String headUrl = "https://" + hotelDomain(hotel)
                 + "/habbo-imaging/avatarimage?figure=" + enc(figure)
                 + "&size=m&direction=2&head_direction=2&headonly=1";
         loadHeadImage(head, headUrl);
-        ring.addView(head, new FrameLayout.LayoutParams(-1, -1));
+        FrameLayout.LayoutParams headParams = new FrameLayout.LayoutParams(dp(70), dp(70), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        headParams.bottomMargin = dp(2);
+        avatarHost.addView(head, headParams);
 
-        FrameLayout flagBadge = new FrameLayout(this);
-        flagBadge.setBackground(round(
-                lightTheme ? Color.WHITE : Color.rgb(26, 19, 37),
-                dp(999),
-                lightTheme ? Color.rgb(124, 58, 189) : Color.rgb(178, 120, 255),
-                2
-        ));
-        FrameLayout.LayoutParams flagBadgeParams = new FrameLayout.LayoutParams(dp(29), dp(29), Gravity.TOP | Gravity.RIGHT);
-        flagBadgeParams.topMargin = dp(1);
-        flagBadgeParams.rightMargin = dp(1);
-        avatarHost.addView(flagBadge, flagBadgeParams);
         ImageView flag = new ImageView(this);
-        flag.setImageDrawable(new HotelFlagDrawable(hotel));
-        flagBadge.addView(flag, new FrameLayout.LayoutParams(dp(20), dp(13), Gravity.CENTER));
+        flag.setImageDrawable(new HotelFlagDrawable(hotel, false));
+        if (Build.VERSION.SDK_INT >= 21) flag.setElevation(dp(8));
+        FrameLayout.LayoutParams flagParams = new FrameLayout.LayoutParams(dp(25), dp(17), Gravity.TOP | Gravity.RIGHT);
+        flagParams.topMargin = dp(2);
+        flagParams.rightMargin = dp(1);
+        avatarHost.addView(flag, flagParams);
 
         TextView name = habboText(nick, 12, true);
         name.setSingleLine(true);
@@ -2782,10 +2919,57 @@ public class MainActivity extends Activity {
         name.setGravity(Gravity.CENTER);
         name.setIncludeFontPadding(false);
         name.setTextColor(lightTheme ? Color.rgb(39, 31, 47) : Color.WHITE);
-        item.addView(name, new LinearLayout.LayoutParams(dp(84), dp(23)));
+        item.addView(name, new LinearLayout.LayoutParams(dp(86), dp(23)));
 
         item.setContentDescription(nick + " - " + hotel.toUpperCase(Locale.ROOT));
         item.setOnClickListener(v -> openProfileReference(nick, uniqueId, figure, hotel));
+        return item;
+    }
+
+    private View sponsorActionCard() {
+        LinearLayout item = new LinearLayout(this);
+        item.setOrientation(LinearLayout.VERTICAL);
+        item.setGravity(Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        item.setPadding(dp(2), 0, dp(2), 0);
+        item.setBackgroundColor(Color.TRANSPARENT);
+        item.setClipChildren(false);
+        LinearLayout.LayoutParams itemParams = new LinearLayout.LayoutParams(dp(90), dp(104));
+        itemParams.rightMargin = dp(5);
+        item.setLayoutParams(itemParams);
+
+        FrameLayout avatarHost = new FrameLayout(this);
+        avatarHost.setClipChildren(false);
+        avatarHost.setClipToPadding(false);
+        item.addView(avatarHost, new LinearLayout.LayoutParams(dp(82), dp(80)));
+
+        SponsorHeadGlowView glow = new SponsorHeadGlowView(this, true);
+        sponsorsActionGlow = glow;
+        FrameLayout.LayoutParams glowParams = new FrameLayout.LayoutParams(dp(74), dp(74), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        avatarHost.addView(glow, glowParams);
+
+        sponsorsActionIcon = text(supporterActive ? "✦" : "+", supporterActive ? 26 : 34, Color.WHITE, true);
+        sponsorsActionIcon.setGravity(Gravity.CENTER);
+        sponsorsActionIcon.setIncludeFontPadding(false);
+        FrameLayout.LayoutParams iconParams = new FrameLayout.LayoutParams(dp(70), dp(70), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        iconParams.bottomMargin = dp(2);
+        avatarHost.addView(sponsorsActionIcon, iconParams);
+
+        sponsorsActionLabel = habboText(t(supporterActive
+                ? R.string.sponsor_manage_carousel
+                : R.string.sponsor_join_carousel), 11, true);
+        sponsorsActionLabel.setSingleLine(true);
+        sponsorsActionLabel.setEllipsize(TextUtils.TruncateAt.END);
+        sponsorsActionLabel.setGravity(Gravity.CENTER);
+        sponsorsActionLabel.setIncludeFontPadding(false);
+        sponsorsActionLabel.setTextColor(lightTheme ? Color.rgb(79, 48, 101) : Color.rgb(232, 216, 255));
+        item.addView(sponsorsActionLabel, new LinearLayout.LayoutParams(dp(86), dp(23)));
+
+        sponsorsSubscribeButton = item;
+        updateSponsorsSubscribeButton();
+        item.setOnClickListener(v -> {
+            if (supporterActive) showSupporterManageDialog();
+            else showSupporterOfferDialog();
+        });
         return item;
     }
 
@@ -3074,8 +3258,8 @@ public class MainActivity extends Activity {
                     // remoção de anúncios dependem desta confirmação segura.
                     finishBillingEntitlementCheck(active);
                     if (active && showActivation) toast(t(R.string.supporter_activated));
-                    if (active) maybeShowSupporterTutorial();
                     refreshSponsors();
+                    if (active) uiHandler.postDelayed(this::maybeShowSupporterTutorial, 650L);
                 });
             } catch(ApiHttpException error) {
                 supporterNextVerificationAtMs = System.currentTimeMillis() + 2L * 60L * 1000L;
@@ -3119,8 +3303,17 @@ public class MainActivity extends Activity {
         boolean pending = preferences.getBoolean(PREF_SUPPORTER_TUTORIAL_PENDING, false);
         int shownVersion = preferences.getInt(PREF_SUPPORTER_TUTORIAL_VERSION, 0);
         if (!supporterActive || (!pending && shownVersion >= CURRENT_SUPPORTER_TUTORIAL_VERSION)) return;
-        if (tutorialOverlayView != null || rewardAdBtn == null || rewardAdBtn.getWindowToken() == null) {
+        if (tutorialOverlayView != null || sponsorsSubscribeButton == null || sponsorsSubscribeButton.getWindowToken() == null) {
             uiHandler.postDelayed(this::maybeShowSupporterTutorial, 450L);
+            return;
+        }
+        Rect visibleTarget = new Rect();
+        boolean mostlyVisible = sponsorsSubscribeButton.getGlobalVisibleRect(visibleTarget)
+                && visibleTarget.height() >= sponsorsSubscribeButton.getHeight() * .72f;
+        if (!mostlyVisible && mainScroll != null && sponsorsSection != null) {
+            mainScroll.smoothScrollTo(0, Math.max(0, sponsorsSection.getTop() - dp(76)));
+            if (sponsorsCarouselScroll != null) sponsorsCarouselScroll.fullScroll(View.FOCUS_RIGHT);
+            uiHandler.postDelayed(this::maybeShowSupporterTutorial, 360L);
             return;
         }
         cancelTutorialPulseAnimation();
@@ -3130,7 +3323,7 @@ public class MainActivity extends Activity {
         tutorialOverlayView = overlay;
         ProfileTutorialOverlayDrawable drawable = new ProfileTutorialOverlayDrawable(
                 overlay,
-                rewardAdBtn,
+                sponsorsSubscribeButton,
                 8,
                 0
         );
@@ -3141,10 +3334,10 @@ public class MainActivity extends Activity {
         card.setGravity(Gravity.CENTER);
         card.setPadding(dp(18), dp(16), dp(18), dp(16));
         card.setBackground(new TutorialCardDrawable(0));
-        FrameLayout.LayoutParams cardParams = new FrameLayout.LayoutParams(-1, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL);
+        FrameLayout.LayoutParams cardParams = new FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
         cardParams.leftMargin = dp(22);
         cardParams.rightMargin = dp(22);
-        cardParams.topMargin = dp(86);
+        cardParams.bottomMargin = dp(92);
         overlay.addView(card, cardParams);
 
         TextView title = habboText(t(R.string.supporter_tutorial_title), 20, true);
@@ -3340,13 +3533,8 @@ public class MainActivity extends Activity {
 
         LinearLayout bodySurface = new LinearLayout(this);
         bodySurface.setOrientation(LinearLayout.VERTICAL);
-        bodySurface.setPadding(dp(14), dp(12), dp(14), dp(12));
-        bodySurface.setBackground(round(
-                Color.argb(22, 255, 255, 255),
-                dp(17),
-                Color.argb(34, 255, 255, 255),
-                1
-        ));
+        bodySurface.setPadding(dp(1), dp(2), dp(1), dp(2));
+        bodySurface.setBackgroundColor(Color.TRANSPARENT);
         LinearLayout.LayoutParams surfaceLp = new LinearLayout.LayoutParams(-1, -2);
         surfaceLp.topMargin = dp(15);
         card.addView(bodySurface, surfaceLp);
@@ -3377,14 +3565,11 @@ public class MainActivity extends Activity {
         for (int i = 0; i < 3; i++) {
             View dot = new View(this);
             boolean active = i == safeStep;
-            dot.setBackground(round(
-                    active ? accent : Color.argb(70, 255, 255, 255),
-                    dp(999),
-                    active ? Color.argb(120, 255, 255, 255) : Color.TRANSPARENT,
-                    active ? 1 : 0
-            ));
-            LinearLayout.LayoutParams dotLp = new LinearLayout.LayoutParams(active ? dp(24) : dp(7), dp(7));
-            dotLp.rightMargin = dp(7);
+            dot.setBackground(active
+                    ? grad(dp(999), tutorialAccentSecondaryColor(safeStep), accent)
+                    : round(Color.argb(52,255,255,255), dp(999), Color.TRANSPARENT, 0));
+            LinearLayout.LayoutParams dotLp = new LinearLayout.LayoutParams(dp(25), dp(4));
+            dotLp.rightMargin = dp(6);
             dots.addView(dot, dotLp);
         }
 
@@ -3399,7 +3584,7 @@ public class MainActivity extends Activity {
         nextButton.setMinWidth(dp(116));
         nextButton.setPadding(dp(17), 0, dp(17), 0);
         nextButton.setBackground(grad(
-                dp(14),
+                dp(999),
                 tutorialAccentSecondaryColor(safeStep),
                 accent
         ));
@@ -3845,9 +4030,9 @@ public class MainActivity extends Activity {
 
     private void showStartState() {
         resultWrap.removeAllViews();
-        LinearLayout c = sectionCard(t(R.string.ready_search), 0, false);
-        c.addView(centerNote(t(R.string.start_note)));
-        updateSponsorsStartSpacing();
+        startScreenVisible = activeRenderedProfile == null;
+        updateStartNativeAdVisibility();
+        if (startScreenVisible) loadStartNativeAdIfNeeded();
     }
 
     private void setSearchTextProgrammatically(String value) {
@@ -3895,6 +4080,8 @@ public class MainActivity extends Activity {
         final int token = ++activeSearchToken;
         activeSearchNick = nickKey;
         searchInProgress = true;
+        startScreenVisible = false;
+        updateStartNativeAdVisibility();
         currentLoadedNick = "";
         currentProfilePrivate = false;
         inlineProgressPct = 0;
@@ -4014,6 +4201,8 @@ public class MainActivity extends Activity {
         final int token = ++activeSearchToken;
         activeSearchNick = idKey;
         searchInProgress = true;
+        startScreenVisible = false;
+        updateStartNativeAdVisibility();
         currentLoadedNick = "";
         currentProfilePrivate = false;
         inlineProgressPct = 0;
@@ -4085,6 +4274,11 @@ public class MainActivity extends Activity {
         r.searchedNick = fallbackName == null || fallbackName.trim().isEmpty() ? uniqueId : fallbackName.trim();
         r.uniqueId = uniqueId == null ? "" : uniqueId.trim();
         r.hotelKey = currentHotelKey;
+        Future<JSONObject> previousNamesFuture = null;
+        if (!r.searchedNick.isEmpty() && !r.searchedNick.toLowerCase(Locale.ROOT).startsWith("hh")) {
+            final String lookupName = r.searchedNick;
+            previousNamesFuture = executor.submit(() -> fetchHabbodexSuggestions(lookupName));
+        }
 
         JSONObject officialUser = r.uniqueId.isEmpty() ? null : validProfileObject(
                 tryJson(habboApiUrl("/api/public/users/" + enc(r.uniqueId)))
@@ -4126,7 +4320,18 @@ public class MainActivity extends Activity {
         if (r.starGems.isEmpty()) r.starGems = firstText(dexProfile, "starGemCount", "starGems");
         r.totalBadges = firstText(base, "totalBadges", "badgeCount", "badgesCount", "badgesTotal");
         if (r.totalBadges.isEmpty()) r.totalBadges = firstText(dexProfile, "totalBadges", "badgeCount", "badgesCount", "badgesTotal");
-        r.previousNames = extractList(dexProfile, "previousNames");
+        JSONObject namesPayload = null;
+        if (previousNamesFuture != null) {
+            try { namesPayload = previousNamesFuture.get(15, TimeUnit.SECONDS); }
+            catch(Exception ignored) { previousNamesFuture.cancel(true); }
+        }
+        if (namesPayload == null && previousNamesFuture == null && !r.name.isEmpty()) {
+            namesPayload = fetchHabbodexSuggestions(r.name);
+        }
+        r.previousNames = mergeLists(
+                extractList(dexProfile, "previousNames"),
+                extractPreviousNamesFromSuggest(namesPayload, r.name)
+        );
         r.selectedBadges = mergeLists(extractList(officialUser, "selectedBadges"), extractList(dexProfile, "selectedBadges"));
         r.dexProfile = dexProfile;
         r.officialProfile = officialProfile;
@@ -4143,6 +4348,12 @@ public class MainActivity extends Activity {
         ProfileResult r = new ProfileResult();
         r.searchedNick = nick;
         r.hotelKey = currentHotelKey;
+
+        // Nomes anteriores vêm diretamente do proxy habbodex.php. A chamada
+        // roda em paralelo à API oficial para não atrasar o perfil aberto.
+        Future<JSONObject> suggestFuture = executor.submit(
+                () -> fetchHabbodexSuggestions(nick)
+        );
 
         // Uma busca normal começa exclusivamente pela API oficial. O servidor
         // complementar só participa desta fase quando o nome não é encontrado.
@@ -4162,14 +4373,10 @@ public class MainActivity extends Activity {
             Future<JSONObject> complementFuture = executor.submit(
                     () -> validProfileObject(unwrap(tryJson(complementProfileByNameUrl(nick))))
             );
-            Future<JSONObject> suggestFuture = executor.submit(
-                    () -> unwrap(tryJson(habbodexSuggestUrl(nick)))
-            );
             Future<String> historicalIdFuture = executor.submit(
                     () -> resolveHabbowidgetsUniqueIdByName(nick, currentHotelKey)
             );
             try { complementByName = complementFuture.get(); } catch(Exception ignored) {}
-            try { suggest = suggestFuture.get(); } catch(Exception ignored) {}
 
             if (complementByName == null) {
                 String historicalId = "";
@@ -4191,6 +4398,8 @@ public class MainActivity extends Activity {
                 }
             }
         }
+        try { suggest = suggestFuture.get(15, TimeUnit.SECONDS); }
+        catch(Exception ignored) { suggestFuture.cancel(true); }
 
         JSONObject base = firstObject(habboPublic, complementByName);
         if (base == null) {
@@ -4981,7 +5190,8 @@ public class MainActivity extends Activity {
     private void renderProfile(ProfileResult r) {
         normalizeProfileState(r);
         activeRenderedProfile = r;
-        updateSponsorsStartSpacing();
+        startScreenVisible = false;
+        updateStartNativeAdVisibility();
         rememberOpenedProfile(r);
         currentProfilePrivate = r != null && (r.privateProfile || r.banned);
         profileAvatarTutorialTarget = null;
@@ -6777,7 +6987,7 @@ public class MainActivity extends Activity {
 
     private ArrayList<JSONObject> fetchPreviousNickSuggestions(String query) {
         try {
-            JSONObject payload = unwrap(getJson(habbodexSuggestUrl(query)));
+            JSONObject payload = fetchHabbodexSuggestions(query);
             return filterExactPreviousNickSuggestions(payload, query);
         } catch(Exception e) { return new ArrayList<>(); }
     }
@@ -6866,6 +7076,8 @@ public class MainActivity extends Activity {
     }
 
     private void showNotFoundState(String nick, ArrayList<JSONObject> suggestions) {
+        startScreenVisible = false;
+        updateStartNativeAdVisibility();
         resultWrap.removeAllViews();
         LinearLayout c = sectionCard(null, 0, false);
         c.setPadding(dp(18), dp(18), dp(18), dp(18));
@@ -6897,7 +7109,15 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void showError(String msg) { resultWrap.removeAllViews(); LinearLayout c = sectionCard(t(R.string.error_title), 0, false); TextView t = text(msg, 15, Color.WHITE, true); t.setGravity(Gravity.CENTER); c.addView(t); }
+    private void showError(String msg) {
+        startScreenVisible = false;
+        updateStartNativeAdVisibility();
+        resultWrap.removeAllViews();
+        LinearLayout c = sectionCard(t(R.string.error_title), 0, false);
+        TextView message = text(msg, 15, Color.WHITE, true);
+        message.setGravity(Gravity.CENTER);
+        c.addView(message);
+    }
     private void setStatusMessage(String message) {
         if (statusText == null) return;
         String clean = message == null ? "" : message.trim();
@@ -7144,10 +7364,47 @@ private int loadingProgressFor(String message) {
     }
 
     private String habbodexSuggestUrl(String name) {
-        return PROFILE_API + "/habboinfo/habbos?name=" + enc(name) + "&includePreviousNames=true&hotel=" + enc(habbodexHotelCode(currentHotelKey));
+        return HABBODEX_PROXY_API
+                + "?action=search&name=" + enc(name)
+                + "&hotel=" + enc(habbodexHotelCode(currentHotelKey));
     }
 
-    private Object getJsonAny(String u) throws Exception { HttpURLConnection c = (HttpURLConnection)new URL(u).openConnection(); boolean complement = u != null && u.startsWith(PROFILE_API); c.setUseCaches(false); c.setDefaultUseCaches(false); c.setConnectTimeout(complement ? 10000 : 8000); c.setReadTimeout(complement ? 30000 : 15000); c.setRequestProperty("Accept", "application/json, text/plain, */*"); c.setRequestProperty("Cache-Control", "no-cache, no-store"); c.setRequestProperty("Pragma", "no-cache"); c.setRequestProperty("User-Agent", "ToxicSearchTool/" + APP_VERSION + " Android (+https://atoxic.com.br)"); c.setRequestProperty("X-Toxic-App", APP_VERSION); int code = c.getResponseCode(); InputStream is = code >= 200 && code < 300 ? c.getInputStream() : c.getErrorStream(); String body = readAll(is); if (code < 200 || code >= 300 || body == null || body.trim().isEmpty()) throw new IOException("HTTP " + code); String clean = body.trim(); return clean.startsWith("[") ? new JSONArray(clean) : new JSONObject(clean); }
+    private String legacyHabbodexSuggestUrl(String name) {
+        return PROFILE_API
+                + "/habboinfo/habbos?name=" + enc(name)
+                + "&includePreviousNames=true&hotel=" + enc(habbodexHotelCode(currentHotelKey));
+    }
+
+    private JSONObject fetchHabbodexSuggestions(String name) {
+        JSONObject direct = unwrap(tryJson(habbodexSuggestUrl(name)));
+        if (direct != null && !extractList(direct, null).isEmpty()) return direct;
+        if (Thread.currentThread().isInterrupted()) return null;
+        return unwrap(tryJson(legacyHabbodexSuggestUrl(name)));
+    }
+
+    private Object getJsonAny(String u) throws Exception {
+        HttpURLConnection c = (HttpURLConnection)new URL(u).openConnection();
+        boolean complement = u != null && (u.startsWith(PROFILE_API) || u.startsWith(HABBODEX_PROXY_API));
+        c.setUseCaches(false);
+        c.setDefaultUseCaches(false);
+        c.setConnectTimeout(complement ? 10000 : 8000);
+        c.setReadTimeout(complement ? 30000 : 15000);
+        c.setRequestProperty("Accept", "application/json, text/plain, */*");
+        c.setRequestProperty("Cache-Control", "no-cache, no-store");
+        c.setRequestProperty("Pragma", "no-cache");
+        c.setRequestProperty("User-Agent", "ToxicSearchTool/" + APP_VERSION + " Android (+https://atoxic.com.br)");
+        c.setRequestProperty("X-Toxic-App", APP_VERSION);
+        if (u != null && u.startsWith(HABBODEX_PROXY_API)) {
+            String proxyKey = BuildConfig.HABBODEX_PROXY_KEY == null ? "" : BuildConfig.HABBODEX_PROXY_KEY.trim();
+            if (!proxyKey.isEmpty()) c.setRequestProperty("X-Proxy-Key", proxyKey);
+        }
+        int code = c.getResponseCode();
+        InputStream is = code >= 200 && code < 300 ? c.getInputStream() : c.getErrorStream();
+        String body = readAll(is);
+        if (code < 200 || code >= 300 || body == null || body.trim().isEmpty()) throw new IOException("HTTP " + code);
+        String clean = body.trim();
+        return clean.startsWith("[") ? new JSONArray(clean) : new JSONObject(clean);
+    }
     private JSONObject getJson(String u) throws Exception { Object any = getJsonAny(u); if (any instanceof JSONObject) return (JSONObject)any; JSONObject wrap = new JSONObject(); wrap.put("data", any); return wrap; }
     private JSONObject tryJson(String u) { try { return getJson(u); } catch (Exception e) { return null; } }
 
@@ -12768,10 +13025,124 @@ private int loadingProgressFor(String message) {
         }
     }
 
+    private class SponsorHeadGlowView extends View {
+        private final Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final boolean actionCard;
+        private ValueAnimator animator;
+        private float phase = 0f;
+
+        SponsorHeadGlowView(Context context, boolean action) {
+            super(context);
+            actionCard = action;
+            setLayerType(View.LAYER_TYPE_SOFTWARE, null);
+        }
+
+        @Override protected void onAttachedToWindow() {
+            super.onAttachedToWindow();
+            if (animator != null && animator.isRunning()) return;
+            animator = ValueAnimator.ofFloat(0f, 1f);
+            animator.setDuration(actionCard ? 1700L : 2400L);
+            animator.setRepeatCount(ValueAnimator.INFINITE);
+            animator.setRepeatMode(ValueAnimator.RESTART);
+            animator.addUpdateListener(value -> {
+                phase = (Float)value.getAnimatedValue();
+                invalidate();
+            });
+            animator.start();
+        }
+
+        @Override protected void onDetachedFromWindow() {
+            if (animator != null) {
+                try { animator.cancel(); } catch(Exception ignored) {}
+                animator = null;
+            }
+            super.onDetachedFromWindow();
+        }
+
+        @Override protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            float w = getWidth();
+            float h = getHeight();
+            if (w <= 0f || h <= 0f) return;
+            RectF r = new RectF(dp(4), dp(4), w - dp(4), h - dp(4));
+            float radius = dp(21);
+            boolean activeAction = actionCard && supporterActive;
+            int first = activeAction ? Color.rgb(113, 46, 232) : Color.rgb(71, 29, 126);
+            int middle = actionCard ? Color.rgb(153, 74, 245) : Color.rgb(116, 62, 185);
+            int last = activeAction ? Color.rgb(224, 150, 255) : Color.rgb(74, 168, 228);
+
+            p.setShader(null);
+            p.setStyle(Paint.Style.FILL);
+            p.setColor(Color.argb(actionCard ? 135 : 96, 160, 78, 255));
+            p.setShadowLayer(dp(7) + dp(2) * (float)Math.sin(phase * Math.PI), 0, dp(2), p.getColor());
+            canvas.drawRoundRect(r, radius, radius, p);
+            p.clearShadowLayer();
+
+            float shift = (phase - .5f) * r.width() * .35f;
+            p.setShader(new LinearGradient(
+                    r.left + shift,
+                    r.top,
+                    r.right + shift,
+                    r.bottom,
+                    new int[]{first, middle, last},
+                    new float[]{0f, .55f, 1f},
+                    Shader.TileMode.CLAMP
+            ));
+            canvas.drawRoundRect(r, radius, radius, p);
+            p.setShader(null);
+
+            p.setShader(new RadialGradient(
+                    r.left + r.width() * (.25f + .55f * phase),
+                    r.top + r.height() * .18f,
+                    r.width() * .86f,
+                    new int[]{Color.argb(95,255,255,255), Color.argb(18,255,255,255), Color.TRANSPARENT},
+                    new float[]{0f, .36f, 1f},
+                    Shader.TileMode.CLAMP
+            ));
+            canvas.drawRoundRect(r, radius, radius, p);
+            p.setShader(null);
+
+            canvas.save();
+            Path clip = new Path();
+            clip.addRoundRect(r, radius, radius, Path.Direction.CW);
+            canvas.clipPath(clip);
+            float shimmerX = r.left - r.width() * .55f + phase * r.width() * 2.1f;
+            p.setShader(new LinearGradient(
+                    shimmerX - dp(14),
+                    r.top,
+                    shimmerX + dp(14),
+                    r.bottom,
+                    new int[]{Color.TRANSPARENT, Color.argb(actionCard ? 95 : 68,255,255,255), Color.TRANSPARENT},
+                    new float[]{0f, .5f, 1f},
+                    Shader.TileMode.CLAMP
+            ));
+            canvas.drawRect(r, p);
+            p.setShader(null);
+            canvas.restore();
+
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeWidth(dp(1));
+            p.setColor(Color.argb(110, 245, 222, 255));
+            canvas.drawRoundRect(new RectF(r.left + 1, r.top + 1, r.right - 1, r.bottom - 1), radius, radius, p);
+
+            p.setStyle(Paint.Style.FILL);
+            float blink = .45f + .55f * (float)Math.sin(phase * Math.PI);
+            p.setColor(Color.argb((int)(185 * blink), 255, 255, 255));
+            canvas.drawCircle(r.right - dp(8), r.top + dp(9), dp(2), p);
+            canvas.drawCircle(r.left + dp(9), r.bottom - dp(10), dp(1), p);
+        }
+    }
+
     public class HotelFlagDrawable extends Drawable {
         Paint p = new Paint(Paint.ANTI_ALIAS_FLAG);
         String hotel;
-        HotelFlagDrawable(String hotelKey) { hotel = normalizeHotelKey(hotelKey); if (hotel.isEmpty()) hotel = "br"; }
+        boolean showBorder;
+        HotelFlagDrawable(String hotelKey) { this(hotelKey, true); }
+        HotelFlagDrawable(String hotelKey, boolean border) {
+            hotel = normalizeHotelKey(hotelKey);
+            if (hotel.isEmpty()) hotel = "br";
+            showBorder = border;
+        }
         @Override public int getIntrinsicWidth() { return dp(24); }
         @Override public int getIntrinsicHeight() { return dp(16); }
         @Override public void draw(Canvas c) {
@@ -12808,7 +13179,12 @@ private int loadingProgressFor(String message) {
                 p.setColor(Color.rgb(227,10,23)); c.drawRect(r,p); p.setColor(Color.WHITE); c.drawCircle(x+w*.43f,y+h*.50f,h*.25f,p); p.setColor(Color.rgb(227,10,23)); c.drawCircle(x+w*.50f,y+h*.50f,h*.20f,p); p.setColor(Color.WHITE); Path star=new Path(); float cx=x+w*.64f, cy=y+h*.50f, rr=h*.15f; for(int i=0;i<10;i++){ double a=-Math.PI/2+i*Math.PI/5; float rad=(i%2==0)?rr:rr*.42f; float px=cx+(float)Math.cos(a)*rad, py=cy+(float)Math.sin(a)*rad; if(i==0) star.moveTo(px,py); else star.lineTo(px,py);} star.close(); c.drawPath(star,p);
             }
             c.restore();
-            p.setStyle(Paint.Style.STROKE); p.setStrokeWidth(dp(1)); p.setColor(Color.argb(90,0,0,0)); c.drawRoundRect(r, dp(3), dp(3), p);
+            if (showBorder) {
+                p.setStyle(Paint.Style.STROKE);
+                p.setStrokeWidth(dp(1));
+                p.setColor(Color.argb(90,0,0,0));
+                c.drawRoundRect(r, dp(3), dp(3), p);
+            }
         }
         @Override public void setAlpha(int alpha) { p.setAlpha(alpha); }
         @Override public void setColorFilter(android.graphics.ColorFilter cf) { p.setColorFilter(cf); }
@@ -13373,8 +13749,18 @@ private int loadingProgressFor(String message) {
                     background.top,
                     background.right,
                     background.bottom,
-                    Color.rgb(91, 33, 182),
-                    Color.rgb(192, 132, 252),
+                    Color.rgb(76, 29, 149),
+                    Color.rgb(168, 85, 247),
+                    Shader.TileMode.CLAMP
+            ));
+            canvas.drawRoundRect(background, size * .25f, size * .25f, p);
+            p.setShader(null);
+            p.setShader(new RadialGradient(
+                    background.right - size * .12f,
+                    background.top + size * .10f,
+                    size * .55f,
+                    Color.argb(105,255,255,255),
+                    Color.TRANSPARENT,
                     Shader.TileMode.CLAMP
             ));
             canvas.drawRoundRect(background, size * .25f, size * .25f, p);
@@ -13395,15 +13781,16 @@ private int loadingProgressFor(String message) {
             );
             canvas.drawRoundRect(shoulders, size * .12f, size * .12f, p);
 
-            p.setColor(Color.rgb(255, 207, 64));
-            Path crown = new Path();
-            crown.moveTo(cx - size * .18f, cy - size * .25f);
-            crown.lineTo(cx - size * .10f, cy - size * .37f);
-            crown.lineTo(cx, cy - size * .29f);
-            crown.lineTo(cx + size * .10f, cy - size * .37f);
-            crown.lineTo(cx + size * .18f, cy - size * .25f);
-            crown.close();
-            canvas.drawPath(crown, p);
+            // Brilho roxo discreto no lugar da antiga coroa dourada.
+            p.setColor(Color.rgb(238, 214, 255));
+            p.setStyle(Paint.Style.STROKE);
+            p.setStrokeWidth(Math.max(1.5f, size * .045f));
+            p.setStrokeCap(Paint.Cap.ROUND);
+            float sx = background.right - size * .13f;
+            float sy = background.top + size * .15f;
+            float ray = size * .075f;
+            canvas.drawLine(sx - ray, sy, sx + ray, sy, p);
+            canvas.drawLine(sx, sy - ray, sx, sy + ray, p);
         }
         @Override public void setAlpha(int alpha){p.setAlpha(alpha);}
         @Override public void setColorFilter(android.graphics.ColorFilter filter){p.setColorFilter(filter);}
@@ -13761,39 +14148,26 @@ private int loadingProgressFor(String message) {
         @Override public void draw(Canvas c) {
             Rect b = getBounds();
             RectF r = new RectF(b.left + dp(3), b.top + dp(3), b.right - dp(3), b.bottom - dp(3));
-            float radius = dp(28);
+            float radius = dp(23);
             int accent = tutorialAccentColor(step);
             int secondary = tutorialAccentSecondaryColor(step);
 
             p.setStyle(Paint.Style.FILL);
-            p.setShader(new LinearGradient(
-                    r.left,
-                    r.top,
-                    r.right,
-                    r.bottom,
-                    new int[]{
-                            Color.rgb(24, 18, 40),
-                            Color.rgb(38, 22, 60),
-                            Color.rgb(21, 17, 35)
-                    },
-                    new float[]{0f, 0.52f, 1f},
-                    Shader.TileMode.CLAMP
-            ));
-            p.setShadowLayer(dp(17), 0, dp(8), Color.argb(165, 0, 0, 0));
+            p.setColor(Color.rgb(18, 16, 25));
+            p.setShadowLayer(dp(20), 0, dp(10), Color.argb(190, 0, 0, 0));
             c.drawRoundRect(r, radius, radius, p);
             p.clearShadowLayer();
-            p.setShader(null);
 
             p.setShader(new RadialGradient(
-                    r.right - dp(28),
-                    r.top + dp(20),
-                    Math.max(dp(140), r.width() * 0.72f),
+                    r.left + dp(34),
+                    r.bottom - dp(12),
+                    Math.max(dp(170), r.width() * .86f),
                     new int[]{
-                            Color.argb(105, Color.red(accent), Color.green(accent), Color.blue(accent)),
-                            Color.argb(22, Color.red(secondary), Color.green(secondary), Color.blue(secondary)),
+                            Color.argb(82, Color.red(secondary), Color.green(secondary), Color.blue(secondary)),
+                            Color.argb(18, Color.red(accent), Color.green(accent), Color.blue(accent)),
                             Color.TRANSPARENT
                     },
-                    new float[]{0f, 0.42f, 1f},
+                    new float[]{0f, .48f, 1f},
                     Shader.TileMode.CLAMP
             ));
             c.drawRoundRect(r, radius, radius, p);
@@ -13801,28 +14175,14 @@ private int loadingProgressFor(String message) {
 
             p.setStyle(Paint.Style.STROKE);
             p.setStrokeWidth(dp(1));
-            p.setShader(new LinearGradient(
-                    r.left,
-                    r.top,
-                    r.right,
-                    r.bottom,
-                    Color.argb(185, Color.red(accent), Color.green(accent), Color.blue(accent)),
-                    Color.argb(45, 255, 255, 255),
-                    Shader.TileMode.CLAMP
-            ));
+            p.setColor(Color.argb(74, 255, 255, 255));
             c.drawRoundRect(r, radius, radius, p);
-            p.setShader(null);
 
             p.setStyle(Paint.Style.FILL);
-            p.setShader(new LinearGradient(r.left, r.top, r.right, r.top, secondary, accent, Shader.TileMode.CLAMP));
-            RectF accentBar = new RectF(r.left + dp(24), r.top, r.right - dp(24), r.top + dp(3));
+            p.setShader(new LinearGradient(r.left, r.top, r.left, r.bottom, accent, secondary, Shader.TileMode.CLAMP));
+            RectF accentBar = new RectF(r.left, r.top + dp(22), r.left + dp(4), r.bottom - dp(22));
             c.drawRoundRect(accentBar, dp(999), dp(999), p);
             p.setShader(null);
-
-            p.setColor(Color.argb(34, 255, 255, 255));
-            c.drawCircle(r.right - dp(30), r.top + dp(34), dp(12), p);
-            p.setColor(Color.argb(30, Color.red(accent), Color.green(accent), Color.blue(accent)));
-            c.drawCircle(r.right - dp(54), r.top + dp(23), dp(6), p);
         }
 
         @Override public void setAlpha(int a){p.setAlpha(a);}
