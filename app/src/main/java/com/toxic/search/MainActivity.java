@@ -58,7 +58,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_PROXY_API = "https://atoxic.com.br/habbodex.php";
-    private static final String APP_VERSION = "1.3.24";
+    private static final String APP_VERSION = "1.3.25";
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -8185,8 +8185,10 @@ private int loadingProgressFor(String message) {
             String sections,
             int maxPages
     ) {
-        String url = HABBODEX_PROXY_API
-                + "?action=batch&id=" + enc(uniqueId)
+        // Todo o complemento passa pelo api.php. O api.php inclui habbodex.php
+        // internamente como biblioteca, então o APK não depende da PROXY_KEY.
+        String url = PROFILE_API
+                + "/habbodex/batch?id=" + enc(uniqueId)
                 + "&includePrivate=" + (includePrivate ? "true" : "false")
                 + "&maxPages=" + Math.max(1, Math.min(25, maxPages));
         String cleanSections = sections == null ? "" : sections.trim();
@@ -8196,15 +8198,15 @@ private int loadingProgressFor(String message) {
     }
 
     private String habbodexListUrl(String uniqueId, String endpoint, int page, int limit) {
-        return HABBODEX_PROXY_API
-                + "?action=list&id=" + enc(uniqueId)
+        return PROFILE_API
+                + "/habbodex/list?id=" + enc(uniqueId)
                 + "&endpoint=" + enc(endpoint)
                 + "&page=" + Math.max(1, page)
                 + "&limit=" + Math.max(1, Math.min(100, limit));
     }
 
     private String habbodexProfileUrl(String uniqueId) {
-        return HABBODEX_PROXY_API + "?action=profile&id=" + enc(uniqueId);
+        return PROFILE_API + "/habbodex/profile?id=" + enc(uniqueId);
     }
 
     private String apiHabbodexProfileUrl(String uniqueId) {
@@ -8245,8 +8247,8 @@ private int loadingProgressFor(String message) {
     }
 
     private String habbodexSuggestUrl(String name, String hotelKey) {
-        return HABBODEX_PROXY_API
-                + "?action=search&name=" + enc(name)
+        return PROFILE_API
+                + "/habbodex/search?name=" + enc(name)
                 + "&hotel=" + enc(habbodexHotelCode(hotelKey));
     }
 
@@ -8602,6 +8604,7 @@ private int loadingProgressFor(String message) {
         if (u.startsWith(HABBODEX_PROXY_API)) return true;
         if (u.startsWith(PROFILE_API)) {
             return u.contains("/habboinfo/")
+                    || u.contains("/habbodex/")
                     || u.contains("/furnidex/")
                     || u.contains("endpoint=")
                     || u.contains("figureString=");
