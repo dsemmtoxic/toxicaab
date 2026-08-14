@@ -58,7 +58,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_PROXY_API = "https://atoxic.com.br/habbodex.php";
-    private static final String APP_VERSION = "1.3.22";
+    private static final String APP_VERSION = "1.3.23";
     private static final long PROFILE_MIN_LOADING_MS = 4_000L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -4524,7 +4524,11 @@ public class MainActivity extends Activity {
                 || !isActiveToken(token)) return;
 
         final String uniqueId = r.uniqueId.trim();
-        final boolean restrictedProfile = r.privateProfile || r.banned;
+        // Só consulta perfil completo e fotos oficiais quando alguma identidade
+        // já confirmou explicitamente que o perfil é público. Em perfis
+        // privados/banidos (ou de visibilidade ainda desconhecida), todo o
+        // conteúdo restante vem do HabboDex.
+        final boolean restrictedProfile = !mayLoadOfficialProfileSections(r);
         synchronized (profileProgressLock) {
             if (!isActiveToken(token)) return;
             profileSectionsInProgress = true;
@@ -4536,7 +4540,6 @@ public class MainActivity extends Activity {
                 restrictedProfile ? 2 : 3
         );
         final String earlySections = "previous-names,previous-mottos,previous-styles";
-        final String laterSections = "friends,previous-friends,badges";
 
         final Future<JSONObject> officialProfileFuture = restrictedProfile
                 ? null
@@ -4784,46 +4787,29 @@ public class MainActivity extends Activity {
                     publishProgressiveProfile(r, token, firstRenderReleaseAt);
                 }
 
-                // As seções menos prioritárias só começam depois que nomes,
-                // missões e visuais foram aplicados. Isso reduz rajadas de
-                // requisições simultâneas ao HabboDex e evita respostas parciais.
-                JSONObject later = fetchDirectHabbodexPriorityBatch(
+                // Amigos e removidos não compartilham mais o mesmo lote. Assim,
+                // um histórico grande de removidos não segura as datas dos
+                // amigos atuais nem transforma uma falha em falha das duas abas.
+                JSONObject friendsBatch = fetchDirectHabbodexPriorityBatch(
                         uniqueId,
-                        laterSections
-                );
-                final JSONObject laterProfileFallback;
-                synchronized (r) {
-                    laterProfileFallback = copyJsonObject(r.dexProfile);
-                }
-                if (!isActiveToken(token)) return;
-
-                ProfileSectionPayload laterFriends = historySectionFromBatch(
-                        later,
                         "friends"
                 );
-                ProfileSectionPayload laterRemoved = historySectionFromBatch(
-                        later,
-                        "previousFriends"
+                final JSONObject friendsProfileFallback;
+                synchronized (r) {
+                    friendsProfileFallback = copyJsonObject(r.dexProfile);
+                }
+                if (!isActiveToken(token)) return;
+                ProfileSectionPayload friends = historySectionWithDirectFallback(
+                        friendsBatch,
+                        friendsProfileFallback,
+                        uniqueId,
+                        "friends",
+                        "friends",
+                        25
                 );
-                ProfileSectionPayload laterBadges = historySectionFromBatch(
-                        later,
-                        "badges"
-                );
-                if (!laterFriends.items.isEmpty()
-                        || !laterRemoved.items.isEmpty()
-                        || !laterBadges.items.isEmpty()) {
+                if (friends.success || !friends.items.isEmpty()) {
                     synchronized (r) {
-                        if (!laterFriends.items.isEmpty()) {
-                            putComplementSectionLocked(r, "friends", laterFriends.items);
-                        }
-                        if (!laterRemoved.items.isEmpty()) {
-                            putComplementSectionLocked(
-                                    r, "previousFriends", laterRemoved.items
-                            );
-                        }
-                        if (!laterBadges.items.isEmpty()) {
-                            putComplementSectionLocked(r, "badges", laterBadges.items);
-                        }
+                        putComplementSectionLocked(r, "friends", friends.items);
                         reconcileProfileSources(r);
                         enrichPhotoRoomInfo(r);
                     }
@@ -4835,67 +4821,33 @@ public class MainActivity extends Activity {
                     publishProgressiveProfile(r, token, firstRenderReleaseAt);
                 }
 
-                Future<ProfileSectionPayload> friendsSectionFuture = executor.submit(
-                        () -> historySectionWithDirectFallback(
-                                later,
-                                laterProfileFallback,
-                                uniqueId,
-                                "friends",
-                                "friends",
-                                25
-                        )
+                JSONObject removedBatch = fetchDirectHabbodexPriorityBatch(
+                        uniqueId,
+                        "previous-friends"
                 );
-                Future<ProfileSectionPayload> removedSectionFuture = executor.submit(
-                        () -> historySectionWithDirectFallback(
-                                later,
-                                laterProfileFallback,
-                                uniqueId,
-                                "previous-friends",
-                                "previousFriends",
-                                25
-                        )
-                );
-                Future<ProfileSectionPayload> badgesSectionFuture = executor.submit(
-                        () -> historySectionWithDirectFallback(
-                                later,
-                                laterProfileFallback,
-                                uniqueId,
-                                "badges",
-                                "badges",
-                                25
-                        ));
-                ProfileSectionPayload friendsDirect = awaitFutureValue(
-                        friendsSectionFuture
-                );
-                ProfileSectionPayload removedDirect = awaitFutureValue(
-                        removedSectionFuture
-                );
-                ProfileSectionPayload badgesDirect = awaitFutureValue(badgesSectionFuture);
-                if (friendsDirect == null) {
-                    friendsDirect = ProfileSectionPayload.list(
-                            "friends", new ArrayList<>(), false
-                    );
-                }
-                if (removedDirect == null) {
-                    removedDirect = ProfileSectionPayload.list(
-                            "previousFriends", new ArrayList<>(), false
-                    );
-                }
-                if (badgesDirect == null) {
-                    badgesDirect = ProfileSectionPayload.list(
-                            "badges", new ArrayList<>(), false
-                    );
-                }
-                ProfileSectionPayload friends = friendsDirect;
-                ProfileSectionPayload removed = removedDirect;
-                ProfileSectionPayload badges = badgesDirect;
-
+                final JSONObject removedProfileFallback;
                 synchronized (r) {
-                    putComplementSectionLocked(r, "friends", friends.items);
-                    putComplementSectionLocked(r, "previousFriends", removed.items);
-                    putComplementSectionLocked(r, "badges", badges.items);
-                    reconcileProfileSources(r);
-                    enrichPhotoRoomInfo(r);
+                    removedProfileFallback = copyJsonObject(r.dexProfile);
+                }
+                if (!isActiveToken(token)) return;
+                ProfileSectionPayload removed = historySectionWithDirectFallback(
+                        removedBatch,
+                        removedProfileFallback,
+                        uniqueId,
+                        "previous-friends",
+                        "previousFriends",
+                        25
+                );
+                if (removed.success || !removed.items.isEmpty()) {
+                    synchronized (r) {
+                        putComplementSectionLocked(
+                                r,
+                                "previousFriends",
+                                removed.items
+                        );
+                        reconcileProfileSources(r);
+                        enrichPhotoRoomInfo(r);
+                    }
                 }
                 setProfileSectionsProgress(
                         token,
@@ -4952,6 +4904,16 @@ public class MainActivity extends Activity {
                     );
                     publishProgressiveProfile(r, token, firstRenderReleaseAt);
                 }
+
+                // A API oficial já entrega os emblemas atuais de perfis
+                // públicos. O HabboDex é consultado em segundo plano por apenas
+                // uma página para enriquecer nome/data sem bloquear o perfil nem
+                // repetir 25 páginas em contas com milhares de emblemas.
+                startBackgroundBadgeEnrichment(
+                        r,
+                        token,
+                        firstRenderReleaseAt
+                );
             } finally {
                 finishProfileSectionsGroup(
                         r,
@@ -4960,6 +4922,45 @@ public class MainActivity extends Activity {
                         pendingGroups
                 );
             }
+        });
+    }
+
+    private boolean mayLoadOfficialProfileSections(ProfileResult profile) {
+        if (profile == null || profile.privateProfile || profile.banned) return false;
+        Boolean officialVisibility = explicitProfileVisibility(
+                profile.habboPublic,
+                profile.officialProfile
+        );
+        if (officialVisibility != null) return officialVisibility;
+        Boolean complementVisibility = explicitProfileVisibility(
+                profile.dexProfile,
+                profile.dex
+        );
+        return Boolean.TRUE.equals(complementVisibility);
+    }
+
+    private void startBackgroundBadgeEnrichment(
+            ProfileResult source,
+            int token,
+            long firstRenderReleaseAt
+    ) {
+        if (source == null || !isActiveToken(token)) return;
+        executor.execute(() -> {
+            ProfileSectionPayload badges = fetchDirectHabbodexListSection(
+                    source.uniqueId,
+                    "badges",
+                    "badges",
+                    1
+            );
+            if (!isActiveToken(token) || badges == null || badges.items.isEmpty()) {
+                return;
+            }
+            synchronized (source) {
+                putComplementSectionLocked(source, "badges", badges.items);
+                reconcileProfileSources(source);
+                enrichPhotoRoomInfo(source);
+            }
+            publishProgressiveProfile(source, token, firstRenderReleaseAt);
         });
     }
 
@@ -5087,6 +5088,10 @@ public class MainActivity extends Activity {
                 && available.isEmpty();
         if (!confirmEmptyPreviousNames && (
                 fromBatch.success
+                // Um lote pode terminar parcial por atingir o limite de páginas.
+                // Os itens já recebidos continuam válidos; começar novamente na
+                // página 1 só duplica chamadas e atrasa a aplicação das datas.
+                || !fromBatch.items.isEmpty()
                 || (fromProfile.success && !available.isEmpty())
         )) {
             return ProfileSectionPayload.list(key, available, true);
@@ -5594,9 +5599,7 @@ public class MainActivity extends Activity {
     private ArrayList<String> matchingItemKeys(JSONObject item) {
         ArrayList<String> keys = new ArrayList<>();
         if (item == null) return keys;
-        String id = normalizeNickKey(firstText(
-                item, "uniqueId", "habboUniqueId", "habboId", "userId", "id"
-        ));
+        String id = normalizeNickKey(habboUniqueIdFromRecord(item));
         String badge = normalizeNickKey(firstText(item, "badgeCode", "code"));
         String name = normalizeNickKey(firstText(
                 item, "name", "username", "habboName", "nickname"
@@ -5633,6 +5636,27 @@ public class MainActivity extends Activity {
         }
         if (value instanceof JSONArray) return ((JSONArray) value).length() == 0;
         return false;
+    }
+
+    private String habboUniqueIdFromRecord(JSONObject item) {
+        if (item == null) return "";
+        String[] keys = new String[]{
+                "uniqueId", "habboUniqueId", "habboId", "userId", "id"
+        };
+        for (String key : keys) {
+            String candidate = item.optString(key, "").trim();
+            if (candidate.matches("(?i)^hh[a-z]{2}-[a-z0-9]+$")) {
+                return candidate;
+            }
+        }
+        String[] wrappers = new String[]{"user", "habbo", "profile", "friend"};
+        for (String wrapper : wrappers) {
+            JSONObject nested = item.optJSONObject(wrapper);
+            if (nested == null || nested == item) continue;
+            String candidate = habboUniqueIdFromRecord(nested);
+            if (!candidate.isEmpty()) return candidate;
+        }
+        return "";
     }
 
     private PageResult fetchBadgesPage(String uniqueId, int page, int limit, boolean hideAchievements) {
@@ -8171,7 +8195,8 @@ private int loadingProgressFor(String message) {
         return PROFILE_API
                 + "/habboinfo/" + enc(uniqueId)
                 + "?hotel=" + enc(normalizeHotelKey(currentHotelKey))
-                + "&complementOnly=true";
+                + "&complementOnly=true"
+                + "&sections=" + enc("profile,previous-names");
     }
 
     private String apiHabbodexListUrl(
@@ -8195,7 +8220,8 @@ private int loadingProgressFor(String message) {
                 + "/habboinfo/" + enc(hotel)
                 + "/habbo?name=" + enc(name)
                 + "&hotel=" + enc(hotel)
-                + "&complementOnly=true";
+                + "&complementOnly=true"
+                + "&sections=" + enc("profile,previous-names");
     }
 
     private String habbodexSuggestUrl(String name) {
@@ -8568,10 +8594,13 @@ private int loadingProgressFor(String message) {
     private Object getJsonAny(String u) throws Exception {
         HttpURLConnection c = (HttpURLConnection)new URL(u).openConnection();
         boolean complement = u != null && (u.startsWith(PROFILE_API) || u.startsWith(HABBODEX_PROXY_API));
+        boolean largeOfficialProfile = u != null
+                && u.contains("/api/public/users/")
+                && u.endsWith("/profile");
         c.setUseCaches(false);
         c.setDefaultUseCaches(false);
         c.setConnectTimeout(complement ? 10000 : 8000);
-        c.setReadTimeout(complement ? 30000 : 15000);
+        c.setReadTimeout((complement || largeOfficialProfile) ? 30000 : 15000);
         c.setRequestProperty("Accept", "application/json, text/plain, */*");
         c.setRequestProperty("Cache-Control", "no-cache, no-store");
         c.setRequestProperty("Pragma", "no-cache");
@@ -9035,6 +9064,7 @@ private int loadingProgressFor(String message) {
             JSONObject identity = item.optJSONObject("user");
             if (identity == null) identity = item.optJSONObject("habbo");
             if (identity == null) identity = item.optJSONObject("profile");
+            if (identity == null) identity = item.optJSONObject("friend");
             if (identity != null) {
                 putIfMissing(item, "uniqueId", firstText(
                         identity, "uniqueId", "habboUniqueId", "id", "habboId", "userId"
@@ -9079,9 +9109,7 @@ private int loadingProgressFor(String message) {
                 ));
             }
 
-            String id = firstText(
-                    item, "uniqueId", "habboUniqueId", "id", "habboId", "userId"
-            );
+            String id = habboUniqueIdFromRecord(item);
             putIfMissing(item, "uniqueId", id);
             String figure = firstText(item, "figureString", "figure", "figure_string", "look");
             putIfMissing(item, "figureString", figure);
@@ -9122,9 +9150,7 @@ private int loadingProgressFor(String message) {
     private void addUnique(ArrayList<JSONObject> out, HashSet<String> seen, ArrayList<JSONObject> src) { for (JSONObject o : src) { String key = stableItemKey(o); if (seen.add(key)) out.add(o); } }
     private String stableItemKey(JSONObject o) {
         if (o == null) return String.valueOf(System.identityHashCode(o));
-        String id = normalizeNickKey(firstText(
-                o, "uniqueId", "habboUniqueId", "habboId", "userId", "id"
-        ));
+        String id = normalizeNickKey(habboUniqueIdFromRecord(o));
         if (!id.isEmpty()) return "id:" + id;
         String badge = normalizeNickKey(firstText(o, "badgeCode", "code"));
         if (!badge.isEmpty()) return "badge:" + badge;
