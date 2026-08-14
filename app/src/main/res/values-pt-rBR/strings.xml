@@ -17,6 +17,7 @@
     <string name="start_note">Digite um nick do hotel selecionado para consultar as informações.</string>
     <string name="type_nick_toast">Digite um nick do hotel para consultar perfil...</string>
     <string name="same_profile_loading">Esse perfil já está sendo carregado.</string>
+    <string name="wait_new_search">Aguarde %1$ss para pesquisar outro perfil.</string>
     <string name="wait_refresh">Aguarde %1$ss para atualizar este perfil novamente.</string>
     <string name="updating_profile">Atualizando perfil...</string>
     <string name="searching_profile">Pesquisando perfil...</string>
@@ -209,7 +210,9 @@
     <string name="ad_badge">AD</string>
     <string name="rarity">Raridade</string>
     <string name="rarity_details">Detalhes da raridade</string>
-    <string name="sponsors_title">PATROCINADORES</string>
+    <string name="sponsors_title">Patrocinadores</string>
+    <string name="sponsor_join_carousel">Quero ser</string>
+    <string name="sponsor_manage_carousel">Meu perfil</string>
     <string name="sponsors_loading">Carregando patrocinadores…</string>
     <string name="sponsors_empty">Seja o primeiro patrocinador em destaque.</string>
     <string name="sponsors_unavailable">Não foi possível carregar os patrocinadores agora.</string>
@@ -236,6 +239,6 @@
     <string name="supporter_validation_pending">Validando sua assinatura. Tente novamente em alguns segundos.</string>
     <string name="supporter_server_unavailable">A assinatura está ativa, mas o servidor de patrocinadores não pôde ser validado agora. Tente novamente.</string>
     <string name="supporter_tutorial_title">Escolha seu perfil em destaque</string>
-    <string name="supporter_tutorial_body">O botão de anúncios virou seu botão de patrocinador. Toque nele para escolher ou trocar o perfil destacado.</string>
+    <string name="supporter_tutorial_body">Seu perfil fica no último item do carrossel de patrocinadores. Toque nele para escolher ou trocar o destaque.</string>
     <string name="supporter_choose_now">Escolher agora</string>
 </resources>
