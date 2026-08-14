@@ -8755,7 +8755,7 @@ private int loadingProgressFor(String message) {
             settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
         }
 
-        CookieManager cookies = CookieManager.getInstance();
+        android.webkit.CookieManager cookies = android.webkit.CookieManager.getInstance();
         cookies.setAcceptCookie(true);
         if (Build.VERSION.SDK_INT >= 21) cookies.setAcceptThirdPartyCookies(web, true);
 
@@ -8882,7 +8882,7 @@ private int loadingProgressFor(String message) {
                     }
 
                     habbodexWebChallengeDetected = false;
-                    try { CookieManager.getInstance().flush(); } catch(Exception ignored) {}
+                    try { android.webkit.CookieManager.getInstance().flush(); } catch(Exception ignored) {}
                     synchronized (habbodexWebSessionLock) {
                         CompletableFuture<Boolean> future = habbodexWebSessionFuture;
                         boolean alreadyReady = false;
