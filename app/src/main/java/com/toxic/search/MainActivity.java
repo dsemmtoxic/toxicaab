@@ -61,7 +61,7 @@ public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_BASE = "https://habbodex.com/api/v1/habboinfo";
     private static final String HABBODEX_FURNIDEX_API = "https://habbodex.com/api/v1/furnidex/furni/from-figure-string";
-    private static final String APP_VERSION = "1.3.31";
+    private static final String APP_VERSION = "1.3.32";
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -121,13 +121,17 @@ public class MainActivity extends Activity {
     // Em aparelhos mais fracos, várias respostas progressivas podem chegar quase
     // juntas. Coalescemos redesenhos completos para não destruir/recriar toda a UI
     // várias vezes no mesmo intervalo curto.
-    private static final long PROGRESSIVE_RENDER_MIN_INTERVAL_MS = 260L;
+    private static final long PROGRESSIVE_RENDER_MIN_INTERVAL_MS = 420L;
     private final Object progressiveRenderLock = new Object();
     private boolean progressiveRenderScheduled = false;
     private long lastProgressiveRenderAtMs = 0L;
     private ProfileResult pendingProgressiveSnapshot = null;
     private int pendingProgressiveToken = 0;
     private ProfileResult activeRenderedProfile = null;
+    // Fonte viva do perfil atual. Estados de UI que mudam durante um carregamento
+    // progressivo também são gravados aqui, evitando que um snapshot posterior
+    // reverta a escolha do usuário.
+    private ProfileResult activeProfileSource = null;
     private String lastRememberedOpenedProfileKey = "";
     private final ArrayDeque<ProfileResult> profileHistory = new ArrayDeque<>();
     private static final int PROFILE_HISTORY_LIMIT = 25;
@@ -4560,6 +4564,7 @@ public class MainActivity extends Activity {
         if (r == null || r.uniqueId == null || r.uniqueId.trim().isEmpty()
                 || !isActiveToken(token)) return;
 
+        activeProfileSource = r;
         final String uniqueId = r.uniqueId.trim();
         final boolean restrictedProfile = !mayLoadOfficialProfileSections(r);
         synchronized (profileProgressLock) {
@@ -6010,6 +6015,58 @@ public class MainActivity extends Activity {
         return true;
     }
 
+    private PageResult fetchBadgesPageIncludingAchievements(
+            String uniqueId,
+            int page,
+            int limit
+    ) {
+        PageResult out = new PageResult();
+        out.page = Math.max(1, page);
+        out.nextPage = 0;
+        out.hasMore = false;
+        out.total = 0;
+        try {
+            // Sempre baixa o lote completo. "Ocultar conquistas" é somente um
+            // filtro local de UI; assim desativar o botão não depende de uma
+            // segunda consulta e nunca fica preso a uma página já filtrada.
+            String url = habbodexListUrl(uniqueId, "badges", out.page, limit)
+                    + "&hideAchievements=false";
+            JSONObject pageData = unwrap(getJson(url));
+            if (pageData == null) return out;
+            out.success = true;
+            out.items = extractList(pageData, "badges");
+            if (out.items.isEmpty()) out.items = extractList(pageData, "result");
+            if (out.items.isEmpty()) out.items = extractList(pageData, null);
+            out.total = extractTotalCount(pageData);
+
+            JSONObject next = pageData.optJSONObject("next");
+            int nextPage = next == null ? 0 : next.optInt("page", 0);
+            if (nextPage <= 0) {
+                JSONObject pagination = pageData.optJSONObject("pagination");
+                if (pagination != null) {
+                    nextPage = pagination.optInt("nextPage", 0);
+                }
+            }
+            if (nextPage <= 0) {
+                int totalPages = pageData.optInt("totalPages", pageData.optInt("pages", 0));
+                JSONObject pagination = pageData.optJSONObject("pagination");
+                if (pagination != null) {
+                    totalPages = Math.max(
+                            totalPages,
+                            pagination.optInt("totalPages", pagination.optInt("pages", 0))
+                    );
+                }
+                if (totalPages > out.page) nextPage = out.page + 1;
+            }
+            if (nextPage <= 0 && out.items.size() >= limit) {
+                nextPage = out.page + 1;
+            }
+            out.nextPage = nextPage > out.page ? nextPage : 0;
+            out.hasMore = out.nextPage > 0;
+        } catch(Exception ignored) {}
+        return out;
+    }
+
     private PageResult fetchCriticalBadgesPage(
             String uniqueId,
             int page,
@@ -6018,13 +6075,16 @@ public class MainActivity extends Activity {
     ) {
         PageResult best = null;
         int attempts = initial ? 3 : 2;
-        String url = habbodexListUrl(uniqueId, "badges", page, limit);
+        String url = habbodexListUrl(uniqueId, "badges", page, limit)
+                + "&hideAchievements=false";
         for (int attempt = 0; attempt < attempts; attempt++) {
             if (attempt > 0) {
                 invalidateFiveMinuteJsonCache(url);
                 sleepCriticalRetry(attempt);
             }
-            PageResult candidate = fetchPage(uniqueId, "badges", "badges", page, limit);
+            PageResult candidate = fetchBadgesPageIncludingAchievements(
+                    uniqueId, page, limit
+            );
             if (candidate != null && candidate.success) {
                 best = candidate;
                 boolean empty = candidate.items == null || candidate.items.isEmpty();
@@ -6039,6 +6099,7 @@ public class MainActivity extends Activity {
         }
         return best == null ? new PageResult() : best;
     }
+
 
     private void applyBadgesPage(ProfileResult r, PageResult page, boolean replace) {
         if (r == null || page == null || !page.success) return;
@@ -6453,7 +6514,7 @@ public class MainActivity extends Activity {
 
         addSelectedBadges(r.selectedBadges);
         addPreviousNames(r.previousNames);
-        addPreviousMottos(r.previousMottos);
+        addPreviousMottos(r, r.previousMottos);
         addPreviousStyles(r);
         addPhotos(r);
         addStats(r);
@@ -6672,8 +6733,8 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void addPreviousMottos(ArrayList<JSONObject> list) {
-        if (list.isEmpty()) return;
+    private void addPreviousMottos(ProfileResult profileResult, ArrayList<JSONObject> list) {
+        if (list == null || list.isEmpty()) return;
 
         ArrayList<JSONObject> valid = new ArrayList<>();
         for (JSONObject item : list) {
@@ -6683,23 +6744,188 @@ public class MainActivity extends Activity {
         if (valid.isEmpty()) return;
 
         LinearLayout c = sectionCard(t(R.string.previous_mottos), valid.size(), true);
-        ScrollView sv = new ScrollView(this);
-        sv.setVerticalScrollBarEnabled(true);
-        sv.setScrollbarFadingEnabled(false);
-        tintScrollBar(sv);
-        sv.setOnTouchListener((view, event) -> {
-            view.getParent().requestDisallowInterceptTouchEvent(true);
-            return false;
+
+        FrameLayout slideHost = new FrameLayout(this);
+        slideHost.setClipChildren(false);
+        slideHost.setClipToPadding(false);
+        c.addView(slideHost, lp(-1, dp(154), 0, 0, 0, 8));
+
+        HorizontalScrollView dotsScroll = new HorizontalScrollView(this);
+        dotsScroll.setHorizontalScrollBarEnabled(false);
+        dotsScroll.setFillViewport(valid.size() <= 18);
+        LinearLayout dots = new LinearLayout(this);
+        dots.setOrientation(LinearLayout.HORIZONTAL);
+        dots.setGravity(Gravity.CENTER);
+        dots.setPadding(dp(6), dp(2), dp(6), dp(2));
+        dotsScroll.addView(dots, new HorizontalScrollView.LayoutParams(-2, dp(24)));
+        c.addView(dotsScroll, lp(-1, dp(28), 0, 0, 0, 0));
+
+        int savedIndex = profileResult == null ? 0 : profileResult.previousMottosSlideIndex;
+        final int[] index = {Math.max(0, Math.min(savedIndex, valid.size() - 1))};
+        final int[] animationDirection = {0};
+        final float[] downX = {0f};
+        final float[] downY = {0f};
+        final boolean[] horizontalGesture = {false};
+        Runnable[] render = new Runnable[1];
+
+        render[0] = () -> {
+            if (index[0] < 0) index[0] = 0;
+            if (index[0] >= valid.size()) index[0] = valid.size() - 1;
+            JSONObject item = valid.get(index[0]);
+            String mission = firstText(item, "text", "motto", "mission");
+            String date = niceDate(firstText(item, "changedAt", "date", "timestamp", "createdAt"));
+
+            slideHost.removeAllViews();
+            LinearLayout slide = missionQuoteSlide(mission, date);
+            float enter = animationDirection[0] == 0 ? 0f : dp(26) * animationDirection[0];
+            slide.setAlpha(animationDirection[0] == 0 ? 1f : 0f);
+            slide.setTranslationX(enter);
+            slideHost.addView(slide, new FrameLayout.LayoutParams(-1, -1));
+            if (animationDirection[0] != 0) {
+                slide.animate().alpha(1f).translationX(0f).setDuration(180L).start();
+            }
+
+            dots.removeAllViews();
+            for (int i = 0; i < valid.size(); i++) {
+                final int dotIndex = i;
+                View dot = new View(this);
+                boolean active = i == index[0];
+                dot.setBackground(round(
+                        active ? purple : Color.argb(lightTheme ? 75 : 105, 139, 52, 217),
+                        dp(999),
+                        Color.TRANSPARENT,
+                        0
+                ));
+                int dotSize = active ? dp(9) : dp(7);
+                LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(dotSize, dotSize);
+                dlp.leftMargin = dp(3);
+                dlp.rightMargin = dp(3);
+                dot.setLayoutParams(dlp);
+                dot.setOnClickListener(v -> {
+                    if (dotIndex == index[0]) return;
+                    animationDirection[0] = dotIndex > index[0] ? 1 : -1;
+                    index[0] = dotIndex;
+                    syncPreviousMottoSlideIndex(profileResult, index[0]);
+                    render[0].run();
+                });
+                dots.addView(dot);
+            }
+            syncPreviousMottoSlideIndex(profileResult, index[0]);
+            if (valid.size() > 18) {
+                dotsScroll.post(() -> {
+                    View activeDot = index[0] < dots.getChildCount()
+                            ? dots.getChildAt(index[0]) : null;
+                    if (activeDot != null) {
+                        int target = Math.max(0,
+                                activeDot.getLeft() - (dotsScroll.getWidth() - activeDot.getWidth()) / 2);
+                        dotsScroll.smoothScrollTo(target, 0);
+                    }
+                });
+            }
+            animationDirection[0] = 0;
+        };
+
+        slideHost.setOnTouchListener((view, event) -> {
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN:
+                    downX[0] = event.getX();
+                    downY[0] = event.getY();
+                    horizontalGesture[0] = false;
+                    return true;
+                case MotionEvent.ACTION_MOVE:
+                    float dx = event.getX() - downX[0];
+                    float dy = event.getY() - downY[0];
+                    if (!horizontalGesture[0] && Math.abs(dx) > dp(10)
+                            && Math.abs(dx) > Math.abs(dy)) {
+                        horizontalGesture[0] = true;
+                        view.getParent().requestDisallowInterceptTouchEvent(true);
+                    }
+                    return true;
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL:
+                    float totalDx = event.getX() - downX[0];
+                    float totalDy = event.getY() - downY[0];
+                    view.getParent().requestDisallowInterceptTouchEvent(false);
+                    if (event.getActionMasked() == MotionEvent.ACTION_UP
+                            && Math.abs(totalDx) >= dp(38)
+                            && Math.abs(totalDx) > Math.abs(totalDy) * 1.15f) {
+                        if (totalDx < 0 && index[0] < valid.size() - 1) {
+                            animationDirection[0] = 1;
+                            index[0]++;
+                            render[0].run();
+                        } else if (totalDx > 0 && index[0] > 0) {
+                            animationDirection[0] = -1;
+                            index[0]--;
+                            render[0].run();
+                        }
+                    }
+                    horizontalGesture[0] = false;
+                    return true;
+                default:
+                    return true;
+            }
         });
-        LinearLayout inner = new LinearLayout(this);
-        inner.setOrientation(LinearLayout.VERTICAL);
-        sv.addView(inner, new ScrollView.LayoutParams(-1, -2));
-        c.addView(sv, lp(-1, dp(Math.min(260, Math.max(74, 76 * Math.min(valid.size(), 4)))), 0, 0, 0, 0));
-        for (int i=0; i<valid.size(); i++) {
-            JSONObject o = valid.get(i);
-            String m = firstText(o, "text", "motto", "mission");
-            String d = firstText(o, "changedAt", "date", "timestamp", "createdAt");
-            inner.addView(historyItem(m, niceDate(d)));
+
+        render[0].run();
+    }
+
+    private LinearLayout missionQuoteSlide(String mission, String date) {
+        LinearLayout outer = new LinearLayout(this);
+        outer.setOrientation(LinearLayout.HORIZONTAL);
+        outer.setGravity(Gravity.CENTER_VERTICAL);
+        outer.setPadding(dp(12), dp(12), dp(12), dp(12));
+        outer.setBackground(round(
+                lightTheme ? Color.rgb(250, 250, 252) : Color.argb(20, 255, 255, 255),
+                dp(18),
+                lightTheme ? Color.rgb(222, 222, 228) : Color.argb(30, 255, 255, 255),
+                1
+        ));
+
+        View quoteBar = new View(this);
+        quoteBar.setBackground(round(purple, dp(999), Color.TRANSPARENT, 0));
+        LinearLayout.LayoutParams barLp = new LinearLayout.LayoutParams(dp(4), -1);
+        barLp.rightMargin = dp(12);
+        outer.addView(quoteBar, barLp);
+
+        LinearLayout body = new LinearLayout(this);
+        body.setOrientation(LinearLayout.VERTICAL);
+        body.setGravity(Gravity.CENTER_VERTICAL);
+        outer.addView(body, new LinearLayout.LayoutParams(0, -1, 1));
+
+        TextView quote = text("“", 30, purple, true);
+        quote.setGravity(Gravity.LEFT);
+        quote.setIncludeFontPadding(false);
+        body.addView(quote, lp(-1, dp(28), 0, 0, 0, 2));
+
+        TextView missionText = habboText(mission == null ? "" : mission, 17, true);
+        missionText.setTextColor(lightTheme ? Color.rgb(32, 32, 36) : Color.WHITE);
+        missionText.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
+        missionText.setMaxLines(3);
+        missionText.setEllipsize(TextUtils.TruncateAt.END);
+        missionText.setLineSpacing(dp(2), 1f);
+        body.addView(missionText, new LinearLayout.LayoutParams(-1, 0, 1));
+
+        if (date != null && !date.trim().isEmpty() && !"—".equals(date.trim())) {
+            TextView dateText = text(
+                    date,
+                    12,
+                    lightTheme ? Color.rgb(105, 105, 112) : Color.argb(190, 255, 255, 255),
+                    false
+            );
+            dateText.setGravity(Gravity.LEFT);
+            body.addView(dateText, lp(-1, -2, 0, 5, 0, 0));
+        }
+        return outer;
+    }
+
+    private void syncPreviousMottoSlideIndex(ProfileResult rendered, int index) {
+        if (rendered != null) rendered.previousMottosSlideIndex = Math.max(0, index);
+        ProfileResult source = activeProfileSource;
+        if (source != null && rendered != null && sameProfile(source, rendered)
+                && normalizeHotelKey(source.hotelKey).equals(normalizeHotelKey(rendered.hotelKey))) {
+            synchronized (source) {
+                source.previousMottosSlideIndex = Math.max(0, index);
+            }
         }
     }
 
@@ -8026,22 +8252,170 @@ public class MainActivity extends Activity {
     }
 
     private LinearLayout roomRow(JSONObject room, boolean oldRoom) {
-        LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.HORIZONTAL); row.setGravity(Gravity.CENTER_VERTICAL); row.setPadding(dp(12),dp(10),dp(12),dp(10)); row.setBackground(round(lightTheme ? Color.rgb(250,250,250) : Color.argb(18,255,255,255), dp(16), (oldRoom || currentProfilePrivate) ? Color.argb(75, 255, 64, 64) : (lightTheme ? Color.rgb(220,220,220) : Color.argb(24,255,255,255)), 1)); row.setLayoutParams(lp(-1, dp(116), 0, 0, 0, 12));
-        ImageView img = new ImageView(this); img.setScaleType(ImageView.ScaleType.CENTER_CROP); img.setBackground(round(lightTheme ? Color.rgb(245,245,245) : Color.argb(25,255,255,255), dp(12), lightTheme ? Color.rgb(220,220,220) : Color.argb(20,255,255,255),1)); applyRoundedClip(img, dp(12)); row.addView(img, new LinearLayout.LayoutParams(dp(112), dp(78)));
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(12), dp(10), dp(12), dp(10));
+        row.setBackground(round(
+                lightTheme ? Color.rgb(250,250,250) : Color.argb(18,255,255,255),
+                dp(16),
+                (oldRoom || currentProfilePrivate)
+                        ? Color.argb(75, 255, 64, 64)
+                        : (lightTheme ? Color.rgb(220,220,220) : Color.argb(24,255,255,255)),
+                1
+        ));
+        row.setLayoutParams(lp(-1, dp(150), 0, 0, 0, 12));
+
+        ImageView img = new ImageView(this);
+        img.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        img.setBackground(round(
+                lightTheme ? Color.rgb(245,245,245) : Color.argb(25,255,255,255),
+                dp(12),
+                lightTheme ? Color.rgb(220,220,220) : Color.argb(20,255,255,255),
+                1
+        ));
+        applyRoundedClip(img, dp(12));
+        row.addView(img, new LinearLayout.LayoutParams(dp(112), dp(88)));
         String image = getRoomImageUrl(room);
-        if (!image.isEmpty()) Glide.with(this).load(image).error(R.drawable.quarto).into(img); else img.setImageResource(R.drawable.quarto);
-        LinearLayout txt = new LinearLayout(this); txt.setOrientation(LinearLayout.VERTICAL); LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0,-2,1); tp.leftMargin=dp(12); row.addView(txt,tp);
-        TextView roomName = habboText(firstText(room,"name","roomName","caption","title").isEmpty()?t(R.string.room):firstText(room,"name","roomName","caption","title"), 16, true); roomName.setMaxLines(1); roomName.setEllipsize(TextUtils.TruncateAt.END); txt.addView(roomName);
-        String score = emptyDash(firstText(room,"score","rating"));
-        String date = niceDate(firstText(room,"createdAt","creationTime","date"));
+        if (!image.isEmpty()) {
+            Glide.with(this).load(image).error(R.drawable.quarto).into(img);
+        } else {
+            img.setImageResource(R.drawable.quarto);
+        }
+
+        LinearLayout txt = new LinearLayout(this);
+        txt.setOrientation(LinearLayout.VERTICAL);
+        txt.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, -1, 1);
+        tp.leftMargin = dp(12);
+        row.addView(txt, tp);
+
+        String roomNameValue = firstText(room, "name", "roomName", "caption", "title");
+        TextView roomName = habboText(
+                roomNameValue.isEmpty() ? t(R.string.room) : roomNameValue,
+                16,
+                true
+        );
+        roomName.setMaxLines(1);
+        roomName.setEllipsize(TextUtils.TruncateAt.END);
+        txt.addView(roomName);
+
+        String score = emptyDash(firstText(room, "score", "rating"));
+        String date = niceDate(firstText(room, "createdAt", "creationTime", "date"));
+        String maxVisitors = firstText(
+                room,
+                "maximumVisitors", "maxVisitors", "maximum_users", "maxUsers",
+                "usersMax", "capacity", "visitorLimit", "roomLimit"
+        );
         ArrayList<String> roomMetaParts = new ArrayList<>();
-        if (!score.isEmpty()) roomMetaParts.add("•  " + score);
+        if (!score.isEmpty()) roomMetaParts.add("★ " + score);
+        if (!maxVisitors.isEmpty()) roomMetaParts.add("👥 " + formatNumericText(maxVisitors));
         if (!date.isEmpty()) roomMetaParts.add(date);
+
         TextView meta = habboText(TextUtils.join("   ", roomMetaParts), 13, false);
-        meta.setTextColor(lightTheme ? Color.rgb(97,97,97) : Color.argb(215,255,255,255));
+        meta.setTextColor(lightTheme
+                ? Color.rgb(97,97,97)
+                : Color.argb(215,255,255,255));
+        meta.setMaxLines(1);
+        meta.setEllipsize(TextUtils.TruncateAt.END);
         txt.addView(meta);
-        String desc = firstText(room,"description","desc"); if(!desc.isEmpty()) { TextView rd = habboText(desc, 13, false); rd.setTextColor(Color.argb(210,255,255,255)); rd.setMaxLines(1); rd.setEllipsize(TextUtils.TruncateAt.END); txt.addView(rd); }
+
+        String desc = firstText(room, "description", "desc");
+        if (!desc.isEmpty()) {
+            TextView rd = habboText(desc, 13, false);
+            rd.setTextColor(lightTheme
+                    ? Color.rgb(82,82,88)
+                    : Color.argb(210,255,255,255));
+            rd.setMaxLines(1);
+            rd.setEllipsize(TextUtils.TruncateAt.END);
+            txt.addView(rd);
+        }
+
+        ArrayList<String> tags = roomTags(room);
+        if (!tags.isEmpty()) {
+            HorizontalScrollView tagScroll = new HorizontalScrollView(this);
+            tagScroll.setHorizontalScrollBarEnabled(false);
+            tagScroll.setFillViewport(false);
+            LinearLayout tagRow = new LinearLayout(this);
+            tagRow.setOrientation(LinearLayout.HORIZONTAL);
+            tagRow.setGravity(Gravity.CENTER_VERTICAL);
+            tagScroll.addView(tagRow, new HorizontalScrollView.LayoutParams(-2, dp(30)));
+            txt.addView(tagScroll, lp(-1, dp(30), 0, 4, 0, 0));
+
+            for (String tag : tags) {
+                TextView chip = text(
+                        "#" + tag,
+                        11,
+                        lightTheme ? Color.rgb(76, 45, 110) : Color.rgb(226, 203, 255),
+                        true
+                );
+                chip.setGravity(Gravity.CENTER);
+                chip.setSingleLine(true);
+                chip.setPadding(dp(8), 0, dp(8), 0);
+                chip.setBackground(round(
+                        lightTheme ? Color.argb(22, 139, 52, 217) : Color.argb(42, 139, 52, 217),
+                        dp(999),
+                        lightTheme ? Color.argb(40, 139, 52, 217) : Color.argb(60, 180, 120, 245),
+                        1
+                ));
+                LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(-2, dp(24));
+                cp.rightMargin = dp(6);
+                tagRow.addView(chip, cp);
+            }
+        }
         return row;
+    }
+
+    private ArrayList<String> roomTags(JSONObject room) {
+        ArrayList<String> out = new ArrayList<>();
+        if (room == null) return out;
+        Object raw = room.opt("tags");
+        if (raw == null || raw == JSONObject.NULL) raw = room.opt("roomTags");
+        if (raw == null || raw == JSONObject.NULL) raw = room.opt("tagList");
+        collectRoomTags(out, raw);
+        return out;
+    }
+
+    private void collectRoomTags(ArrayList<String> out, Object raw) {
+        if (out == null || raw == null || raw == JSONObject.NULL) return;
+        if (raw instanceof JSONArray) {
+            JSONArray array = (JSONArray) raw;
+            for (int i = 0; i < array.length(); i++) {
+                collectRoomTags(out, array.opt(i));
+            }
+            return;
+        }
+        if (raw instanceof JSONObject) {
+            JSONObject object = (JSONObject) raw;
+            String tag = firstText(object, "name", "tag", "value", "text");
+            addRoomTag(out, tag);
+            return;
+        }
+
+        String text = String.valueOf(raw).trim();
+        if (text.isEmpty() || "null".equalsIgnoreCase(text)) return;
+        if (text.startsWith("[") && text.endsWith("]")) {
+            try {
+                collectRoomTags(out, new JSONArray(text));
+                return;
+            } catch(Exception ignored) {}
+        }
+        if (text.contains(",")) {
+            for (String part : text.split(",")) addRoomTag(out, part);
+        } else {
+            addRoomTag(out, text);
+        }
+    }
+
+    private void addRoomTag(ArrayList<String> out, String raw) {
+        if (out == null || raw == null) return;
+        String tag = raw.trim();
+        while (tag.startsWith("#")) tag = tag.substring(1).trim();
+        if (tag.isEmpty() || "null".equalsIgnoreCase(tag)) return;
+        for (String existing : out) {
+            if (existing.equalsIgnoreCase(tag)) return;
+        }
+        out.add(tag);
     }
 
     private void addGroups(ArrayList<JSONObject> list) {
@@ -8138,7 +8512,7 @@ public class MainActivity extends Activity {
 
         View.OnClickListener toggleAction = v -> {
             hideAchievementBadges[0] = !hideAchievementBadges[0];
-            r.hideAchievementBadges = hideAchievementBadges[0];
+            syncHideAchievementBadgesState(r, hideAchievementBadges[0]);
             page[0] = 1;
             r.badgesTabPage = 1;
             render[0].run();
@@ -8149,6 +8523,18 @@ public class MainActivity extends Activity {
         render[0].run();
     }
 
+
+    private void syncHideAchievementBadgesState(ProfileResult rendered, boolean hide) {
+        if (rendered != null) rendered.hideAchievementBadges = hide;
+        ProfileResult source = activeProfileSource;
+        if (source != null && rendered != null && sameProfile(source, rendered)
+                && normalizeHotelKey(source.hotelKey).equals(normalizeHotelKey(rendered.hotelKey))) {
+            synchronized (source) {
+                source.hideAchievementBadges = hide;
+                source.badgesTabPage = 1;
+            }
+        }
+    }
 
     private boolean isTodayCreationTime(String raw) {
         return isToday(raw);
@@ -14000,7 +14386,7 @@ private int loadingProgressFor(String message) {
         c.previousNames = new ArrayList<>(src.previousNames); c.previousMottos = new ArrayList<>(src.previousMottos); c.previousStyles = new ArrayList<>(src.previousStyles); c.photos = new ArrayList<>(src.photos); c.friends = new ArrayList<>(src.friends); c.oldFriends = new ArrayList<>(src.oldFriends); c.rooms = new ArrayList<>(src.rooms); c.oldRooms = new ArrayList<>(src.oldRooms); c.groups = new ArrayList<>(src.groups); c.badges = new ArrayList<>(src.badges); c.badgesWithAchievements = new ArrayList<>(src.badgesWithAchievements); c.totalBadges = src.totalBadges; c.selectedBadges = new ArrayList<>(src.selectedBadges);
         c.allPhotosSource = new ArrayList<>(src.allPhotosSource); c.allStylesSource = new ArrayList<>(src.allStylesSource);
         c.photosNextPage = src.photosNextPage; c.stylesNextPage = src.stylesNextPage; c.photosTotal = src.photosTotal; c.stylesTotal = src.stylesTotal; c.stylesRemoteNextPage = src.stylesRemoteNextPage;
-        c.removedFriendsNextPage = src.removedFriendsNextPage; c.removedFriendsTotal = src.removedFriendsTotal; c.friendsNextPage = src.friendsNextPage; c.friendsTotal = src.friendsTotal; c.friendsTabPage = src.friendsTabPage; c.badgesNextPage = src.badgesNextPage; c.badgesTotal = src.badgesTotal; c.badgesTabPage = src.badgesTabPage;
+        c.removedFriendsNextPage = src.removedFriendsNextPage; c.removedFriendsTotal = src.removedFriendsTotal; c.friendsNextPage = src.friendsNextPage; c.friendsTotal = src.friendsTotal; c.friendsTabPage = src.friendsTabPage; c.previousMottosSlideIndex = src.previousMottosSlideIndex; c.badgesNextPage = src.badgesNextPage; c.badgesTotal = src.badgesTotal; c.badgesTabPage = src.badgesTabPage;
         c.photosHasMore = src.photosHasMore; c.stylesHasMore = src.stylesHasMore; c.photosLoading = false; c.stylesLoading = false;
         c.removedFriendsHasMore = src.removedFriendsHasMore; c.removedFriendsLoading = false; c.friendsHasMore = src.friendsHasMore; c.friendsLoading = false; c.friendsPagedMode = src.friendsPagedMode; c.friendsTabShowingRemoved = src.friendsTabShowingRemoved; c.friendsTabSelectionTouched = src.friendsTabSelectionTouched; c.badgesHasMore = src.badgesHasMore; c.badgesLoading = false; c.badgesPagedMode = src.badgesPagedMode; c.hideAchievementBadges = src.hideAchievementBadges;
         c.officialProfileAttempted = src.officialProfileAttempted; c.officialPhotosAttempted = src.officialPhotosAttempted; c.officialPhotosSucceeded = src.officialPhotosSucceeded; c.photosFromOfficial = src.photosFromOfficial; c.stylesFromComplement = src.stylesFromComplement; c.stylesRemotePaged = src.stylesRemotePaged; c.friendsDatesReady = src.friendsDatesReady;
@@ -15301,6 +15687,7 @@ private int loadingProgressFor(String message) {
         int photosNextPage = 0, stylesNextPage = 0, photosTotal = 0, stylesTotal = 0;
         int stylesRemoteNextPage = 0;
         int removedFriendsNextPage = 0, removedFriendsTotal = 0, friendsNextPage = 0, friendsTotal = 0, friendsTabPage = 1;
+        int previousMottosSlideIndex = 0;
         int badgesNextPage = 0, badgesTotal = 0, badgesTabPage = 1;
         boolean photosHasMore = false, stylesHasMore = false, photosLoading = false, stylesLoading = false;
         boolean removedFriendsHasMore = false, removedFriendsLoading = false, friendsHasMore = false, friendsLoading = false, friendsPagedMode = false, friendsTabShowingRemoved = false, friendsTabSelectionTouched = false;
