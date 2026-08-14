@@ -17,6 +17,7 @@
     <string name="start_note">Saisissez un pseudo de l\'hôtel sélectionné pour consulter les informations.</string>
     <string name="type_nick_toast">Saisissez un pseudo de l\'hôtel pour rechercher.</string>
     <string name="same_profile_loading">Ce profil est déjà en cours de chargement.</string>
+    <string name="wait_new_search">Attendez %1$ss avant de rechercher un autre profil.</string>
     <string name="wait_refresh">Attendez %1$ss avant d\'actualiser ce profil à nouveau.</string>
     <string name="updating_profile">Mise à jour du profil...</string>
     <string name="searching_profile">Recherche du profil...</string>
@@ -209,7 +210,9 @@
     <string name="ad_badge">PUB</string>
     <string name="rarity">Rareté</string>
     <string name="rarity_details">Détails de la rareté</string>
-    <string name="sponsors_title">SPONSORS</string>
+    <string name="sponsors_title">Sponsors</string>
+    <string name="sponsor_join_carousel">Participer</string>
+    <string name="sponsor_manage_carousel">Mon profil</string>
     <string name="sponsors_loading">Chargement des sponsors…</string>
     <string name="sponsors_empty">Devenez le premier sponsor mis en avant.</string>
     <string name="sponsors_unavailable">Impossible de charger les sponsors pour le moment.</string>
@@ -236,6 +239,6 @@
     <string name="supporter_validation_pending">Validation de votre abonnement. Réessayez dans quelques secondes.</string>
     <string name="supporter_server_unavailable">L’abonnement est actif, mais le serveur des sponsors n’a pas pu être validé. Réessayez.</string>
     <string name="supporter_tutorial_title">Choisissez votre profil mis en avant</string>
-    <string name="supporter_tutorial_body">Le bouton publicitaire est devenu votre bouton de sponsor. Touchez-le pour choisir ou changer le profil mis en avant.</string>
+    <string name="supporter_tutorial_body">Votre profil est le dernier élément du carrousel des sponsors. Touchez-le pour choisir ou changer le profil mis en avant.</string>
     <string name="supporter_choose_now">Choisir maintenant</string>
 </resources>
