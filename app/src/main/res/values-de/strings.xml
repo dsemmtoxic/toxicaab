@@ -17,6 +17,7 @@
     <string name="start_note">Gib einen Nickname des ausgewählten Hotels ein, um die Informationen aufzurufen.</string>
     <string name="type_nick_toast">Gib einen Hotel-Nickname ein, um zu suchen.</string>
     <string name="same_profile_loading">Dieses Profil wird bereits geladen.</string>
+    <string name="wait_new_search">Warte %1$ss, bevor du ein anderes Profil suchst.</string>
     <string name="wait_refresh">Warte %1$ss, um dieses Profil erneut zu aktualisieren.</string>
     <string name="updating_profile">Profil wird aktualisiert...</string>
     <string name="searching_profile">Profil wird gesucht...</string>
@@ -209,7 +210,9 @@
     <string name="ad_badge">ANZ</string>
     <string name="rarity">Seltenheit</string>
     <string name="rarity_details">Details zur Seltenheit</string>
-    <string name="sponsors_title">SPONSOREN</string>
+    <string name="sponsors_title">Sponsoren</string>
+    <string name="sponsor_join_carousel">Mitmachen</string>
+    <string name="sponsor_manage_carousel">Mein Profil</string>
     <string name="sponsors_loading">Sponsoren werden geladen…</string>
     <string name="sponsors_empty">Werde der erste hervorgehobene Sponsor.</string>
     <string name="sponsors_unavailable">Sponsoren konnten gerade nicht geladen werden.</string>
@@ -236,6 +239,6 @@
     <string name="supporter_validation_pending">Dein Abo wird geprüft. Versuche es in einigen Sekunden erneut.</string>
     <string name="supporter_server_unavailable">Das Abo ist aktiv, aber der Sponsorenserver konnte gerade nicht geprüft werden. Versuche es erneut.</string>
     <string name="supporter_tutorial_title">Wähle dein hervorgehobenes Profil</string>
-    <string name="supporter_tutorial_body">Die Werbeschaltfläche ist jetzt deine Sponsor-Schaltfläche. Tippe darauf, um das Profil auszuwählen oder zu ändern.</string>
+    <string name="supporter_tutorial_body">Dein Profil ist das letzte Element im Sponsorenkarussell. Tippe darauf, um das Profil auszuwählen oder zu ändern.</string>
     <string name="supporter_choose_now">Jetzt auswählen</string>
 </resources>
