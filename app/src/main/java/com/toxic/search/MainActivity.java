@@ -58,7 +58,7 @@ public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_PROXY_API = "https://atoxic.com.br/habbodex.php";
     private static final String HABBOWIDGETS_BASE = "https://www.habbowidgets.com";
-    private static final String APP_VERSION = "1.3.16";
+    private static final String APP_VERSION = "1.3.18";
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
     // os ícones nunca desapareçam por bloqueio de rede ou cache externo.
@@ -2730,7 +2730,7 @@ public class MainActivity extends Activity {
 
         LinearLayout heading = new LinearLayout(this);
         heading.setOrientation(LinearLayout.HORIZONTAL);
-        heading.setGravity(Gravity.CENTER_VERTICAL);
+        heading.setGravity(Gravity.CENTER);
         section.addView(heading, lp(-1, dp(36), 2, 0, 2, 2));
 
         TextView sparkle = text("✦", 16, pink, true);
@@ -2739,9 +2739,9 @@ public class MainActivity extends Activity {
         heading.addView(sparkle, new LinearLayout.LayoutParams(dp(25), dp(30)));
 
         TextView title = text(t(R.string.sponsors_title), 18, lightTheme ? Color.rgb(56, 35, 70) : Color.WHITE, true);
-        title.setGravity(Gravity.CENTER_VERTICAL);
+        title.setGravity(Gravity.CENTER);
         title.setLetterSpacing(0.01f);
-        heading.addView(title, new LinearLayout.LayoutParams(0, -1, 1));
+        heading.addView(title, new LinearLayout.LayoutParams(-2, -1));
 
         sponsorsCarouselHost = new FrameLayout(this);
         sponsorsCarouselHost.setClipChildren(false);
@@ -4520,9 +4520,11 @@ public class MainActivity extends Activity {
 
         if (r.name != null && !r.name.trim().isEmpty()) {
             final String historicalName = r.name.trim();
-            completion.submit(() -> ProfileSectionPayload.object(
+            final String historicalId = r.uniqueId.trim();
+            completion.submit(() -> ProfileSectionPayload.list(
                     "historical_names",
-                    fetchHabbodexSuggestions(historicalName)
+                    fetchPreferredPreviousNames(historicalId, historicalName),
+                    true
             ));
             tasks++;
         }
@@ -4586,10 +4588,10 @@ public class MainActivity extends Activity {
                     if (payload.object != null) applyOfficialProfileData(r, payload.object);
                 } else if ("official_photos".equals(payload.kind)) {
                     applyOfficialPhotosData(r, payload.items, payload.success);
-                } else if ("historical_names".equals(payload.kind) && payload.object != null) {
+                } else if ("historical_names".equals(payload.kind)) {
                     r.previousNames = mergeLists(
                             r.previousNames,
-                            extractPreviousNamesFromSuggest(payload.object, r.name)
+                            payload.items
                     );
                 } else if ("complement".equals(payload.kind) && payload.object != null) {
                     applyComplementProfileData(r, payload.object);
@@ -4665,9 +4667,18 @@ public class MainActivity extends Activity {
                 r.previousNames,
                 extractList(complement, "previousNames")
         );
-        r.previousMottos = extractList(complement, "previousMottos");
-        r.oldFriends = extractList(complement, "previousFriends");
-        applyLocalStylesSource(r, extractList(complement, "previousStyles"));
+        r.previousMottos = mergeLists(
+                r.previousMottos,
+                extractList(complement, "previousMottos")
+        );
+        r.oldFriends = mergeLists(
+                r.oldFriends,
+                extractList(complement, "previousFriends")
+        );
+        applyLocalStylesSource(
+                r,
+                mergeLists(r.allStylesSource, extractList(complement, "previousStyles"))
+        );
 
         if (r.motto.isEmpty()) r.motto = firstText(complement, "motto", "mission");
         if (r.memberSince.isEmpty()) r.memberSince = firstText(
@@ -4997,7 +5008,13 @@ public class MainActivity extends Activity {
                 if (!selected.has("totalOwners") && full.has("totalOwners")) selected.put("totalOwners", full.opt("totalOwners"));
                 if (firstText(selected, "name", "title").isEmpty() && !firstText(full, "name", "title").isEmpty()) selected.put("name", firstText(full, "name", "title"));
                 if (firstText(selected, "description", "desc").isEmpty() && !firstText(full, "description", "desc").isEmpty()) selected.put("description", firstText(full, "description", "desc"));
-                if (firstText(selected, "creationTime", "createdAt", "date").isEmpty() && !firstText(full, "creationTime", "createdAt", "date").isEmpty()) selected.put("creationTime", firstText(full, "creationTime", "createdAt", "date"));
+                String obtained = firstText(
+                        full,
+                        "obtainedAt", "acquiredAt", "creationTime", "createdAt", "date"
+                );
+                if (firstText(selected, "obtainedAt", "acquiredAt", "creationTime", "createdAt", "date").isEmpty() && !obtained.isEmpty()) {
+                    selected.put("creationTime", obtained);
+                }
             } catch(Exception ignored) {}
         }
     }
@@ -5458,17 +5475,10 @@ public class MainActivity extends Activity {
         wrap.addView(statRow(r.online ? "status_online" : "status_offline", t(R.string.status), r.online ? t(R.string.online) : t(R.string.offline)));
         wrap.addView(statRow("clock", t(R.string.last_login), niceDate(r.lastAccess), timeAgoText(r.lastAccess)));
         wrap.addView(statRow("calendar", t(R.string.creation), niceDateOnly(r.memberSince), timeAgoText(r.memberSince)));
-        wrap.addView(statRow("friends", t(R.string.friends), String.valueOf(r.friends.size())));
-        wrap.addView(statRow("rooms", t(R.string.rooms), String.valueOf(r.rooms.size())));
-        wrap.addView(statRow("groups", t(R.string.groups), String.valueOf(r.groups.size())));
-        wrap.addView(statRow(
-                "photos",
-                t(R.string.photos),
-                String.valueOf(Math.max(r.photosTotal, r.photos.size()))
-        ));
-        wrap.addView(statRow("star", t(R.string.stars), emptyDash(r.starGems)));
-        wrap.addView(statRow("level", t(R.string.level), emptyDash(r.level)));
-        wrap.addView(statRow("badge", t(R.string.badges), emptyDash(r.totalBadges)));
+        // Amigos, quartos, grupos, fotos e emblemas já possuem seções completas
+        // abaixo; repetir os mesmos números aqui criava cinco cards redundantes.
+        wrap.addView(statRow("star", t(R.string.stars), formatNumericText(emptyDash(r.starGems))));
+        wrap.addView(statRow("level", t(R.string.level), formatNumericText(emptyDash(r.level))));
     }
 
     private LinearLayout statRow(String icon, String label, String value) {
@@ -5707,18 +5717,18 @@ public class MainActivity extends Activity {
             try {
                 JSONObject data = unwrap(getJson(habbodexFigureUrl(figure)));
                 final ArrayList<JSONObject> clothes = normalizeClothingEntries(data);
-                final ArrayList<JSONObject> namedClothes = new ArrayList<>();
+                final ArrayList<JSONObject> visibleClothes = new ArrayList<>();
                 for (JSONObject item : clothes) {
-                    if (hasCompleteClothingName(item)) namedClothes.add(item);
+                    if (item != null && !isDefaultClothing(item)) visibleClothes.add(item);
                 }
                 runOnUiThread(() -> {
                     clothesContainer.removeAllViews();
-                    if (namedClothes.isEmpty()) {
+                    if (visibleClothes.isEmpty()) {
                         clothesContainer.addView(mottoItem(t(R.string.no_clothes_found), ""));
                         return;
                     }
-                    for (int i=0; i<namedClothes.size(); i++) {
-                        clothesContainer.addView(clothingRow(namedClothes.get(i)));
+                    for (int i=0; i<visibleClothes.size(); i++) {
+                        clothesContainer.addView(clothingRow(visibleClothes.get(i)));
                     }
                 });
             } catch (Exception ex) {
@@ -6414,7 +6424,7 @@ public class MainActivity extends Activity {
         }
         infoGrid.addView(photoInfoCard(
                 t(R.string.likes),
-                String.valueOf(getPhotoLikerNames(photo).size()),
+                formatCount(getPhotoLikerNames(photo).size()),
                 "",
                 ""
         ));
@@ -6553,7 +6563,7 @@ public class MainActivity extends Activity {
         tabs.setGravity(Gravity.CENTER_VERTICAL);
         c.addView(tabs, lp(-1, dp(58), 0, 0, 0, 14));
 
-        TextView btFriends = tabButton(t(R.string.friends) + " (" + friendsList.size() + ")", true);
+        TextView btFriends = tabButton(t(R.string.friends) + " (" + formatCount(friendsList.size()) + ")", true);
         TextView btRemoved = trashTabButton(false);
 
         tabs.addView(btFriends);
@@ -6658,8 +6668,11 @@ public class MainActivity extends Activity {
         name.setEllipsize(TextUtils.TruncateAt.END);
         card.addView(name, lp(-1,-2,0,2,0,6));
 
-        TextView d = text(niceDateOnly(date), 12, Color.argb(185,255,255,255), false);
+        // O HabboDex fornece data e horário tanto para amizades atuais quanto
+        // para as removidas; mantém os dois visíveis no card.
+        TextView d = text(niceDate(date), 12, Color.argb(185,255,255,255), false);
         d.setGravity(Gravity.CENTER);
+        d.setSingleLine(true);
         card.addView(d, lp(-1,-2,0,0,0,0));
 
         final String fname = n;
@@ -6912,7 +6925,7 @@ public class MainActivity extends Activity {
         c.setPadding(dp(18), dp(18), dp(18), dp(18));
         resultWrap.addView(c, lp(-1, -2, 0, 0, 0, 16));
         if (showTitle && title != null) {
-            TextView t = habboText(title + " (" + count + ")", 19, true);
+            TextView t = habboText(title + " (" + formatCount(count) + ")", 19, true);
             t.setTextColor(lightTheme ? Color.rgb(81, 48, 133) : Color.rgb(232, 224, 255));
             t.setLetterSpacing(0.015f);
             c.addView(t, lp(-1, -2, 0, 0, 0, 14));
@@ -6929,7 +6942,12 @@ public class MainActivity extends Activity {
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.HORIZONTAL);
         header.setGravity(Gravity.CENTER_VERTICAL);
-        TextView t = habboText(title + " (" + shown + "/" + Math.max(shown, total) + ")", 19, true);
+        TextView t = habboText(
+                title + " (" + formatCount(shown) + "/"
+                        + formatCount(Math.max(shown, total)) + ")",
+                19,
+                true
+        );
         t.setTextColor(lightTheme ? Color.rgb(81, 48, 133) : Color.rgb(232, 224, 255));
         t.setLetterSpacing(0.015f);
         header.addView(t, new LinearLayout.LayoutParams(0, -2, 1));
@@ -7449,6 +7467,13 @@ private int loadingProgressFor(String message) {
                 + "&limit=" + Math.max(1, Math.min(100, limit));
     }
 
+    private String apiPreviousNamesUrl(String uniqueId) {
+        return PROFILE_API
+                + "/habboinfo/" + enc(uniqueId)
+                + "/previous-names?hotel=" + enc(habbodexHotelCode(currentHotelKey))
+                + "&complementOnly=true&page=1&limit=100";
+    }
+
     private String habbodexProfileUrl(String uniqueId) {
         return HABBODEX_PROXY_API + "?action=profile&id=" + enc(uniqueId);
     }
@@ -7501,6 +7526,46 @@ private int loadingProgressFor(String message) {
         return unwrap(tryJson(legacyHabbodexSuggestUrl(name)));
     }
 
+    private ArrayList<JSONObject> fetchPreferredPreviousNames(
+            String uniqueId,
+            String currentName
+    ) {
+        String cleanId = uniqueId == null ? "" : uniqueId.trim();
+        String cleanName = currentName == null ? "" : currentName.trim();
+        if (!cleanId.isEmpty()) {
+            JSONObject direct = unwrap(tryJson(
+                    habbodexListUrl(cleanId, "previous-names", 1, 100)
+            ));
+            if (direct != null) {
+                ArrayList<JSONObject> names = extractList(direct, "previousNames");
+                if (names.isEmpty()) names = extractList(direct, "names");
+                if (!names.isEmpty()) return names;
+            }
+
+            JSONObject directProfile = fetchDirectHabbodexProfile(cleanId);
+            ArrayList<JSONObject> profileNames = extractList(
+                    directProfile,
+                    "previousNames"
+            );
+            if (!profileNames.isEmpty()) return profileNames;
+
+            JSONObject fallback = unwrap(tryJson(apiPreviousNamesUrl(cleanId)));
+            if (fallback != null) {
+                ArrayList<JSONObject> names = extractList(fallback, "previousNames");
+                if (!names.isEmpty()) return names;
+                // A rota dedicada respondeu corretamente e confirmou uma lista
+                // vazia; não transforma isso em erro nem inventa histórico.
+                return names;
+            }
+        }
+
+        if (!cleanName.isEmpty()) {
+            JSONObject suggestions = fetchHabbodexSuggestions(cleanName);
+            return extractPreviousNamesFromSuggest(suggestions, cleanName);
+        }
+        return new ArrayList<>();
+    }
+
     private JSONObject fetchDirectHabbodexProfile(String uniqueId) {
         String cleanId = uniqueId == null ? "" : uniqueId.trim();
         if (cleanId.isEmpty()) return null;
@@ -7518,19 +7583,17 @@ private int loadingProgressFor(String message) {
         Future<JSONObject> batchFuture = executor.submit(
                 () -> unwrap(getJson(habbodexBatchUrl(cleanId, includePrivate)))
         );
-        Future<JSONObject> previousFriendsFuture = executor.submit(
-                () -> unwrap(getJson(habbodexListUrl(cleanId, "previous-friends", 1, 100)))
-        );
 
         JSONObject batch;
         try {
             batch = batchFuture.get();
         } catch(Exception error) {
             batchFuture.cancel(true);
-            previousFriendsFuture.cancel(true);
-            return null;
+            return fetchDirectHabbodexComplementBySections(cleanId, includePrivate);
         }
-        if (batch == null) return null;
+        if (batch == null) {
+            return fetchDirectHabbodexComplementBySections(cleanId, includePrivate);
+        }
 
         boolean partial = batch.optBoolean("partial", false);
         JSONObject errors = batch.optJSONObject("errors");
@@ -7550,31 +7613,40 @@ private int loadingProgressFor(String message) {
                     ? new JSONObject()
                     : new JSONObject(directProfile.toString());
             copyJsonArray(batch, "friends", out, "friends");
+            copyJsonArray(batch, "previousFriends", out, "previousFriends");
+            copyJsonArray(batch, "previousNames", out, "previousNames");
             copyJsonArray(batch, "previousMottos", out, "previousMottos");
             copyJsonArray(batch, "previousStyles", out, "previousStyles");
+            copyJsonArray(batch, "badges", out, "badges");
             copyJsonArray(batch, "rooms", out, "rooms");
             copyJsonArray(batch, "groups", out, "groups");
             copyJsonArray(batch, "photos", out, "photos");
 
-            try {
-                JSONObject previousFriends = previousFriendsFuture.get();
+            // Compatibilidade com uma instalação antiga do proxy: somente se o
+            // lote ainda não trouxer a seção, consulta a rota dedicada.
+            if (!batch.has("previousFriends")) {
+                JSONObject previousFriends = unwrap(tryJson(
+                        habbodexListUrl(cleanId, "previous-friends", 1, 100)
+                ));
                 if (previousFriends == null) {
                     partial = true;
                 } else {
-                    ArrayList<JSONObject> removedFriends = extractList(
-                            previousFriends,
-                            "previousFriends"
-                    );
-                    if (removedFriends.isEmpty()) {
-                        removedFriends = extractList(previousFriends, "friends");
-                    }
-                    out.put("previousFriends", jsonArrayFromObjects(
-                            removedFriends
+                    ArrayList<JSONObject> removedFriends = extractList(previousFriends, "previousFriends");
+                    if (removedFriends.isEmpty()) removedFriends = extractList(previousFriends, "friends");
+                    out.put("previousFriends", jsonArrayFromObjects(removedFriends));
+                }
+            }
+            if (!batch.has("badges")) {
+                JSONObject historicalBadges = unwrap(tryJson(
+                        habbodexListUrl(cleanId, "badges", 1, 100)
+                ));
+                if (historicalBadges == null) {
+                    partial = true;
+                } else {
+                    out.put("badges", jsonArrayFromObjects(
+                            extractList(historicalBadges, "badges")
                     ));
                 }
-            } catch(Exception error) {
-                previousFriendsFuture.cancel(true);
-                partial = true;
             }
 
             if (includePrivate
@@ -7594,6 +7666,89 @@ private int loadingProgressFor(String message) {
         } catch(Exception ignored) {
             return null;
         }
+    }
+
+    private JSONObject fetchDirectHabbodexComplementBySections(
+            String uniqueId,
+            boolean includePrivate
+    ) {
+        HashMap<String, Future<JSONObject>> requests = new HashMap<>();
+        requests.put("profile", executor.submit(
+                () -> unwrap(getJson(habbodexProfileUrl(uniqueId)))
+        ));
+        requests.put("previousNames", executor.submit(
+                () -> unwrap(getJson(habbodexListUrl(uniqueId, "previous-names", 1, 100)))
+        ));
+        requests.put("friends", executor.submit(
+                () -> unwrap(getJson(habbodexListUrl(uniqueId, "friends", 1, 100)))
+        ));
+        requests.put("previousFriends", executor.submit(
+                () -> unwrap(getJson(habbodexListUrl(uniqueId, "previous-friends", 1, 100)))
+        ));
+        requests.put("previousMottos", executor.submit(
+                () -> unwrap(getJson(habbodexListUrl(uniqueId, "previous-mottos", 1, 100)))
+        ));
+        requests.put("previousStyles", executor.submit(
+                () -> unwrap(getJson(habbodexListUrl(uniqueId, "previous-styles", 1, 100)))
+        ));
+        requests.put("badges", executor.submit(
+                () -> unwrap(getJson(habbodexListUrl(uniqueId, "badges", 1, 100)))
+        ));
+        if (includePrivate) {
+            requests.put("rooms", executor.submit(
+                    () -> unwrap(getJson(habbodexListUrl(uniqueId, "rooms", 1, 100)))
+            ));
+            requests.put("groups", executor.submit(
+                    () -> unwrap(getJson(habbodexListUrl(uniqueId, "groups", 1, 100)))
+            ));
+            requests.put("photos", executor.submit(
+                    () -> unwrap(getJson(habbodexListUrl(uniqueId, "photos", 1, 100)))
+            ));
+        }
+
+        JSONObject out = new JSONObject();
+        int succeeded = 0;
+        int failed = 0;
+        for (Map.Entry<String, Future<JSONObject>> entry : requests.entrySet()) {
+            JSONObject response = null;
+            try {
+                response = entry.getValue().get();
+            } catch(Exception error) {
+                entry.getValue().cancel(true);
+            }
+            if (response == null) {
+                failed++;
+                continue;
+            }
+            succeeded++;
+            try {
+                String key = entry.getKey();
+                if ("profile".equals(key)) {
+                    JSONObject profile = validProfileObject(response);
+                    if (profile != null) fillMissingJsonFields(out, profile);
+                    continue;
+                }
+                String primaryKey = key;
+                ArrayList<JSONObject> items = extractList(response, primaryKey);
+                if (items.isEmpty() && "previousFriends".equals(key)) {
+                    items = extractList(response, "friends");
+                } else if (items.isEmpty() && "previousMottos".equals(key)) {
+                    items = extractList(response, "mottos");
+                } else if (items.isEmpty() && "previousStyles".equals(key)) {
+                    items = extractList(response, "styles");
+                } else if (items.isEmpty() && "previousNames".equals(key)) {
+                    items = extractList(response, "names");
+                }
+                out.put(key, jsonArrayFromObjects(items));
+            } catch(Exception ignored) {}
+        }
+
+        if (succeeded == 0 || out.length() == 0) return null;
+        try {
+            out.put("_toxicHabbodexDirect", true);
+            out.put("_toxicHabbodexPartial", failed > 0);
+        } catch(Exception ignored) {}
+        return out;
     }
 
     private void copyJsonArray(JSONObject source, String sourceKey, JSONObject target, String targetKey) {
@@ -8121,30 +8276,151 @@ private int loadingProgressFor(String message) {
         if (data == null) return out;
         JSONArray arr = null;
         if (primaryKey != null && !primaryKey.isEmpty()) arr = data.optJSONArray(primaryKey);
+        if (arr == null && isHistoricalKey(primaryKey, "previousNames", "names", "oldNames")) {
+            arr = firstJsonArray(data, "previousNames", "names", "oldNames", "nameHistory");
+        }
+        if (arr == null && isHistoricalKey(primaryKey, "previousMottos", "mottos", "missions")) {
+            arr = firstJsonArray(data, "previousMottos", "mottos", "missions", "previousMissions");
+        }
+        if (arr == null && isHistoricalKey(primaryKey, "previousStyles", "styles", "looks")) {
+            arr = firstJsonArray(data, "previousStyles", "styles", "looks", "previousLooks");
+        }
+        if (arr == null && isHistoricalKey(primaryKey, "previousFriends", "removedFriends")) {
+            arr = firstJsonArray(data, "previousFriends", "removedFriends", "oldFriends");
+        }
         if (arr == null) arr = data.optJSONArray("result");
         if (arr == null) arr = data.optJSONArray("results");
         if (arr == null) arr = data.optJSONArray("data");
         if (arr == null) arr = data.optJSONArray("items");
+        if (arr == null) arr = data.optJSONArray("history");
+        if (arr == null) arr = data.optJSONArray("list");
         if (arr == null) arr = data.optJSONArray("habbos");
         if (arr == null) arr = data.optJSONArray("users");
         if (arr == null) arr = data.optJSONArray("profiles");
         JSONObject d = data.optJSONObject("data");
+        if (d == null) d = data.optJSONObject("payload");
         if (arr == null && d != null) {
             if (primaryKey != null && !primaryKey.isEmpty()) arr = d.optJSONArray(primaryKey);
+            if (arr == null && isHistoricalKey(primaryKey, "previousNames", "names", "oldNames")) {
+                arr = firstJsonArray(d, "previousNames", "names", "oldNames", "nameHistory");
+            }
+            if (arr == null && isHistoricalKey(primaryKey, "previousMottos", "mottos", "missions")) {
+                arr = firstJsonArray(d, "previousMottos", "mottos", "missions", "previousMissions");
+            }
+            if (arr == null && isHistoricalKey(primaryKey, "previousStyles", "styles", "looks")) {
+                arr = firstJsonArray(d, "previousStyles", "styles", "looks", "previousLooks");
+            }
+            if (arr == null && isHistoricalKey(primaryKey, "previousFriends", "removedFriends")) {
+                arr = firstJsonArray(d, "previousFriends", "removedFriends", "oldFriends");
+            }
             if (arr == null) arr = d.optJSONArray("result");
             if (arr == null) arr = d.optJSONArray("results");
             if (arr == null) arr = d.optJSONArray("items");
+            if (arr == null) arr = d.optJSONArray("history");
+            if (arr == null) arr = d.optJSONArray("list");
             if (arr == null) arr = d.optJSONArray("habbos");
             if (arr == null) arr = d.optJSONArray("users");
             if (arr == null) arr = d.optJSONArray("profiles");
         }
         if (arr != null) {
             for (int i = 0; i < arr.length(); i++) {
-                JSONObject item = arr.optJSONObject(i);
-                if (item != null) out.add(item);
+                Object value = arr.opt(i);
+                JSONObject item = value instanceof JSONObject
+                        ? (JSONObject)value
+                        : historicalScalarItem(value, primaryKey);
+                if (item != null) out.add(normalizeHistoricalItem(item, primaryKey));
             }
         }
         return out;
+    }
+
+    private JSONArray firstJsonArray(JSONObject object, String... keys) {
+        if (object == null || keys == null) return null;
+        for (String key : keys) {
+            JSONArray value = object.optJSONArray(key);
+            if (value != null) return value;
+        }
+        return null;
+    }
+
+    private boolean isHistoricalKey(String key, String... candidates) {
+        if (key == null || candidates == null) return false;
+        for (String candidate : candidates) if (candidate.equalsIgnoreCase(key)) return true;
+        return false;
+    }
+
+    private JSONObject historicalScalarItem(Object value, String primaryKey) {
+        if (value == null || value == JSONObject.NULL) return null;
+        String text = String.valueOf(value).trim();
+        if (text.isEmpty() || "null".equalsIgnoreCase(text)) return null;
+        try {
+            JSONObject item = new JSONObject();
+            if (isHistoricalKey(primaryKey, "previousNames", "names", "oldNames")) {
+                item.put("name", text);
+            } else if (isHistoricalKey(primaryKey, "previousMottos", "mottos", "missions")) {
+                item.put("text", text);
+            } else if (isHistoricalKey(primaryKey, "previousStyles", "styles", "looks")) {
+                item.put("figureString", text);
+            } else {
+                return null;
+            }
+            return item;
+        } catch(Exception ignored) {
+            return null;
+        }
+    }
+
+    private JSONObject normalizeHistoricalItem(JSONObject item, String primaryKey) {
+        if (item == null) return null;
+        try {
+            if (isHistoricalKey(primaryKey, "previousNames", "names", "oldNames")) {
+                putIfMissing(item, "name", firstText(
+                        item, "oldName", "previousName", "username", "nickname", "value"
+                ));
+            } else if (isHistoricalKey(primaryKey, "previousMottos", "mottos", "missions")) {
+                putIfMissing(item, "text", firstText(
+                        item, "motto", "mission", "previousMotto", "value"
+                ));
+            } else if (isHistoricalKey(primaryKey, "previousStyles", "styles", "looks")) {
+                putIfMissing(item, "figureString", firstText(
+                        item, "figure", "figure_string", "look", "previousFigure", "value"
+                ));
+            }
+
+            String id = firstText(item, "uniqueId", "id", "habboId", "userId");
+            putIfMissing(item, "uniqueId", id);
+            String figure = firstText(item, "figureString", "figure", "figure_string", "look");
+            putIfMissing(item, "figureString", figure);
+
+            String date = firstText(
+                    item,
+                    "changedAt", "removedAt", "leftAt", "obtainedAt", "acquiredAt",
+                    "receivedAt", "creationTime", "friendSince", "addedAt",
+                    "createdAt", "date", "timestamp", "datetime",
+                    "changed_at", "removed_at", "created_at", "observedAt", "updatedAt"
+            );
+            if (isHistoricalKey(primaryKey, "previousNames", "names", "oldNames",
+                    "previousMottos", "mottos", "missions", "previousStyles", "styles", "looks")) {
+                putIfMissing(item, "changedAt", date);
+            } else if (isHistoricalKey(primaryKey, "previousFriends", "removedFriends")) {
+                putIfMissing(item, "removedAt", date);
+            } else if (isHistoricalKey(primaryKey, "friends")) {
+                putIfMissing(item, "creationTime", date);
+                putIfMissing(item, "friendSince", date);
+            } else if (isHistoricalKey(primaryKey, "badges")) {
+                putIfMissing(item, "obtainedAt", date);
+            }
+            putIfMissing(item, "date", date);
+        } catch(Exception ignored) {}
+        return item;
+    }
+
+    private void putIfMissing(JSONObject object, String key, String value) {
+        if (object == null || key == null || value == null || value.trim().isEmpty()) return;
+        Object current = object.opt(key);
+        if (isMissingJsonValue(current)) {
+            try { object.put(key, value.trim()); } catch(Exception ignored) {}
+        }
     }
     private ArrayList<JSONObject> mergeLists(ArrayList<JSONObject> a, ArrayList<JSONObject> b) { ArrayList<JSONObject> out = new ArrayList<>(); HashSet<String> seen = new HashSet<>(); if (a != null) addUnique(out, seen, a); if (b != null) addUnique(out, seen, b); return out; }
     private void addUnique(ArrayList<JSONObject> out, HashSet<String> seen, ArrayList<JSONObject> src) { for (JSONObject o : src) { String key = stableItemKey(o); if (seen.add(key)) out.add(o); } }
@@ -8348,6 +8624,10 @@ private int loadingProgressFor(String message) {
                 return new Date(ts);
             }
             String iso = s.replace("Z", "+0000").replaceAll("([+-]\\d{2}):(\\d{2})$", "$1$2");
+            // O HabboDex pode devolver microssegundos (seis casas), enquanto
+            // SimpleDateFormat aceita somente milissegundos. Preserva as três
+            // primeiras casas antes de interpretar a data.
+            iso = iso.replaceFirst("(\\.\\d{3})\\d+(?=([+-]\\d{4})?$)", "$1");
             String[] patterns = {"yyyy-MM-dd'T'HH:mm:ss.SSSZ", "yyyy-MM-dd'T'HH:mm:ssZ", "yyyy-MM-dd'T'HH:mm:ss.SSS", "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd HH:mm:ss"};
             for (String pattern : patterns) {
                 try {
@@ -10499,7 +10779,7 @@ private int loadingProgressFor(String message) {
             runOnUiThread(() -> {
                 info.removeAllViews();
 
-                if (itemInfo == null || !hasCompleteClothingName(itemInfo)) {
+                if (itemInfo == null) {
                     rarityThumbnail.setVisibility(View.INVISIBLE);
                     info.addView(visualItemInfoRow(t(R.string.item_name), ""));
                     return;
@@ -11501,6 +11781,25 @@ private int loadingProgressFor(String message) {
         return new Locale("pt", "BR");
     }
 
+    private String formatCount(long value) {
+        NumberFormat formatter = NumberFormat.getIntegerInstance(
+                uiLocaleForHotel(currentHotelKey)
+        );
+        formatter.setGroupingUsed(true);
+        return formatter.format(value);
+    }
+
+    private String formatNumericText(String raw) {
+        String clean = raw == null ? "" : raw.trim();
+        if (clean.isEmpty() || "—".equals(clean)) return clean;
+        if (!clean.matches("^-?\\d+$")) return clean;
+        try {
+            return formatCount(Long.parseLong(clean));
+        } catch(Exception ignored) {
+            return clean;
+        }
+    }
+
     private static Context localizedContextForHotel(Context baseContext, String hotelKey) {
         if (baseContext == null) return null;
         Configuration configuration = new Configuration(baseContext.getResources().getConfiguration());
@@ -11728,7 +12027,7 @@ private int loadingProgressFor(String message) {
         infoGrid.addView(photoInfoCard(t(R.string.name), name, "", ""));
         infoGrid.addView(photoInfoCard(t(R.string.description), desc, "", ""));
         infoGrid.addView(photoInfoCard(t(R.string.obtained), created.isEmpty() ? "" : niceDateOnly(created), "", ""));
-        if (!owners.isEmpty()) infoGrid.addView(photoInfoCard(t(R.string.total_owners), owners, "", ""));
+        if (!owners.isEmpty()) infoGrid.addView(photoInfoCard(t(R.string.total_owners), formatNumericText(owners), "", ""));
         infoGrid.addView(photoInfoCard(t(R.string.code), code, "", ""));
 
         dialog.show();
