@@ -50,6 +50,7 @@ import com.android.billingclient.api.QueryPurchasesParams;
 import com.android.billingclient.api.UnfetchedProduct;
 import java.io.*;
 import java.net.*;
+import java.security.MessageDigest;
 import java.text.*;
 import java.util.*;
 import java.util.concurrent.*;
@@ -57,8 +58,9 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
-    private static final String HABBODEX_PROXY_API = "https://atoxic.com.br/habbodex.php";
-    private static final String APP_VERSION = "1.3.26";
+    private static final String HABBODEX_BASE = "https://habbodex.com/api/v1/habboinfo";
+    private static final String HABBODEX_FURNIDEX_API = "https://habbodex.com/api/v1/furnidex/furni/from-figure-string";
+    private static final String APP_VERSION = "1.3.27";
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -4428,8 +4430,8 @@ public class MainActivity extends Activity {
         r.searchedNick = nick;
         r.hotelKey = currentHotelKey;
 
-        // Uma busca normal começa exclusivamente pela API oficial. O servidor
-        // complementar só participa desta fase quando o nome não é encontrado.
+        // Uma busca normal começa exclusivamente pela API oficial. O HabboDex
+        // direto só participa desta fase quando o nome não é encontrado.
         JSONObject habboPublic = validProfileObject(
                 tryJson(habboApiUrl("/api/public/users?name=" + enc(nick)))
         );
@@ -4869,12 +4871,165 @@ public class MainActivity extends Activity {
     ) {
         String cleanId = uniqueId == null ? "" : uniqueId.trim();
         if (cleanId.isEmpty()) return null;
-        return unwrap(tryJson(habbodexBatchUrl(
-                cleanId,
-                includePrivate,
-                sections,
-                1
-        )));
+        return fetchHabbodexBatchDirect(cleanId, includePrivate, sections, 1);
+    }
+
+    private PageResult fetchHabbodexPages(
+            String uniqueId,
+            String endpoint,
+            String primaryKey,
+            int maxPages
+    ) {
+        PageResult combined = new PageResult();
+        combined.page = 1;
+        combined.nextPage = 0;
+        combined.total = 0;
+        combined.hasMore = false;
+        combined.success = false;
+
+        int page = 1;
+        int pageLimit = Math.max(1, Math.min(25, maxPages));
+        HashSet<String> seen = new HashSet<>();
+
+        for (int request = 0; request < pageLimit; request++) {
+            PageResult part = fetchPage(uniqueId, endpoint, primaryKey, page, 100);
+            if (part == null || !part.success) {
+                combined.hasMore = combined.success;
+                break;
+            }
+            combined.success = true;
+            combined.total = Math.max(combined.total, part.total);
+
+            for (JSONObject item : part.items) {
+                if (item == null) continue;
+                String fingerprint = item.toString();
+                if (seen.add(fingerprint)) combined.items.add(item);
+            }
+
+            if (!part.hasMore || part.nextPage <= page) {
+                combined.nextPage = 0;
+                combined.hasMore = false;
+                break;
+            }
+
+            combined.nextPage = part.nextPage;
+            combined.hasMore = true;
+            page = part.nextPage;
+        }
+
+        if (combined.total > 0 && combined.items.size() >= combined.total) {
+            combined.hasMore = false;
+            combined.nextPage = 0;
+        }
+        return combined;
+    }
+
+    private JSONObject fetchHabbodexBatchDirect(
+            String uniqueId,
+            boolean includePrivate,
+            String sections,
+            int maxPages
+    ) {
+        String cleanId = uniqueId == null ? "" : uniqueId.trim();
+        if (cleanId.isEmpty()) return null;
+
+        LinkedHashMap<String, String[]> definitions = new LinkedHashMap<>();
+        definitions.put("profile", new String[]{"profile", ""});
+        definitions.put("previous-names", new String[]{"previousNames", "previous-names"});
+        definitions.put("friends", new String[]{"friends", "friends"});
+        definitions.put("previous-friends", new String[]{"previousFriends", "previous-friends"});
+        definitions.put("previous-mottos", new String[]{"previousMottos", "previous-mottos"});
+        definitions.put("previous-styles", new String[]{"previousStyles", "previous-styles"});
+        if (includePrivate) {
+            definitions.put("rooms", new String[]{"rooms", "rooms"});
+            definitions.put("groups", new String[]{"groups", "groups"});
+            definitions.put("photos", new String[]{"photos", "photos"});
+        }
+
+        LinkedHashSet<String> requested = new LinkedHashSet<>();
+        String cleanSections = sections == null ? "" : sections.trim();
+        if (cleanSections.isEmpty()) {
+            requested.addAll(definitions.keySet());
+        } else {
+            for (String raw : cleanSections.split(",")) {
+                String section = raw == null ? "" : raw.trim().toLowerCase(Locale.ROOT);
+                if (definitions.containsKey(section)) requested.add(section);
+            }
+        }
+        // Emblemas nunca entram no complemento: permanecem exclusivos da API Habbo.
+        requested.remove("badges");
+        if (requested.isEmpty()) return null;
+
+        LinkedHashMap<String, Future<Object>> tasks = new LinkedHashMap<>();
+        for (String section : requested) {
+            String[] def = definitions.get(section);
+            if (def == null) continue;
+            if ("profile".equals(section)) {
+                tasks.put(section, executor.submit(() -> fetchDirectHabbodexProfile(cleanId)));
+            } else {
+                String key = def[0];
+                String endpoint = def[1];
+                tasks.put(section, executor.submit(
+                        () -> fetchHabbodexPages(cleanId, endpoint, key, maxPages)
+                ));
+            }
+        }
+
+        JSONObject out = new JSONObject();
+        JSONObject totals = new JSONObject();
+        JSONObject errors = new JSONObject();
+        boolean partial = false;
+        int successes = 0;
+
+        for (Map.Entry<String, Future<Object>> entry : tasks.entrySet()) {
+            String section = entry.getKey();
+            String[] def = definitions.get(section);
+            String key = def == null ? section : def[0];
+            Object value = null;
+            try {
+                value = entry.getValue().get();
+            } catch(Exception error) {
+                entry.getValue().cancel(true);
+            }
+
+            try {
+                if ("profile".equals(section)) {
+                    JSONObject profile = value instanceof JSONObject ? (JSONObject)value : null;
+                    if (profile != null) {
+                        out.put("profile", profile);
+                        successes++;
+                    } else {
+                        errors.put("profile", "request_failed");
+                        partial = true;
+                    }
+                    continue;
+                }
+
+                PageResult page = value instanceof PageResult ? (PageResult)value : null;
+                if (page == null || !page.success) {
+                    errors.put(key, "request_failed");
+                    partial = true;
+                    continue;
+                }
+
+                out.put(key, jsonArrayFromObjects(page.items));
+                totals.put(key, page.total > 0 ? page.total : page.items.size());
+                successes++;
+                if (page.hasMore) partial = true;
+            } catch(Exception ignored) {
+                try { errors.put(key, "parse_failed"); } catch(Exception ignoredAgain) {}
+                partial = true;
+            }
+        }
+
+        if (successes == 0) return null;
+        try {
+            out.put("totals", totals);
+            out.put("errors", errors);
+            out.put("partial", partial || errors.length() > 0);
+            out.put("_toxicHabbodexDirect", true);
+        } catch(Exception ignored) {}
+        return out;
     }
 
     private ProfileSectionPayload historySectionFromBatch(
@@ -8080,82 +8235,21 @@ private int loadingProgressFor(String message) {
     }
 
     private String habbodexFigureUrl(String figure) {
-        return PROFILE_API + "/furnidex/furni/from-figure-string?figureString=" + enc(figure) + "&hotel=" + enc(habbodexHotelCode(currentHotelKey));
-    }
-
-    private String habbodexBatchUrl(String uniqueId, boolean includePrivate) {
-        return habbodexBatchUrl(uniqueId, includePrivate, "");
-    }
-
-    private String habbodexBatchUrl(
-            String uniqueId,
-            boolean includePrivate,
-            String sections
-    ) {
-        return habbodexBatchUrl(uniqueId, includePrivate, sections, 25);
-    }
-
-    private String habbodexBatchUrl(
-            String uniqueId,
-            boolean includePrivate,
-            String sections,
-            int maxPages
-    ) {
-        // Todo o complemento passa pelo api.php. O api.php inclui habbodex.php
-        // internamente como biblioteca, então o APK não depende da PROXY_KEY.
-        String url = PROFILE_API
-                + "/habbodex/batch?id=" + enc(uniqueId)
-                + "&includePrivate=" + (includePrivate ? "true" : "false")
-                + "&maxPages=" + Math.max(1, Math.min(25, maxPages));
-        String cleanSections = sections == null ? "" : sections.trim();
-        return cleanSections.isEmpty()
-                ? url
-                : url + "&sections=" + enc(cleanSections);
+        return HABBODEX_FURNIDEX_API
+                + "?figureString=" + enc(figure)
+                + "&hotel=" + enc(habbodexHotelCode(currentHotelKey));
     }
 
     private String habbodexListUrl(String uniqueId, String endpoint, int page, int limit) {
-        return PROFILE_API
-                + "/habbodex/list?id=" + enc(uniqueId)
-                + "&endpoint=" + enc(endpoint)
-                + "&page=" + Math.max(1, page)
+        return HABBODEX_BASE
+                + "/" + enc(uniqueId)
+                + "/" + enc(endpoint)
+                + "?page=" + Math.max(1, page)
                 + "&limit=" + Math.max(1, Math.min(100, limit));
     }
 
     private String habbodexProfileUrl(String uniqueId) {
-        return PROFILE_API + "/habbodex/profile?id=" + enc(uniqueId);
-    }
-
-    private String apiHabbodexProfileUrl(String uniqueId) {
-        return PROFILE_API
-                + "/habboinfo/" + enc(uniqueId)
-                + "?hotel=" + enc(normalizeHotelKey(currentHotelKey))
-                + "&complementOnly=true"
-                + "&sections=" + enc("profile,previous-names");
-    }
-
-    private String apiHabbodexListUrl(
-            String uniqueId,
-            String endpoint,
-            int page,
-            int limit
-    ) {
-        return PROFILE_API
-                + "/habboinfo/" + enc(uniqueId)
-                + "/" + enc(endpoint)
-                + "?hotel=" + enc(normalizeHotelKey(currentHotelKey))
-                + "&complementOnly=true"
-                + "&page=" + Math.max(1, page)
-                + "&limit=" + Math.max(1, Math.min(100, limit));
-    }
-
-    private String apiHabbodexProfileByNameUrl(String name, String hotelKey) {
-        String hotel = normalizeHotelKey(hotelKey);
-        return PROFILE_API
-                + "/habboinfo/" + enc(hotel)
-                + "/habbo?name=" + enc(name)
-                + "&hotel=" + enc(hotel)
-                + "&complementOnly=true"
-                + "&sections=" + enc("profile,previous-names");
+        return HABBODEX_BASE + "/" + enc(uniqueId);
     }
 
     private String habbodexSuggestUrl(String name) {
@@ -8163,8 +8257,9 @@ private int loadingProgressFor(String message) {
     }
 
     private String habbodexSuggestUrl(String name, String hotelKey) {
-        return PROFILE_API
-                + "/habbodex/search?name=" + enc(name)
+        return HABBODEX_BASE
+                + "/habbos?name=" + enc(name)
+                + "&includePreviousNames=true"
                 + "&hotel=" + enc(habbodexHotelCode(hotelKey));
     }
 
@@ -8303,19 +8398,12 @@ private int loadingProgressFor(String message) {
         String historicalSections = includePrivate
                 ? "profile,previous-names,friends,previous-friends,previous-mottos,previous-styles,rooms,groups,photos"
                 : "profile,previous-names,friends,previous-friends,previous-mottos,previous-styles";
-        Future<JSONObject> batchFuture = executor.submit(
-                () -> unwrap(getJson(habbodexBatchUrl(
-                        cleanId, includePrivate, historicalSections
-                )))
+        JSONObject batch = fetchHabbodexBatchDirect(
+                cleanId,
+                includePrivate,
+                historicalSections,
+                25
         );
-
-        JSONObject batch;
-        try {
-            batch = batchFuture.get();
-        } catch(Exception error) {
-            batchFuture.cancel(true);
-            return fetchDirectHabbodexComplementBySections(cleanId, includePrivate);
-        }
         if (batch == null) {
             return fetchDirectHabbodexComplementBySections(cleanId, includePrivate);
         }
@@ -8511,16 +8599,16 @@ private int loadingProgressFor(String message) {
         );
     }
 
+    private boolean isDirectHabbodexUrl(String u) {
+        if (u == null) return false;
+        return u.startsWith(HABBODEX_BASE) || u.startsWith(HABBODEX_FURNIDEX_API);
+    }
+
     private boolean isFiveMinuteJsonCacheUrl(String u) {
         if (u == null || u.trim().isEmpty()) return false;
-        if (u.startsWith(HABBODEX_PROXY_API)) return true;
-        if (u.startsWith(PROFILE_API)) {
-            return u.contains("/habboinfo/")
-                    || u.contains("/habbodex/")
-                    || u.contains("/furnidex/")
-                    || u.contains("endpoint=")
-                    || u.contains("figureString=");
-        }
+        if (isDirectHabbodexUrl(u)) return true;
+        // PROFILE_API continua somente para recursos próprios do app
+        // (assinatura/patrocinadores), portanto não entra no cache de perfil.
         return u.contains("habbo.com.br/api/public/")
                 || u.contains("habbo.com/api/public/")
                 || u.contains("habbo.es/api/public/")
@@ -8536,7 +8624,65 @@ private int loadingProgressFor(String message) {
     private Object parseCachedJsonBody(String body) throws Exception {
         String clean = body == null ? "" : body.trim();
         if (clean.isEmpty()) throw new IOException("Empty cached JSON");
+        if (clean.startsWith("<")) throw new IOException("HTML received instead of JSON");
         return clean.startsWith("[") ? new JSONArray(clean) : new JSONObject(clean);
+    }
+
+    private String sha256Hex(String value) {
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            byte[] bytes = digest.digest(
+                    (value == null ? "" : value).getBytes("UTF-8")
+            );
+            StringBuilder out = new StringBuilder(bytes.length * 2);
+            for (byte b : bytes) out.append(String.format(Locale.ROOT, "%02x", b & 0xff));
+            return out.toString();
+        } catch(Exception ignored) {
+            return Integer.toHexString((value == null ? "" : value).hashCode());
+        }
+    }
+
+    private File fiveMinuteJsonCacheFile(String url) {
+        File dir = new File(getCacheDir(), "profile_json_5m");
+        if (!dir.exists()) {
+            try { dir.mkdirs(); } catch(Exception ignored) {}
+        }
+        return new File(dir, sha256Hex(url) + ".json");
+    }
+
+    private String readFiveMinuteJsonDiskCache(String url) {
+        try {
+            File file = fiveMinuteJsonCacheFile(url);
+            if (!file.isFile()) return null;
+            long age = System.currentTimeMillis() - file.lastModified();
+            if (age < 0L || age > JSON_RESPONSE_CACHE_TTL_MS) {
+                file.delete();
+                return null;
+            }
+            try (FileInputStream input = new FileInputStream(file)) {
+                return readAll(input);
+            }
+        } catch(Exception ignored) {
+            return null;
+        }
+    }
+
+    private void writeFiveMinuteJsonDiskCache(String url, String body) {
+        if (body == null || body.trim().isEmpty()) return;
+        try {
+            File file = fiveMinuteJsonCacheFile(url);
+            File tmp = new File(file.getParentFile(), file.getName() + ".tmp");
+            try (FileOutputStream output = new FileOutputStream(tmp, false)) {
+                output.write(body.getBytes("UTF-8"));
+                output.flush();
+            }
+            if (!tmp.renameTo(file)) {
+                try (FileOutputStream output = new FileOutputStream(file, false)) {
+                    output.write(body.getBytes("UTF-8"));
+                }
+                tmp.delete();
+            }
+        } catch(Exception ignored) {}
     }
 
     private Object getJsonAny(String u) throws Exception {
@@ -8552,32 +8698,124 @@ private int loadingProgressFor(String message) {
                     jsonResponseCache.remove(u, cached);
                 }
             }
+
+            String diskBody = readFiveMinuteJsonDiskCache(u);
+            if (diskBody != null && !diskBody.trim().isEmpty()) {
+                try {
+                    Object parsed = parseCachedJsonBody(diskBody);
+                    jsonResponseCache.put(
+                            u,
+                            new CachedJsonResponse(diskBody, SystemClock.elapsedRealtime())
+                    );
+                    return parsed;
+                } catch(Exception ignored) {
+                    try { fiveMinuteJsonCacheFile(u).delete(); } catch(Exception ignoredAgain) {}
+                }
+            }
         }
 
-        HttpURLConnection c = (HttpURLConnection)new URL(u).openConnection();
-        boolean complement = u != null && (u.startsWith(PROFILE_API) || u.startsWith(HABBODEX_PROXY_API));
-        boolean largeOfficialProfile = u != null
+        final boolean habbodexDirect = isDirectHabbodexUrl(u);
+        final boolean ownServer = u != null && u.startsWith(PROFILE_API);
+        final boolean largeOfficialProfile = u != null
                 && u.contains("/api/public/users/")
                 && u.endsWith("/profile");
-        c.setUseCaches(false);
-        c.setDefaultUseCaches(false);
-        c.setConnectTimeout(complement ? 6000 : 5000);
-        c.setReadTimeout(complement ? 12000 : (largeOfficialProfile ? 15000 : 8000));
-        c.setRequestProperty("Accept", "application/json, text/plain, */*");
-        c.setRequestProperty("User-Agent", "ToxicSearchTool/" + APP_VERSION + " Android (+https://atoxic.com.br)");
-        c.setRequestProperty("X-Toxic-App", APP_VERSION);
-        if (u != null && u.startsWith(HABBODEX_PROXY_API)) {
-            String proxyKey = BuildConfig.HABBODEX_PROXY_KEY == null ? "" : BuildConfig.HABBODEX_PROXY_KEY.trim();
-            if (!proxyKey.isEmpty()) c.setRequestProperty("X-Proxy-Key", proxyKey);
+        Exception lastError = null;
+        int attempts = habbodexDirect ? 2 : 1;
+
+        for (int attempt = 0; attempt < attempts; attempt++) {
+            HttpURLConnection c = null;
+            try {
+                c = (HttpURLConnection)new URL(u).openConnection();
+                c.setUseCaches(false);
+                c.setDefaultUseCaches(false);
+                c.setConnectTimeout(habbodexDirect || ownServer ? 6000 : 5000);
+                c.setReadTimeout(
+                        habbodexDirect || ownServer
+                                ? 12000
+                                : (largeOfficialProfile ? 15000 : 8000)
+                );
+                c.setRequestProperty("Accept", "application/json, text/plain, */*");
+                if (habbodexDirect) {
+                    // Requisição feita pelo próprio aparelho/IP do usuário,
+                    // com os mesmos cabeçalhos básicos de uma navegação web.
+                    c.setRequestProperty(
+                            "User-Agent",
+                            "Mozilla/5.0 (Linux; Android 11; Mobile) "
+                                    + "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                    + "Chrome/124.0.0.0 Mobile Safari/537.36"
+                    );
+                    c.setRequestProperty("Accept-Language", "pt-BR,pt;q=0.9,en;q=0.8");
+                    c.setRequestProperty("Referer", "https://habbodex.com/");
+                    c.setRequestProperty("Origin", "https://habbodex.com");
+                    c.setRequestProperty("Sec-Fetch-Site", "same-origin");
+                    c.setRequestProperty("Sec-Fetch-Mode", "cors");
+                    c.setRequestProperty("Sec-Fetch-Dest", "empty");
+                } else {
+                    c.setRequestProperty(
+                            "User-Agent",
+                            "ToxicSearchTool/" + APP_VERSION + " Android (+https://atoxic.com.br)"
+                    );
+                    c.setRequestProperty("X-Toxic-App", APP_VERSION);
+                }
+
+                int code = c.getResponseCode();
+                InputStream is = code >= 200 && code < 300
+                        ? c.getInputStream()
+                        : c.getErrorStream();
+                String body = readAll(is);
+
+                if (code < 200 || code >= 300 || body == null || body.trim().isEmpty()) {
+                    IOException error = new IOException("HTTP " + code);
+                    lastError = error;
+                    boolean retryable = habbodexDirect
+                            && attempt + 1 < attempts
+                            && (code == 0 || code == 403 || code == 408 || code == 425
+                            || code == 429 || code >= 500);
+                    if (retryable) {
+                        try { Thread.sleep(code == 429 ? 800L : 350L); }
+                        catch(InterruptedException interrupted) {
+                            Thread.currentThread().interrupt();
+                            throw interrupted;
+                        }
+                        continue;
+                    }
+                    throw error;
+                }
+
+                Object parsed;
+                try {
+                    parsed = parseCachedJsonBody(body);
+                } catch(Exception parseError) {
+                    lastError = parseError;
+                    if (habbodexDirect && attempt + 1 < attempts) {
+                        try { Thread.sleep(350L); }
+                        catch(InterruptedException interrupted) {
+                            Thread.currentThread().interrupt();
+                            throw interrupted;
+                        }
+                        continue;
+                    }
+                    throw parseError;
+                }
+
+                if (cacheable) {
+                    jsonResponseCache.put(
+                            u,
+                            new CachedJsonResponse(body, SystemClock.elapsedRealtime())
+                    );
+                    writeFiveMinuteJsonDiskCache(u, body);
+                }
+                return parsed;
+            } catch(Exception error) {
+                lastError = error;
+                if (!(habbodexDirect && attempt + 1 < attempts)) throw error;
+            } finally {
+                if (c != null) c.disconnect();
+            }
         }
-        int code = c.getResponseCode();
-        InputStream is = code >= 200 && code < 300 ? c.getInputStream() : c.getErrorStream();
-        String body = readAll(is);
-        if (code < 200 || code >= 300 || body == null || body.trim().isEmpty()) throw new IOException("HTTP " + code);
-        if (cacheable) {
-            jsonResponseCache.put(u, new CachedJsonResponse(body, SystemClock.elapsedRealtime()));
-        }
-        return parseCachedJsonBody(body);
+
+        if (lastError instanceof Exception) throw lastError;
+        throw new IOException("Request failed");
     }
 
     private JSONObject getJson(String u) throws Exception { Object any = getJsonAny(u); if (any instanceof JSONObject) return (JSONObject)any; JSONObject wrap = new JSONObject(); wrap.put("data", any); return wrap; }
@@ -9560,6 +9798,7 @@ private int loadingProgressFor(String message) {
         visualEditorCachedDirection = 2;
         visualItemViewsSessionCache.clear();
         visualItemRenderLimits.clear();
+        jsonResponseCache.clear();
         try {
             getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                 .remove(PREF_VISUAL_EDITOR_FIGURE)
