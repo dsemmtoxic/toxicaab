@@ -61,7 +61,7 @@ public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_BASE = "https://habbodex.com/api/v1/habboinfo";
     private static final String HABBODEX_FURNIDEX_API = "https://habbodex.com/api/v1/furnidex/furni/from-figure-string";
-    private static final String APP_VERSION = "1.3.32";
+    private static final String APP_VERSION = "1.3.33";
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -5831,11 +5831,20 @@ public class MainActivity extends Activity {
         r.stylesNextPage = r.stylesHasMore ? 2 : 0;
     }
 
+    private boolean isAchievementBadge(JSONObject item) {
+        if (item == null) return false;
+        String code = firstText(item, "code", "badgeCode").trim().toUpperCase(Locale.ROOT);
+        // No Habbo, conquistas usam códigos ACH_. Nem toda resposta do HabboDex
+        // preenche isAchievement/achievement, então o prefixo é a fonte primária.
+        return code.startsWith("ACH_")
+                || optBoolAny(item, false, "isAchievement", "achievement");
+    }
+
     private ArrayList<JSONObject> withoutAchievementBadges(ArrayList<JSONObject> source) {
         ArrayList<JSONObject> out = new ArrayList<>();
         if (source == null) return out;
         for (JSONObject item : source) {
-            if (!optBoolAny(item, false, "isAchievement", "achievement")) out.add(item);
+            if (!isAchievementBadge(item)) out.add(item);
         }
         return out;
     }
@@ -6748,7 +6757,7 @@ public class MainActivity extends Activity {
         FrameLayout slideHost = new FrameLayout(this);
         slideHost.setClipChildren(false);
         slideHost.setClipToPadding(false);
-        c.addView(slideHost, lp(-1, dp(154), 0, 0, 0, 8));
+        c.addView(slideHost, lp(-1, -2, 0, 0, 0, 8));
 
         HorizontalScrollView dotsScroll = new HorizontalScrollView(this);
         dotsScroll.setHorizontalScrollBarEnabled(false);
@@ -6780,7 +6789,7 @@ public class MainActivity extends Activity {
             float enter = animationDirection[0] == 0 ? 0f : dp(26) * animationDirection[0];
             slide.setAlpha(animationDirection[0] == 0 ? 1f : 0f);
             slide.setTranslationX(enter);
-            slideHost.addView(slide, new FrameLayout.LayoutParams(-1, -1));
+            slideHost.addView(slide, new FrameLayout.LayoutParams(-1, -2));
             if (animationDirection[0] != 0) {
                 slide.animate().alpha(1f).translationX(0f).setDuration(180L).start();
             }
@@ -6872,8 +6881,8 @@ public class MainActivity extends Activity {
     private LinearLayout missionQuoteSlide(String mission, String date) {
         LinearLayout outer = new LinearLayout(this);
         outer.setOrientation(LinearLayout.HORIZONTAL);
-        outer.setGravity(Gravity.CENTER_VERTICAL);
-        outer.setPadding(dp(12), dp(12), dp(12), dp(12));
+        outer.setGravity(Gravity.TOP);
+        outer.setPadding(dp(12), dp(10), dp(12), dp(10));
         outer.setBackground(round(
                 lightTheme ? Color.rgb(250, 250, 252) : Color.argb(20, 255, 255, 255),
                 dp(18),
@@ -6889,21 +6898,20 @@ public class MainActivity extends Activity {
 
         LinearLayout body = new LinearLayout(this);
         body.setOrientation(LinearLayout.VERTICAL);
-        body.setGravity(Gravity.CENTER_VERTICAL);
-        outer.addView(body, new LinearLayout.LayoutParams(0, -1, 1));
+        body.setGravity(Gravity.TOP);
+        outer.addView(body, new LinearLayout.LayoutParams(0, -2, 1));
 
-        TextView quote = text("“", 30, purple, true);
+        TextView quote = text("“", 27, purple, true);
         quote.setGravity(Gravity.LEFT);
         quote.setIncludeFontPadding(false);
-        body.addView(quote, lp(-1, dp(28), 0, 0, 0, 2));
+        body.addView(quote, lp(-1, dp(24), 0, 0, 0, 0));
 
-        TextView missionText = habboText(mission == null ? "" : mission, 17, true);
+        TextView missionText = habboText(mission == null ? "" : mission, 16, true);
         missionText.setTextColor(lightTheme ? Color.rgb(32, 32, 36) : Color.WHITE);
-        missionText.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
-        missionText.setMaxLines(3);
-        missionText.setEllipsize(TextUtils.TruncateAt.END);
+        missionText.setGravity(Gravity.LEFT);
         missionText.setLineSpacing(dp(2), 1f);
-        body.addView(missionText, new LinearLayout.LayoutParams(-1, 0, 1));
+        // Altura totalmente baseada no texto, sem espaço vertical fixo.
+        body.addView(missionText, new LinearLayout.LayoutParams(-1, -2));
 
         if (date != null && !date.trim().isEmpty() && !"—".equals(date.trim())) {
             TextView dateText = text(
@@ -8264,7 +8272,8 @@ public class MainActivity extends Activity {
                         : (lightTheme ? Color.rgb(220,220,220) : Color.argb(24,255,255,255)),
                 1
         ));
-        row.setLayoutParams(lp(-1, dp(150), 0, 0, 0, 12));
+        row.setLayoutParams(lp(-1, -2, 0, 0, 0, 12));
+        row.setMinimumHeight(dp(122));
 
         ImageView img = new ImageView(this);
         img.setScaleType(ImageView.ScaleType.CENTER_CROP);
@@ -8286,22 +8295,21 @@ public class MainActivity extends Activity {
         LinearLayout txt = new LinearLayout(this);
         txt.setOrientation(LinearLayout.VERTICAL);
         txt.setGravity(Gravity.CENTER_VERTICAL);
-        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, -1, 1);
+        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, -2, 1);
         tp.leftMargin = dp(12);
         row.addView(txt, tp);
 
         String roomNameValue = firstText(room, "name", "roomName", "caption", "title");
-        TextView roomName = habboText(
-                roomNameValue.isEmpty() ? t(R.string.room) : roomNameValue,
-                16,
-                true
-        );
-        roomName.setMaxLines(1);
+        String shownName = roomNameValue.isEmpty() ? t(R.string.room) : roomNameValue;
+        int nameSize = shownName.length() > 70 ? 12 : shownName.length() > 44 ? 13 : shownName.length() > 28 ? 14 : 16;
+        TextView roomName = habboText(shownName, nameSize, true);
+        roomName.setMaxLines(3);
         roomName.setEllipsize(TextUtils.TruncateAt.END);
-        txt.addView(roomName);
+        roomName.setLineSpacing(dp(1), 1f);
+        txt.addView(roomName, lp(-1, -2, 0, 0, 0, 2));
 
         String score = emptyDash(firstText(room, "score", "rating"));
-        String date = niceDate(firstText(room, "createdAt", "creationTime", "date"));
+        String date = niceDateOnly(firstText(room, "createdAt", "creationTime", "date"));
         String maxVisitors = firstText(
                 room,
                 "maximumVisitors", "maxVisitors", "maximum_users", "maxUsers",
@@ -8312,55 +8320,49 @@ public class MainActivity extends Activity {
         if (!maxVisitors.isEmpty()) roomMetaParts.add("👥 " + formatNumericText(maxVisitors));
         if (!date.isEmpty()) roomMetaParts.add(date);
 
-        TextView meta = habboText(TextUtils.join("   ", roomMetaParts), 13, false);
+        String metaText = TextUtils.join("   ", roomMetaParts);
+        int metaSize = metaText.length() > 55 ? 11 : 12;
+        TextView meta = habboText(metaText, metaSize, false);
         meta.setTextColor(lightTheme
                 ? Color.rgb(97,97,97)
                 : Color.argb(215,255,255,255));
-        meta.setMaxLines(1);
-        meta.setEllipsize(TextUtils.TruncateAt.END);
-        txt.addView(meta);
+        meta.setMaxLines(2);
+        meta.setLineSpacing(dp(1), 1f);
+        txt.addView(meta, lp(-1, -2, 0, 0, 0, 2));
 
         String desc = firstText(room, "description", "desc");
         if (!desc.isEmpty()) {
-            TextView rd = habboText(desc, 13, false);
+            int descSize = desc.length() > 150 ? 10 : desc.length() > 90 ? 11 : desc.length() > 55 ? 12 : 13;
+            TextView rd = habboText(desc, descSize, false);
             rd.setTextColor(lightTheme
                     ? Color.rgb(82,82,88)
                     : Color.argb(210,255,255,255));
-            rd.setMaxLines(1);
+            rd.setMaxLines(4);
             rd.setEllipsize(TextUtils.TruncateAt.END);
-            txt.addView(rd);
+            rd.setLineSpacing(dp(1), 1f);
+            txt.addView(rd, lp(-1, -2, 0, 0, 0, 2));
         }
 
         ArrayList<String> tags = roomTags(room);
         if (!tags.isEmpty()) {
-            HorizontalScrollView tagScroll = new HorizontalScrollView(this);
-            tagScroll.setHorizontalScrollBarEnabled(false);
-            tagScroll.setFillViewport(false);
-            LinearLayout tagRow = new LinearLayout(this);
-            tagRow.setOrientation(LinearLayout.HORIZONTAL);
-            tagRow.setGravity(Gravity.CENTER_VERTICAL);
-            tagScroll.addView(tagRow, new HorizontalScrollView.LayoutParams(-2, dp(30)));
-            txt.addView(tagScroll, lp(-1, dp(30), 0, 4, 0, 0));
-
+            ArrayList<String> tagParts = new ArrayList<>();
             for (String tag : tags) {
-                TextView chip = text(
-                        "#" + tag,
-                        11,
-                        lightTheme ? Color.rgb(76, 45, 110) : Color.rgb(226, 203, 255),
+                if (tag == null || tag.trim().isEmpty()) continue;
+                tagParts.add("#" + tag.trim());
+            }
+            String tagsText = TextUtils.join("  ", tagParts);
+            if (!tagsText.isEmpty()) {
+                int tagsSize = tagsText.length() > 95 ? 10 : 11;
+                TextView tagsView = text(
+                        tagsText,
+                        tagsSize,
+                        lightTheme ? Color.rgb(92, 56, 128) : Color.rgb(226, 203, 255),
                         true
                 );
-                chip.setGravity(Gravity.CENTER);
-                chip.setSingleLine(true);
-                chip.setPadding(dp(8), 0, dp(8), 0);
-                chip.setBackground(round(
-                        lightTheme ? Color.argb(22, 139, 52, 217) : Color.argb(42, 139, 52, 217),
-                        dp(999),
-                        lightTheme ? Color.argb(40, 139, 52, 217) : Color.argb(60, 180, 120, 245),
-                        1
-                ));
-                LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(-2, dp(24));
-                cp.rightMargin = dp(6);
-                tagRow.addView(chip, cp);
+                tagsView.setMaxLines(3);
+                tagsView.setEllipsize(TextUtils.TruncateAt.END);
+                tagsView.setLineSpacing(dp(1), 1f);
+                txt.addView(tagsView, lp(-1, -2, 0, 1, 0, 0));
             }
         }
         return row;
@@ -8443,8 +8445,14 @@ public class MainActivity extends Activity {
 
     private void addBadgesSection(ProfileResult r) {
         if (r == null) return;
-        ArrayList<JSONObject> normal = r.badges == null ? new ArrayList<>() : r.badges;
-        ArrayList<JSONObject> withAchievements = r.badgesWithAchievements == null ? new ArrayList<>() : r.badgesWithAchievements;
+        ArrayList<JSONObject> withAchievements = r.badgesWithAchievements == null
+                ? new ArrayList<>() : r.badgesWithAchievements;
+        ArrayList<JSONObject> normalSource = !withAchievements.isEmpty()
+                ? withAchievements
+                : (r.badges == null ? new ArrayList<>() : r.badges);
+        // Refiltra no próprio render para garantir que ACH_ nunca apareça quando
+        // "Ocultar conquistas" estiver ativo, mesmo após merges progressivos.
+        ArrayList<JSONObject> normal = withoutAchievementBadges(normalSource);
 
         int total = Math.max(0, r.badgesTotal);
         try { total = Math.max(total, Integer.parseInt(String.valueOf(r.totalBadges))); } catch(Exception ignored) {}
@@ -8485,8 +8493,12 @@ public class MainActivity extends Activity {
             hideToggle.setText("");
             hideToggle.setBackground(new AchievementSwitchDrawable(hideAchievementBadges[0]));
 
-            ArrayList<JSONObject> data = hideAchievementBadges[0] ? r.badges : r.badgesWithAchievements;
-            if (data == null) data = new ArrayList<>();
+            ArrayList<JSONObject> fullData = r.badgesWithAchievements == null
+                    ? new ArrayList<>() : r.badgesWithAchievements;
+            if (fullData.isEmpty() && r.badges != null) fullData = r.badges;
+            ArrayList<JSONObject> data = hideAchievementBadges[0]
+                    ? withoutAchievementBadges(fullData)
+                    : fullData;
             int loadedPages = Math.max(1, (int)Math.ceil(data.size() / 24.0));
             if (page[0] > loadedPages) page[0] = loadedPages;
             r.badgesTabPage = page[0];
