@@ -17,6 +17,7 @@
     <string name="start_note">Enter a nickname from the selected hotel to view the information.</string>
     <string name="type_nick_toast">Enter a hotel nickname to search.</string>
     <string name="same_profile_loading">This profile is already being loaded.</string>
+    <string name="wait_new_search">Wait %1$ss before searching for another profile.</string>
     <string name="wait_refresh">Wait %1$ss before refreshing this profile again.</string>
     <string name="updating_profile">Updating profile...</string>
     <string name="searching_profile">Searching profile...</string>
@@ -209,7 +210,9 @@
     <string name="ad_badge">AD</string>
     <string name="rarity">Rarity</string>
     <string name="rarity_details">Rarity details</string>
-    <string name="sponsors_title">SPONSORS</string>
+    <string name="sponsors_title">Sponsors</string>
+    <string name="sponsor_join_carousel">Join now</string>
+    <string name="sponsor_manage_carousel">My profile</string>
     <string name="sponsors_loading">Loading sponsors…</string>
     <string name="sponsors_empty">Be the first featured sponsor.</string>
     <string name="sponsors_unavailable">Sponsors could not be loaded right now.</string>
@@ -236,6 +239,6 @@
     <string name="supporter_validation_pending">Validating your subscription. Try again in a few seconds.</string>
     <string name="supporter_server_unavailable">Your subscription is active, but the sponsor server could not be validated right now. Try again.</string>
     <string name="supporter_tutorial_title">Choose your featured profile</string>
-    <string name="supporter_tutorial_body">The ad button is now your sponsor button. Tap it to choose or change the featured profile.</string>
+    <string name="supporter_tutorial_body">Your profile is the last item in the sponsor carousel. Tap it to choose or change the featured profile.</string>
     <string name="supporter_choose_now">Choose now</string>
 </resources>
