@@ -17,6 +17,7 @@
     <string name="start_note">Kirjoita valitun hotellin nimimerkki tarkistaaksesi tiedot.</string>
     <string name="type_nick_toast">Kirjoita hotellin nimimerkki hakeaksesi.</string>
     <string name="same_profile_loading">Tätä profiilia ladataan jo.</string>
+    <string name="wait_new_search">Odota %1$ss ennen toisen profiilin hakemista.</string>
     <string name="wait_refresh">Odota %1$ss ennen kuin päivität tämän profiilin uudelleen.</string>
     <string name="updating_profile">Päivitetään profiilia...</string>
     <string name="searching_profile">Haetaan profiilia...</string>
@@ -209,7 +210,9 @@
     <string name="ad_badge">MAINOS</string>
     <string name="rarity">Harvinaisuus</string>
     <string name="rarity_details">Harvinaisuuden tiedot</string>
-    <string name="sponsors_title">TUKIJAT</string>
+    <string name="sponsors_title">Tukijat</string>
+    <string name="sponsor_join_carousel">Liity mukaan</string>
+    <string name="sponsor_manage_carousel">Oma profiili</string>
     <string name="sponsors_loading">Ladataan tukijoita…</string>
     <string name="sponsors_empty">Ole ensimmäinen esillä oleva tukija.</string>
     <string name="sponsors_unavailable">Tukijoita ei voitu ladata juuri nyt.</string>
@@ -236,6 +239,6 @@
     <string name="supporter_validation_pending">Tilausta vahvistetaan. Yritä uudelleen muutaman sekunnin kuluttua.</string>
     <string name="supporter_server_unavailable">Tilaus on aktiivinen, mutta tukijapalvelinta ei voitu vahvistaa juuri nyt. Yritä uudelleen.</string>
     <string name="supporter_tutorial_title">Valitse esillä oleva profiili</string>
-    <string name="supporter_tutorial_body">Mainospainike on nyt tukijapainikkeesi. Valitse tai vaihda esillä oleva profiili napauttamalla sitä.</string>
+    <string name="supporter_tutorial_body">Profiilisi on tukijakarusellin viimeinen kohde. Valitse tai vaihda esillä oleva profiili napauttamalla sitä.</string>
     <string name="supporter_choose_now">Valitse nyt</string>
 </resources>
