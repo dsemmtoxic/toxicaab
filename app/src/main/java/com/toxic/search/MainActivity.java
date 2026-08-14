@@ -14,6 +14,7 @@ import android.text.*;
 import android.view.*;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.*;
+import android.webkit.*;
 import org.json.*;
 import com.bumptech.glide.Glide;
 import com.bumptech.glide.load.engine.DiskCacheStrategy;
@@ -60,7 +61,7 @@ public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_BASE = "https://habbodex.com/api/v1/habboinfo";
     private static final String HABBODEX_FURNIDEX_API = "https://habbodex.com/api/v1/furnidex/furni/from-figure-string";
-    private static final String APP_VERSION = "1.3.27";
+    private static final String APP_VERSION = "1.3.28";
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -69,6 +70,23 @@ public class MainActivity extends Activity {
     private final ExecutorService executor = Executors.newFixedThreadPool(10);
     private final ExecutorService profileSectionsExecutor = Executors.newFixedThreadPool(6);
     private final ConcurrentHashMap<String, CachedJsonResponse> jsonResponseCache = new ConcurrentHashMap<>();
+
+    // Transporte HabboDex via WebView: mantém uma sessão web real no próprio aparelho.
+    // O WebView fica oculto (1x1 px) e só é exibido se houver uma verificação interativa.
+    private WebView habbodexWebView;
+    private FrameLayout habbodexWebHiddenHost;
+    private Dialog habbodexVerificationDialog;
+    private final Object habbodexWebSessionLock = new Object();
+    private volatile CompletableFuture<Boolean> habbodexWebSessionFuture = new CompletableFuture<>();
+    private volatile boolean habbodexWebChallengeDetected = false;
+    private volatile String habbodexWebLastChallengeUrl = "";
+    private final ConcurrentHashMap<String, CompletableFuture<String>> habbodexWebRequests = new ConcurrentHashMap<>();
+    private final String habbodexWebBridgeToken = UUID.randomUUID().toString();
+    private final AtomicInteger habbodexWebRequestSeq = new AtomicInteger(0);
+    private static final long HABBODEX_WEB_BOOT_TIMEOUT_MS = 12_000L;
+    private static final long HABBODEX_WEB_INTERACTIVE_TIMEOUT_MS = 45_000L;
+    private static final long HABBODEX_WEB_REQUEST_TIMEOUT_MS = 18_000L;
+
     private FrameLayout screen;
     private final WeakHashMap<View, int[]> safeAreaPaddingByView = new WeakHashMap<>();
     private LinearLayout root, resultWrap;
@@ -2145,6 +2163,7 @@ public class MainActivity extends Activity {
         try { if (billingClient != null && billingClient.isReady()) billingClient.endConnection(); } catch(Exception ignored) {}
         profileSectionsExecutor.shutdownNow();
         executor.shutdownNow();
+        destroyHabbodexWebTransport();
         super.onDestroy();
     }
 
@@ -2728,6 +2747,7 @@ public class MainActivity extends Activity {
             );
         }
         maybeShowFirstRunTutorial();
+        if (habbodexWebView != null) attachHabbodexWebViewHidden();
     }
 
     private LinearLayout buildSponsorsSection() {
@@ -5351,7 +5371,8 @@ public class MainActivity extends Activity {
         ArrayList<JSONObject> complementFriends = extractList(complement, "friends");
         ArrayList<JSONObject> complementRooms = extractList(complement, "rooms");
         ArrayList<JSONObject> complementGroups = extractList(complement, "groups");
-        ArrayList<JSONObject> complementSelected = extractList(complement, "selectedBadges");
+        // Emblemas selecionados também permanecem exclusivos da API oficial.
+        ArrayList<JSONObject> complementSelected = new ArrayList<>();
 
         if (official != null) {
             ArrayList<JSONObject> officialFriends = extractList(official, "friends");
@@ -8685,6 +8706,504 @@ private int loadingProgressFor(String message) {
         } catch(Exception ignored) {}
     }
 
+    private boolean isAllowedHabbodexWebHost(String host) {
+        if (host == null) return false;
+        String clean = host.toLowerCase(Locale.ROOT);
+        return "habbodex.com".equals(clean)
+                || "www.habbodex.com".equals(clean)
+                || "challenges.cloudflare.com".equals(clean);
+    }
+
+    private String decodeJavascriptResult(String value) {
+        if (value == null || "null".equals(value) || "undefined".equals(value)) return "";
+        try {
+            Object parsed = new JSONTokener(value).nextValue();
+            return parsed == null || parsed == JSONObject.NULL ? "" : String.valueOf(parsed);
+        } catch(Exception ignored) {
+            return value;
+        }
+    }
+
+    private boolean looksLikeHabbodexChallenge(String title, String text, String url) {
+        String combined = ((title == null ? "" : title) + "\n"
+                + (text == null ? "" : text) + "\n"
+                + (url == null ? "" : url)).toLowerCase(Locale.ROOT);
+        return combined.contains("just a moment")
+                || combined.contains("checking your browser")
+                || combined.contains("verify you are human")
+                || combined.contains("verifying you are human")
+                || combined.contains("performing security verification")
+                || combined.contains("enable javascript and cookies to continue")
+                || combined.contains("cf-chl-");
+    }
+
+    private void ensureHabbodexWebViewCreatedOnUiThread() {
+        if (habbodexWebView != null || isFinishing()) return;
+
+        WebView web = new WebView(this);
+        habbodexWebView = web;
+        WebSettings settings = web.getSettings();
+        settings.setJavaScriptEnabled(true);
+        settings.setDomStorageEnabled(true);
+        settings.setDatabaseEnabled(true);
+        settings.setCacheMode(WebSettings.LOAD_DEFAULT);
+        settings.setAllowFileAccess(false);
+        settings.setAllowContentAccess(false);
+        settings.setSupportMultipleWindows(false);
+        settings.setJavaScriptCanOpenWindowsAutomatically(false);
+        if (Build.VERSION.SDK_INT >= 21) {
+            settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
+        }
+
+        CookieManager cookies = CookieManager.getInstance();
+        cookies.setAcceptCookie(true);
+        if (Build.VERSION.SDK_INT >= 21) cookies.setAcceptThirdPartyCookies(web, true);
+
+        web.setFocusable(false);
+        web.setFocusableInTouchMode(false);
+        web.setBackgroundColor(Color.TRANSPARENT);
+        web.addJavascriptInterface(new HabbodexJavascriptBridge(), "ToxicNative");
+        web.setWebChromeClient(new WebChromeClient());
+        web.setWebViewClient(new WebViewClient() {
+            @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                try {
+                    Uri uri = request == null ? null : request.getUrl();
+                    return uri != null && !isAllowedHabbodexWebHost(uri.getHost());
+                } catch(Exception ignored) {
+                    return true;
+                }
+            }
+
+            @SuppressWarnings("deprecation")
+            @Override public boolean shouldOverrideUrlLoading(WebView view, String url) {
+                try {
+                    Uri uri = Uri.parse(url == null ? "" : url);
+                    return !isAllowedHabbodexWebHost(uri.getHost());
+                } catch(Exception ignored) {
+                    return true;
+                }
+            }
+
+            @Override public void onPageFinished(WebView view, String url) {
+                inspectHabbodexWebPage(view, url);
+            }
+
+            @Override public void onReceivedError(
+                    WebView view,
+                    WebResourceRequest request,
+                    WebResourceError error
+            ) {
+                if (request != null && request.isForMainFrame()) {
+                    synchronized (habbodexWebSessionLock) {
+                        CompletableFuture<Boolean> future = habbodexWebSessionFuture;
+                        if (future != null && !future.isDone()) future.complete(false);
+                    }
+                }
+            }
+        });
+
+        attachHabbodexWebViewHidden();
+        resetHabbodexWebSessionFuture();
+        web.loadUrl("https://habbodex.com/");
+    }
+
+    private void attachHabbodexWebViewHidden() {
+        if (habbodexWebView == null || screen == null) return;
+        if (habbodexVerificationDialog != null && habbodexVerificationDialog.isShowing()) return;
+        try {
+            detachViewFromParent(habbodexWebView);
+            if (habbodexWebHiddenHost == null) {
+                habbodexWebHiddenHost = new FrameLayout(this);
+                habbodexWebHiddenHost.setClickable(false);
+                habbodexWebHiddenHost.setFocusable(false);
+                habbodexWebHiddenHost.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS);
+                habbodexWebHiddenHost.setAlpha(0.01f);
+            }
+            detachViewFromParent(habbodexWebHiddenHost);
+            habbodexWebHiddenHost.removeAllViews();
+            habbodexWebHiddenHost.addView(
+                    habbodexWebView,
+                    new FrameLayout.LayoutParams(dp(1), dp(1))
+            );
+            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                    dp(1), dp(1), Gravity.BOTTOM | Gravity.RIGHT
+            );
+            screen.addView(habbodexWebHiddenHost, lp);
+        } catch(Exception ignored) {}
+    }
+
+    private CompletableFuture<Boolean> resetHabbodexWebSessionFuture() {
+        synchronized (habbodexWebSessionLock) {
+            habbodexWebSessionFuture = new CompletableFuture<>();
+            habbodexWebChallengeDetected = false;
+            return habbodexWebSessionFuture;
+        }
+    }
+
+    private void inspectHabbodexWebPage(WebView view, String url) {
+        if (view == null) return;
+        String script = "(function(){try{return JSON.stringify({href:String(location.href||''),"
+                + "title:String(document.title||''),text:String(document.body?document.body.innerText:'').slice(0,1600)});"
+                + "}catch(e){return JSON.stringify({href:'',title:'',text:''});}})();";
+        try {
+            view.evaluateJavascript(script, raw -> {
+                String decoded = decodeJavascriptResult(raw);
+                String href = url == null ? "" : url;
+                String title = "";
+                String text = "";
+                try {
+                    JSONObject state = new JSONObject(decoded);
+                    href = state.optString("href", href);
+                    title = state.optString("title", "");
+                    text = state.optString("text", "");
+                } catch(Exception ignored) {}
+
+                boolean challenge = looksLikeHabbodexChallenge(title, text, href);
+                if (challenge) {
+                    habbodexWebChallengeDetected = true;
+                    habbodexWebLastChallengeUrl = href;
+                    showHabbodexVerificationDialog(href);
+                    return;
+                }
+
+                Uri uri = null;
+                try { uri = Uri.parse(href); } catch(Exception ignored) {}
+                if (uri != null && isAllowedHabbodexWebHost(uri.getHost())
+                        && !"challenges.cloudflare.com".equalsIgnoreCase(uri.getHost())) {
+                    // Depois de uma verificação feita diretamente em /api/..., volta
+                    // para uma página HTML do mesmo domínio antes de executar fetch().
+                    String trimmedText = text == null ? "" : text.trim();
+                    if (href.contains("/api/")
+                            && (trimmedText.startsWith("{") || trimmedText.startsWith("["))
+                            && habbodexVerificationDialog != null
+                            && habbodexVerificationDialog.isShowing()) {
+                        try { view.loadUrl("https://habbodex.com/"); } catch(Exception ignored) {}
+                        return;
+                    }
+
+                    habbodexWebChallengeDetected = false;
+                    try { CookieManager.getInstance().flush(); } catch(Exception ignored) {}
+                    synchronized (habbodexWebSessionLock) {
+                        CompletableFuture<Boolean> future = habbodexWebSessionFuture;
+                        boolean alreadyReady = false;
+                        try {
+                            alreadyReady = future != null && future.isDone()
+                                    && Boolean.TRUE.equals(future.getNow(false));
+                        } catch(Exception ignored) {}
+                        if (!alreadyReady) {
+                            if (future == null || future.isDone()) {
+                                future = new CompletableFuture<>();
+                                habbodexWebSessionFuture = future;
+                            }
+                            future.complete(true);
+                        }
+                    }
+                    if (habbodexVerificationDialog != null && habbodexVerificationDialog.isShowing()) {
+                        try { habbodexVerificationDialog.dismiss(); } catch(Exception ignored) {}
+                    }
+                }
+            });
+        } catch(Exception ignored) {}
+    }
+
+    private boolean ensureHabbodexWebSession() throws Exception {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            throw new IllegalStateException("HabboDex WebView transport cannot block the UI thread");
+        }
+
+        CompletableFuture<Boolean> created = new CompletableFuture<>();
+        uiHandler.post(() -> {
+            try {
+                ensureHabbodexWebViewCreatedOnUiThread();
+                created.complete(habbodexWebView != null);
+            } catch(Exception error) {
+                created.completeExceptionally(error);
+            }
+        });
+        if (!Boolean.TRUE.equals(created.get(5, TimeUnit.SECONDS))) return false;
+
+        CompletableFuture<Boolean> session;
+        boolean reload = false;
+        synchronized (habbodexWebSessionLock) {
+            session = habbodexWebSessionFuture;
+            if (session == null) {
+                session = new CompletableFuture<>();
+                habbodexWebSessionFuture = session;
+                reload = true;
+            } else if (session.isDone()) {
+                boolean ready = false;
+                try { ready = Boolean.TRUE.equals(session.getNow(false)); } catch(Exception ignored) {}
+                if (!ready) {
+                    session = new CompletableFuture<>();
+                    habbodexWebSessionFuture = session;
+                    reload = true;
+                }
+            }
+        }
+        if (reload) {
+            uiHandler.post(() -> {
+                try { if (habbodexWebView != null) habbodexWebView.loadUrl("https://habbodex.com/"); }
+                catch(Exception ignored) {}
+            });
+        }
+        try {
+            return Boolean.TRUE.equals(session.get(HABBODEX_WEB_BOOT_TIMEOUT_MS, TimeUnit.MILLISECONDS));
+        } catch(TimeoutException timeout) {
+            uiHandler.post(() -> showHabbodexVerificationDialog(
+                    habbodexWebLastChallengeUrl == null || habbodexWebLastChallengeUrl.trim().isEmpty()
+                            ? "https://habbodex.com/"
+                            : habbodexWebLastChallengeUrl
+            ));
+            try {
+                return Boolean.TRUE.equals(session.get(
+                        HABBODEX_WEB_INTERACTIVE_TIMEOUT_MS,
+                        TimeUnit.MILLISECONDS
+                ));
+            } catch(TimeoutException ignored) {
+                return false;
+            }
+        }
+    }
+
+    private CompletableFuture<Boolean> beginHabbodexInteractiveVerification(String url) {
+        final CompletableFuture<Boolean> session = resetHabbodexWebSessionFuture();
+        final String target = url == null || url.trim().isEmpty()
+                ? "https://habbodex.com/"
+                : url;
+        habbodexWebLastChallengeUrl = target;
+        uiHandler.post(() -> {
+            ensureHabbodexWebViewCreatedOnUiThread();
+            showHabbodexVerificationDialog(target);
+            try { habbodexWebView.loadUrl(target); } catch(Exception ignored) {}
+        });
+        return session;
+    }
+
+    private void showHabbodexVerificationDialog(String targetUrl) {
+        if (isFinishing() || habbodexWebView == null) return;
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            uiHandler.post(() -> showHabbodexVerificationDialog(targetUrl));
+            return;
+        }
+        if (habbodexVerificationDialog != null && habbodexVerificationDialog.isShowing()) return;
+
+        try {
+            final Dialog dialog = new Dialog(this);
+            dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+            habbodexVerificationDialog = dialog;
+            LinearLayout shell = new LinearLayout(this);
+            shell.setOrientation(LinearLayout.VERTICAL);
+            shell.setPadding(dp(12), dp(10), dp(12), dp(12));
+            shell.setBackground(round(
+                    lightTheme ? Color.WHITE : Color.rgb(18, 15, 25),
+                    dp(20),
+                    lightTheme ? Color.rgb(220, 215, 225) : Color.rgb(60, 52, 72),
+                    1
+            ));
+
+            LinearLayout top = new LinearLayout(this);
+            top.setOrientation(LinearLayout.HORIZONTAL);
+            top.setGravity(Gravity.CENTER_VERTICAL);
+            TextView title = text("Verificação HabboDex", 16,
+                    lightTheme ? Color.rgb(35, 30, 40) : Color.WHITE, true);
+            top.addView(title, new LinearLayout.LayoutParams(0, dp(44), 1f));
+            TextView close = text("×", 28,
+                    lightTheme ? Color.rgb(55, 50, 60) : Color.WHITE, false);
+            close.setGravity(Gravity.CENTER);
+            top.addView(close, new LinearLayout.LayoutParams(dp(44), dp(44)));
+            shell.addView(top, new LinearLayout.LayoutParams(-1, dp(44)));
+
+            TextView hint = text(
+                    "Conclua a verificação exibida pelo HabboDex. Depois o aplicativo continua automaticamente.",
+                    12,
+                    lightTheme ? Color.rgb(90, 82, 98) : Color.argb(210,255,255,255),
+                    false
+            );
+            hint.setPadding(dp(2), 0, dp(2), dp(8));
+            shell.addView(hint, new LinearLayout.LayoutParams(-1, -2));
+
+            FrameLayout browserHost = new FrameLayout(this);
+            browserHost.setBackgroundColor(lightTheme ? Color.WHITE : Color.rgb(10,10,12));
+            shell.addView(browserHost, new LinearLayout.LayoutParams(-1, 0, 1f));
+
+            detachViewFromParent(habbodexWebView);
+            browserHost.addView(habbodexWebView, new FrameLayout.LayoutParams(-1, -1));
+            habbodexWebView.setFocusable(true);
+            habbodexWebView.setFocusableInTouchMode(true);
+
+            close.setOnClickListener(v -> dialog.dismiss());
+            dialog.setContentView(shell);
+            dialog.setOnDismissListener(d -> {
+                if (habbodexVerificationDialog == dialog) habbodexVerificationDialog = null;
+                try {
+                    if (habbodexWebView != null) {
+                        habbodexWebView.setFocusable(false);
+                        habbodexWebView.setFocusableInTouchMode(false);
+                    }
+                } catch(Exception ignored) {}
+                attachHabbodexWebViewHidden();
+            });
+            dialog.setOnShowListener(d -> {
+                Window w = dialog.getWindow();
+                if (w != null) {
+                    w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+                    w.setLayout(-1, -1);
+                }
+            });
+            dialog.show();
+            Window w = dialog.getWindow();
+            if (w != null) {
+                w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+                w.setLayout(-1, -1);
+            }
+            String target = targetUrl == null || targetUrl.trim().isEmpty()
+                    ? "https://habbodex.com/"
+                    : targetUrl;
+            try {
+                String current = habbodexWebView.getUrl();
+                if (current == null || current.trim().isEmpty()
+                        || looksLikeHabbodexChallenge("", "", current)) {
+                    habbodexWebView.loadUrl(target);
+                }
+            } catch(Exception ignored) {}
+        } catch(Exception ignored) {
+            attachHabbodexWebViewHidden();
+        }
+    }
+
+    private class HabbodexJavascriptBridge {
+        @JavascriptInterface
+        public void deliver(String token, String requestId, String payload) {
+            if (!habbodexWebBridgeToken.equals(token) || requestId == null) return;
+            CompletableFuture<String> future = habbodexWebRequests.remove(requestId);
+            if (future != null && !future.isDone()) {
+                future.complete(payload == null ? "" : payload);
+            }
+        }
+    }
+
+    private Object fetchHabbodexViaWebViewOnce(String url) throws Exception {
+        if (!ensureHabbodexWebSession()) {
+            throw new IOException("HabboDex web session unavailable");
+        }
+
+        String requestId = "tx" + habbodexWebRequestSeq.incrementAndGet()
+                + "_" + UUID.randomUUID().toString();
+        CompletableFuture<String> future = new CompletableFuture<>();
+        habbodexWebRequests.put(requestId, future);
+
+        String quotedToken = JSONObject.quote(habbodexWebBridgeToken);
+        String quotedId = JSONObject.quote(requestId);
+        String quotedUrl = JSONObject.quote(url);
+        String script = "(function(){var token=" + quotedToken + ";var id=" + quotedId + ";var u=" + quotedUrl + ";"
+                + "var send=function(o){try{ToxicNative.deliver(token,id,JSON.stringify(o));}catch(e){}};"
+                + "var scrub=function(o,d){if(!o||typeof o!=='object'||d>3)return;"
+                + "['badges','selectedBadges','badgeList','achievementBadges','achievements'].forEach(function(k){try{if(Object.prototype.hasOwnProperty.call(o,k))delete o[k];}catch(e){}});"
+                + "['data','profile','user','habbo','result'].forEach(function(k){try{scrub(o[k],d+1);}catch(e){}});};"
+                + "fetch(u,{method:'GET',credentials:'include',cache:'no-store',headers:{'Accept':'application/json,text/plain,*/*'}})"
+                + ".then(function(r){return r.text().then(function(t){var body=t;try{var j=JSON.parse(t);scrub(j,0);body=JSON.stringify(j);}catch(e){}"
+                + "send({ok:r.ok,status:r.status,url:r.url||u,contentType:r.headers.get('content-type')||'',body:body});});})"
+                + ".catch(function(e){send({ok:false,status:0,url:u,error:String(e),body:''});});})();";
+
+        uiHandler.post(() -> {
+            try {
+                if (habbodexWebView == null) {
+                    CompletableFuture<String> pending = habbodexWebRequests.remove(requestId);
+                    if (pending != null) pending.completeExceptionally(new IOException("WebView unavailable"));
+                    return;
+                }
+                habbodexWebView.evaluateJavascript(script, null);
+            } catch(Exception error) {
+                CompletableFuture<String> pending = habbodexWebRequests.remove(requestId);
+                if (pending != null) pending.completeExceptionally(error);
+            }
+        });
+
+        String envelopeText;
+        try {
+            envelopeText = future.get(HABBODEX_WEB_REQUEST_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        } finally {
+            habbodexWebRequests.remove(requestId);
+        }
+        JSONObject envelope = new JSONObject(envelopeText == null || envelopeText.trim().isEmpty()
+                ? "{}" : envelopeText);
+        int status = envelope.optInt("status", 0);
+        boolean ok = envelope.optBoolean("ok", false);
+        String body = envelope.optString("body", "");
+        String error = envelope.optString("error", "");
+
+        if (ok && status >= 200 && status < 300 && !body.trim().isEmpty()) {
+            if (body.trim().startsWith("<") || looksLikeHabbodexChallenge("", body, url)) {
+                throw new HabbodexWebChallengeException(url, status);
+            }
+            return parseCachedJsonBody(body);
+        }
+
+        if (status == 403 || status == 429 || status == 503
+                || body.trim().startsWith("<")
+                || looksLikeHabbodexChallenge("", body, url)) {
+            throw new HabbodexWebChallengeException(url, status);
+        }
+        throw new IOException(error.isEmpty() ? "HabboDex HTTP " + status : error);
+    }
+
+    private Object getJsonViaHabbodexWebView(String url) throws Exception {
+        try {
+            return fetchHabbodexViaWebViewOnce(url);
+        } catch(HabbodexWebChallengeException challenge) {
+            CompletableFuture<Boolean> session = beginHabbodexInteractiveVerification(challenge.url);
+            boolean verified;
+            try {
+                verified = Boolean.TRUE.equals(session.get(
+                        HABBODEX_WEB_INTERACTIVE_TIMEOUT_MS,
+                        TimeUnit.MILLISECONDS
+                ));
+            } catch(TimeoutException timeout) {
+                verified = false;
+            }
+            if (!verified) throw challenge;
+            return fetchHabbodexViaWebViewOnce(url);
+        }
+    }
+
+    private static class HabbodexWebChallengeException extends IOException {
+        final String url;
+        final int status;
+
+        HabbodexWebChallengeException(String url, int status) {
+            super("HabboDex verification required (HTTP " + status + ")");
+            this.url = url == null ? "https://habbodex.com/" : url;
+            this.status = status;
+        }
+    }
+
+    private void destroyHabbodexWebTransport() {
+        try {
+            if (habbodexVerificationDialog != null) habbodexVerificationDialog.dismiss();
+        } catch(Exception ignored) {}
+        habbodexVerificationDialog = null;
+
+        IOException destroyed = new IOException("Activity destroyed");
+        for (CompletableFuture<String> future : habbodexWebRequests.values()) {
+            if (future != null && !future.isDone()) future.completeExceptionally(destroyed);
+        }
+        habbodexWebRequests.clear();
+
+        try {
+            if (habbodexWebView != null) {
+                detachViewFromParent(habbodexWebView);
+                habbodexWebView.removeJavascriptInterface("ToxicNative");
+                habbodexWebView.stopLoading();
+                habbodexWebView.loadUrl("about:blank");
+                habbodexWebView.clearHistory();
+                habbodexWebView.destroy();
+            }
+        } catch(Exception ignored) {}
+        habbodexWebView = null;
+        try { detachViewFromParent(habbodexWebHiddenHost); } catch(Exception ignored) {}
+        habbodexWebHiddenHost = null;
+    }
+
     private Object getJsonAny(String u) throws Exception {
         final boolean cacheable = isFiveMinuteJsonCacheUrl(u);
         final long now = SystemClock.elapsedRealtime();
@@ -8714,108 +9233,61 @@ private int loadingProgressFor(String message) {
             }
         }
 
-        final boolean habbodexDirect = isDirectHabbodexUrl(u);
+        // HabboDex não usa mais HttpURLConnection. A requisição acontece dentro de
+        // uma sessão WebView real do próprio aparelho, preservando cookies/JS/origem.
+        if (isDirectHabbodexUrl(u)) {
+            Object parsed = getJsonViaHabbodexWebView(u);
+            if (cacheable && parsed != null) {
+                String body = parsed.toString();
+                jsonResponseCache.put(
+                        u,
+                        new CachedJsonResponse(body, SystemClock.elapsedRealtime())
+                );
+                writeFiveMinuteJsonDiskCache(u, body);
+            }
+            return parsed;
+        }
+
         final boolean ownServer = u != null && u.startsWith(PROFILE_API);
         final boolean largeOfficialProfile = u != null
                 && u.contains("/api/public/users/")
                 && u.endsWith("/profile");
-        Exception lastError = null;
-        int attempts = habbodexDirect ? 2 : 1;
+        HttpURLConnection c = null;
+        try {
+            c = (HttpURLConnection)new URL(u).openConnection();
+            c.setUseCaches(false);
+            c.setDefaultUseCaches(false);
+            c.setConnectTimeout(ownServer ? 6000 : 5000);
+            c.setReadTimeout(ownServer ? 12000 : (largeOfficialProfile ? 15000 : 8000));
+            c.setRequestProperty("Accept", "application/json, text/plain, */*");
+            c.setRequestProperty(
+                    "User-Agent",
+                    "ToxicSearchTool/" + APP_VERSION + " Android (+https://atoxic.com.br)"
+            );
+            c.setRequestProperty("X-Toxic-App", APP_VERSION);
 
-        for (int attempt = 0; attempt < attempts; attempt++) {
-            HttpURLConnection c = null;
-            try {
-                c = (HttpURLConnection)new URL(u).openConnection();
-                c.setUseCaches(false);
-                c.setDefaultUseCaches(false);
-                c.setConnectTimeout(habbodexDirect || ownServer ? 6000 : 5000);
-                c.setReadTimeout(
-                        habbodexDirect || ownServer
-                                ? 12000
-                                : (largeOfficialProfile ? 15000 : 8000)
-                );
-                c.setRequestProperty("Accept", "application/json, text/plain, */*");
-                if (habbodexDirect) {
-                    // Requisição feita pelo próprio aparelho/IP do usuário,
-                    // com os mesmos cabeçalhos básicos de uma navegação web.
-                    c.setRequestProperty(
-                            "User-Agent",
-                            "Mozilla/5.0 (Linux; Android 11; Mobile) "
-                                    + "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                    + "Chrome/124.0.0.0 Mobile Safari/537.36"
-                    );
-                    c.setRequestProperty("Accept-Language", "pt-BR,pt;q=0.9,en;q=0.8");
-                    c.setRequestProperty("Referer", "https://habbodex.com/");
-                    c.setRequestProperty("Origin", "https://habbodex.com");
-                    c.setRequestProperty("Sec-Fetch-Site", "same-origin");
-                    c.setRequestProperty("Sec-Fetch-Mode", "cors");
-                    c.setRequestProperty("Sec-Fetch-Dest", "empty");
-                } else {
-                    c.setRequestProperty(
-                            "User-Agent",
-                            "ToxicSearchTool/" + APP_VERSION + " Android (+https://atoxic.com.br)"
-                    );
-                    c.setRequestProperty("X-Toxic-App", APP_VERSION);
-                }
+            int code = c.getResponseCode();
+            InputStream is = code >= 200 && code < 300
+                    ? c.getInputStream()
+                    : c.getErrorStream();
+            String body = readAll(is);
 
-                int code = c.getResponseCode();
-                InputStream is = code >= 200 && code < 300
-                        ? c.getInputStream()
-                        : c.getErrorStream();
-                String body = readAll(is);
-
-                if (code < 200 || code >= 300 || body == null || body.trim().isEmpty()) {
-                    IOException error = new IOException("HTTP " + code);
-                    lastError = error;
-                    boolean retryable = habbodexDirect
-                            && attempt + 1 < attempts
-                            && (code == 0 || code == 403 || code == 408 || code == 425
-                            || code == 429 || code >= 500);
-                    if (retryable) {
-                        try { Thread.sleep(code == 429 ? 800L : 350L); }
-                        catch(InterruptedException interrupted) {
-                            Thread.currentThread().interrupt();
-                            throw interrupted;
-                        }
-                        continue;
-                    }
-                    throw error;
-                }
-
-                Object parsed;
-                try {
-                    parsed = parseCachedJsonBody(body);
-                } catch(Exception parseError) {
-                    lastError = parseError;
-                    if (habbodexDirect && attempt + 1 < attempts) {
-                        try { Thread.sleep(350L); }
-                        catch(InterruptedException interrupted) {
-                            Thread.currentThread().interrupt();
-                            throw interrupted;
-                        }
-                        continue;
-                    }
-                    throw parseError;
-                }
-
-                if (cacheable) {
-                    jsonResponseCache.put(
-                            u,
-                            new CachedJsonResponse(body, SystemClock.elapsedRealtime())
-                    );
-                    writeFiveMinuteJsonDiskCache(u, body);
-                }
-                return parsed;
-            } catch(Exception error) {
-                lastError = error;
-                if (!(habbodexDirect && attempt + 1 < attempts)) throw error;
-            } finally {
-                if (c != null) c.disconnect();
+            if (code < 200 || code >= 300 || body == null || body.trim().isEmpty()) {
+                throw new IOException("HTTP " + code);
             }
-        }
 
-        if (lastError instanceof Exception) throw lastError;
-        throw new IOException("Request failed");
+            Object parsed = parseCachedJsonBody(body);
+            if (cacheable) {
+                jsonResponseCache.put(
+                        u,
+                        new CachedJsonResponse(body, SystemClock.elapsedRealtime())
+                );
+                writeFiveMinuteJsonDiskCache(u, body);
+            }
+            return parsed;
+        } finally {
+            if (c != null) c.disconnect();
+        }
     }
 
     private JSONObject getJson(String u) throws Exception { Object any = getJsonAny(u); if (any instanceof JSONObject) return (JSONObject)any; JSONObject wrap = new JSONObject(); wrap.put("data", any); return wrap; }
