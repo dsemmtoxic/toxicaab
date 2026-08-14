@@ -17,6 +17,7 @@
     <string name="start_note">Escribe un nick del hotel seleccionado para consultar la información.</string>
     <string name="type_nick_toast">Escribe un nick del hotel para buscar.</string>
     <string name="same_profile_loading">Ese perfil ya se está cargando.</string>
+    <string name="wait_new_search">Espera %1$ss antes de buscar otro perfil.</string>
     <string name="wait_refresh">Espera %1$ss para actualizar este perfil nuevamente.</string>
     <string name="updating_profile">Actualizando perfil...</string>
     <string name="searching_profile">Buscando perfil...</string>
@@ -209,7 +210,9 @@
     <string name="ad_badge">PUB</string>
     <string name="rarity">Rareza</string>
     <string name="rarity_details">Detalles de la rareza</string>
-    <string name="sponsors_title">PATROCINADORES</string>
+    <string name="sponsors_title">Patrocinadores</string>
+    <string name="sponsor_join_carousel">Quiero ser</string>
+    <string name="sponsor_manage_carousel">Mi perfil</string>
     <string name="sponsors_loading">Cargando patrocinadores…</string>
     <string name="sponsors_empty">Sé el primer patrocinador destacado.</string>
     <string name="sponsors_unavailable">No se pudieron cargar los patrocinadores.</string>
@@ -236,6 +239,6 @@
     <string name="supporter_validation_pending">Validando tu suscripción. Inténtalo de nuevo en unos segundos.</string>
     <string name="supporter_server_unavailable">La suscripción está activa, pero no se pudo validar el servidor de patrocinadores. Inténtalo de nuevo.</string>
     <string name="supporter_tutorial_title">Elige tu perfil destacado</string>
-    <string name="supporter_tutorial_body">El botón de anuncios ahora es tu botón de patrocinador. Tócalo para elegir o cambiar el perfil destacado.</string>
+    <string name="supporter_tutorial_body">Tu perfil es el último elemento del carrusel de patrocinadores. Tócalo para elegir o cambiar el perfil destacado.</string>
     <string name="supporter_choose_now">Elegir ahora</string>
 </resources>
