@@ -58,13 +58,15 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_PROXY_API = "https://atoxic.com.br/habbodex.php";
-    private static final String APP_VERSION = "1.3.23";
-    private static final long PROFILE_MIN_LOADING_MS = 4_000L;
+    private static final String APP_VERSION = "1.3.24";
+    private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
     // os ícones nunca desapareçam por bloqueio de rede ou cache externo.
+    private static final long JSON_RESPONSE_CACHE_TTL_MS = 5L * 60L * 1000L;
     private final ExecutorService executor = Executors.newFixedThreadPool(10);
-    private final ExecutorService profileSectionsExecutor = Executors.newFixedThreadPool(4);
+    private final ExecutorService profileSectionsExecutor = Executors.newFixedThreadPool(6);
+    private final ConcurrentHashMap<String, CachedJsonResponse> jsonResponseCache = new ConcurrentHashMap<>();
     private FrameLayout screen;
     private final WeakHashMap<View, int[]> safeAreaPaddingByView = new WeakHashMap<>();
     private LinearLayout root, resultWrap;
@@ -4524,10 +4526,6 @@ public class MainActivity extends Activity {
                 || !isActiveToken(token)) return;
 
         final String uniqueId = r.uniqueId.trim();
-        // Só consulta perfil completo e fotos oficiais quando alguma identidade
-        // já confirmou explicitamente que o perfil é público. Em perfis
-        // privados/banidos (ou de visibilidade ainda desconhecida), todo o
-        // conteúdo restante vem do HabboDex.
         final boolean restrictedProfile = !mayLoadOfficialProfileSections(r);
         synchronized (profileProgressLock) {
             if (!isActiveToken(token)) return;
@@ -4536,55 +4534,174 @@ public class MainActivity extends Activity {
             inlineProgressMessage = t(R.string.loading_details);
         }
         updateLoadingSkeletonProgress(token, 8);
-        final AtomicInteger pendingGroups = new AtomicInteger(
-                restrictedProfile ? 2 : 3
-        );
-        final String earlySections = "previous-names,previous-mottos,previous-styles";
 
-        final Future<JSONObject> officialProfileFuture = restrictedProfile
-                ? null
-                : executor.submit(() -> tryJson(
-                        habboApiUrl("/api/public/users/" + enc(uniqueId) + "/profile")
-                ));
-        final Future<JSONObject> earlyHistoryFuture = executor.submit(
-                () -> fetchDirectHabbodexPriorityBatch(uniqueId, earlySections)
-        );
-        // O endpoint completo e a rota /previous-names não são equivalentes no
-        // HabboDex. O site consulta o perfil completo com prioridade porque é
-        // nele que previousNames aparece com mais consistência. A mesma resposta
-        // também serve de reserva para seções que falharem no lote.
-        final Future<JSONObject> historicalProfileFuture = executor.submit(
-                () -> fetchDirectHabbodexProfile(uniqueId)
-        );
-        final Future<ProfileSectionPayload> officialPhotosFuture = restrictedProfile
-                ? null
-                : executor.submit(() -> {
-                    try {
-                        return ProfileSectionPayload.list(
-                                "photos",
-                                fetchOfficialPhotos(uniqueId),
-                                true
-                        );
-                    } catch(Exception ignored) {
-                        return ProfileSectionPayload.list(
-                                "photos",
-                                new ArrayList<>(),
-                                false
-                        );
+        // O perfil principal já foi liberado. Daqui em diante cada seção é
+        // independente: uma rota lenta do histórico não segura as demais.
+        final int taskCount = restrictedProfile ? 6 : 7;
+        final AtomicInteger pendingGroups = new AtomicInteger(taskCount);
+
+        // 1) Nomes anteriores têm prioridade absoluta entre os complementos.
+        profileSectionsExecutor.execute(() -> {
+            try {
+                JSONObject namesBatch = fetchDirectHabbodexPriorityBatch(
+                        uniqueId,
+                        "previous-names"
+                );
+                if (!isActiveToken(token)) return;
+                final JSONObject fallback;
+                synchronized (r) { fallback = copyJsonObject(r.dexProfile); }
+                ProfileSectionPayload names = historySectionWithDirectFallback(
+                        namesBatch,
+                        fallback,
+                        uniqueId,
+                        "previous-names",
+                        "previousNames",
+                        1
+                );
+                if (names.success || !names.items.isEmpty()) {
+                    synchronized (r) {
+                        putComplementSectionLocked(r, "previousNames", names.items);
+                        reconcileProfileSources(r);
+                        enrichPhotoRoomInfo(r);
                     }
-                });
-        if (restrictedProfile) {
-            synchronized (r) {
-                // A API pública por nome/ID já forneceu a identidade. Em perfil
-                // fechado, as demais seções disponíveis vêm somente do HabboDex.
-                r.officialProfileAttempted = true;
-                r.officialPhotosAttempted = true;
-                r.officialPhotosSucceeded = false;
+                    setProfileSectionsProgress(token, 28, t(R.string.loading_history));
+                    publishProgressiveProfile(r, token, firstRenderReleaseAt);
+                }
+            } finally {
+                finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups);
             }
-        } else {
+        });
+
+        // 2) Perfil completo do HabboDex serve apenas como enriquecimento/fallback.
+        profileSectionsExecutor.execute(() -> {
+            try {
+                JSONObject historicalProfile = fetchDirectHabbodexProfile(uniqueId);
+                if (!isActiveToken(token) || historicalProfile == null) return;
+                synchronized (r) {
+                    applyComplementProfileData(
+                            r,
+                            mergeComplementPayloads(historicalProfile, r.dexProfile)
+                    );
+                    reconcileProfileSources(r);
+                    enrichPhotoRoomInfo(r);
+                }
+                setProfileSectionsProgress(token, 36, t(R.string.loading_history));
+                publishProgressiveProfile(r, token, firstRenderReleaseAt);
+            } finally {
+                finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups);
+            }
+        });
+
+        // 3) Missões e visuais: somente a primeira página no carregamento inicial.
+        profileSectionsExecutor.execute(() -> {
+            try {
+                JSONObject secondary = fetchDirectHabbodexPriorityBatch(
+                        uniqueId,
+                        "previous-mottos,previous-styles"
+                );
+                if (!isActiveToken(token)) return;
+                final JSONObject fallback;
+                synchronized (r) { fallback = copyJsonObject(r.dexProfile); }
+                ProfileSectionPayload mottos = historySectionWithDirectFallback(
+                        secondary, fallback, uniqueId,
+                        "previous-mottos", "previousMottos", 1
+                );
+                ProfileSectionPayload styles = historySectionWithDirectFallback(
+                        secondary, fallback, uniqueId,
+                        "previous-styles", "previousStyles", 1
+                );
+                synchronized (r) {
+                    if (mottos.success || !mottos.items.isEmpty()) {
+                        putComplementSectionLocked(r, "previousMottos", mottos.items);
+                    }
+                    if (styles.success || !styles.items.isEmpty()) {
+                        putComplementSectionLocked(r, "previousStyles", styles.items);
+                        int remoteTotal = extractBatchSectionTotal(secondary, "previousStyles");
+                        int fetchedCount = r.allStylesSource == null ? 0 : r.allStylesSource.size();
+                        int visibleCount = r.previousStyles == null ? 0 : r.previousStyles.size();
+                        r.stylesRemotePaged = remoteTotal > fetchedCount
+                                || (remoteTotal <= 0 && styles.items.size() >= 100);
+                        r.stylesRemoteNextPage = r.stylesRemotePaged ? 2 : 0;
+                        if (remoteTotal > 0) r.stylesTotal = Math.max(remoteTotal, fetchedCount);
+                        else r.stylesTotal = Math.max(r.stylesTotal, fetchedCount);
+                        r.stylesHasMore = visibleCount < fetchedCount || r.stylesRemotePaged;
+                        r.stylesNextPage = r.stylesHasMore ? 2 : 0;
+                    }
+                    reconcileProfileSources(r);
+                    enrichPhotoRoomInfo(r);
+                }
+                setProfileSectionsProgress(token, 48, t(R.string.loading_styles_friends));
+                publishProgressiveProfile(r, token, firstRenderReleaseAt);
+            } finally {
+                finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups);
+            }
+        });
+
+        // 4) Amigos atuais: todas as páginas são buscadas em segundo plano.
+        // A UI só libera a lista depois que o complemento com as datas terminou.
+        profileSectionsExecutor.execute(() -> {
+            try {
+                ProfileSectionPayload friends = fetchDirectHabbodexListSection(
+                        uniqueId,
+                        "friends",
+                        "friends",
+                        25
+                );
+                if (!isActiveToken(token)) return;
+                if (friends.success) {
+                    synchronized (r) {
+                        putComplementSectionLocked(r, "friends", friends.items);
+                        reconcileProfileSources(r);
+                        enrichPhotoRoomInfo(r);
+                        r.friendsDatesReady = true;
+                    }
+                    setProfileSectionsProgress(token, 76, t(R.string.loading_history));
+                    publishProgressiveProfile(r, token, firstRenderReleaseAt);
+                }
+            } finally {
+                finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups);
+            }
+        });
+
+        // 5) Amigos removidos não bloqueiam os atuais e começam com uma página.
+        profileSectionsExecutor.execute(() -> {
+            try {
+                PageResult removed = fetchPage(
+                        uniqueId,
+                        "previous-friends",
+                        "previousFriends",
+                        1,
+                        100
+                );
+                if (!isActiveToken(token)) return;
+                if (removed.success) {
+                    synchronized (r) {
+                        putComplementSectionLocked(r, "previousFriends", removed.items);
+                        r.removedFriendsTotal = Math.max(removed.total, removed.items.size());
+                        r.removedFriendsNextPage = removed.nextPage;
+                        r.removedFriendsHasMore = removed.hasMore
+                                || r.removedFriendsTotal > removed.items.size();
+                        if (r.removedFriendsHasMore && r.removedFriendsNextPage <= 1) {
+                            r.removedFriendsNextPage = 2;
+                        }
+                        reconcileProfileSources(r);
+                        enrichPhotoRoomInfo(r);
+                    }
+                    setProfileSectionsProgress(token, 84, t(R.string.loading_history));
+                    publishProgressiveProfile(r, token, firstRenderReleaseAt);
+                }
+            } finally {
+                finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups);
+            }
+        });
+
+        if (!restrictedProfile) {
+            // 6) Perfil completo oficial.
             profileSectionsExecutor.execute(() -> {
                 try {
-                    JSONObject official = awaitFutureValue(officialProfileFuture);
+                    JSONObject official = tryJson(
+                            habboApiUrl("/api/public/users/" + enc(uniqueId) + "/profile")
+                    );
                     if (!isActiveToken(token)) return;
                     synchronized (r) {
                         r.officialProfileAttempted = true;
@@ -4592,337 +4709,78 @@ public class MainActivity extends Activity {
                         reconcileProfileSources(r);
                         enrichPhotoRoomInfo(r);
                     }
-                    setProfileSectionsProgress(
-                            token,
-                            25,
-                            t(R.string.loading_history)
-                    );
+                    setProfileSectionsProgress(token, 58, t(R.string.loading_history));
                     publishProgressiveProfile(r, token, firstRenderReleaseAt);
                 } finally {
-                    finishProfileSectionsGroup(
-                            r,
-                            token,
-                            firstRenderReleaseAt,
-                            pendingGroups
-                    );
+                    finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups);
                 }
             });
-        }
 
-        profileSectionsExecutor.execute(() -> {
-            try {
-                JSONObject historicalProfile = awaitFutureValue(
-                        historicalProfileFuture
-                );
-                if (!isActiveToken(token) || historicalProfile == null) return;
-                synchronized (r) {
-                    applyComplementProfileData(
-                            r,
-                            mergeComplementPayloads(
-                                    historicalProfile,
-                                    r.dexProfile
-                            )
-                    );
-                    reconcileProfileSources(r);
-                    enrichPhotoRoomInfo(r);
-                }
-                setProfileSectionsProgress(
-                        token,
-                        36,
-                        t(R.string.loading_history)
-                );
-                publishProgressiveProfile(r, token, firstRenderReleaseAt);
-            } finally {
-                finishProfileSectionsGroup(
-                        r,
-                        token,
-                        firstRenderReleaseAt,
-                        pendingGroups
-                );
-            }
-        });
-
-        profileSectionsExecutor.execute(() -> {
-            try {
-                JSONObject early = awaitFutureValue(earlyHistoryFuture);
-                if (!isActiveToken(token)) return;
-                final JSONObject earlyProfileFallback;
-                synchronized (r) {
-                    earlyProfileFallback = copyJsonObject(r.dexProfile);
-                }
-
-                ProfileSectionPayload earlyNames = historySectionFromBatch(
-                        early,
-                        "previousNames"
-                );
-                ProfileSectionPayload earlyMottos = historySectionFromBatch(
-                        early,
-                        "previousMottos"
-                );
-                ProfileSectionPayload earlyStyles = historySectionFromBatch(
-                        early,
-                        "previousStyles"
-                );
-                if (!earlyNames.items.isEmpty()
-                        || !earlyMottos.items.isEmpty()
-                        || !earlyStyles.items.isEmpty()) {
-                    synchronized (r) {
-                        if (!earlyNames.items.isEmpty()) {
-                            putComplementSectionLocked(
-                                    r, "previousNames", earlyNames.items
-                            );
-                        }
-                        if (!earlyMottos.items.isEmpty()) {
-                            putComplementSectionLocked(
-                                    r, "previousMottos", earlyMottos.items
-                            );
-                        }
-                        if (!earlyStyles.items.isEmpty()) {
-                            putComplementSectionLocked(
-                                    r, "previousStyles", earlyStyles.items
-                            );
-                        }
-                        reconcileProfileSources(r);
-                        enrichPhotoRoomInfo(r);
-                    }
-                    setProfileSectionsProgress(
-                            token,
-                            44,
-                            t(R.string.loading_history)
-                    );
-                    publishProgressiveProfile(r, token, firstRenderReleaseAt);
-                }
-
-                Future<ProfileSectionPayload> namesSectionFuture = executor.submit(
-                        () -> historySectionWithDirectFallback(
-                                early,
-                                earlyProfileFallback,
-                                uniqueId,
-                                "previous-names",
-                                "previousNames",
-                                5
-                        )
-                );
-                Future<ProfileSectionPayload> stylesSectionFuture = executor.submit(
-                        () -> historySectionWithDirectFallback(
-                                early,
-                                earlyProfileFallback,
-                                uniqueId,
-                                "previous-styles",
-                                "previousStyles",
-                                5
-                        )
-                );
-                Future<ProfileSectionPayload> mottosSectionFuture = executor.submit(
-                        () -> historySectionWithDirectFallback(
-                                early,
-                                earlyProfileFallback,
-                                uniqueId,
-                                "previous-mottos",
-                                "previousMottos",
-                                5
-                        ));
-                ProfileSectionPayload namesDirect = awaitFutureValue(
-                        namesSectionFuture
-                );
-                ProfileSectionPayload stylesDirect = awaitFutureValue(
-                        stylesSectionFuture
-                );
-                ProfileSectionPayload mottosDirect = awaitFutureValue(mottosSectionFuture);
-                if (namesDirect == null) {
-                    namesDirect = ProfileSectionPayload.list(
-                            "previousNames", new ArrayList<>(), false
-                    );
-                }
-                if (stylesDirect == null) {
-                    stylesDirect = ProfileSectionPayload.list(
-                            "previousStyles", new ArrayList<>(), false
-                    );
-                }
-                if (mottosDirect == null) {
-                    mottosDirect = ProfileSectionPayload.list(
-                            "previousMottos", new ArrayList<>(), false
-                    );
-                }
-                ProfileSectionPayload names = namesDirect;
-                ProfileSectionPayload mottos = mottosDirect;
-                ProfileSectionPayload styles = stylesDirect;
-
-                synchronized (r) {
-                    putComplementSectionLocked(r, "previousNames", names.items);
-                    putComplementSectionLocked(r, "previousMottos", mottos.items);
-                    putComplementSectionLocked(r, "previousStyles", styles.items);
-                    reconcileProfileSources(r);
-                    enrichPhotoRoomInfo(r);
-                }
-                setProfileSectionsProgress(
-                        token,
-                        52,
-                        t(R.string.loading_styles_friends)
-                );
-                publishProgressiveProfile(r, token, firstRenderReleaseAt);
-
-                if (!restrictedProfile) {
-                    ProfileSectionPayload photos = awaitFutureValue(officialPhotosFuture);
-                    if (!isActiveToken(token)) return;
-                    if (photos == null) {
+            // 7) Fotos oficiais são totalmente independentes do histórico.
+            profileSectionsExecutor.execute(() -> {
+                try {
+                    ProfileSectionPayload photos;
+                    try {
+                        photos = ProfileSectionPayload.list(
+                                "photos",
+                                fetchOfficialPhotos(uniqueId),
+                                true
+                        );
+                    } catch(Exception ignored) {
                         photos = ProfileSectionPayload.list(
                                 "photos",
                                 new ArrayList<>(),
                                 false
                         );
                     }
+                    if (!isActiveToken(token)) return;
                     synchronized (r) {
-                        // Em perfil público, nenhuma foto do complemento substitui a
-                        // lista oficial, inclusive quando a resposta oficial é vazia.
                         applyOfficialPhotosData(r, photos.items, photos.success);
                         reconcileProfileSources(r);
                         enrichPhotoRoomInfo(r);
                     }
-                    setProfileSectionsProgress(
-                            token,
-                            70,
-                            t(R.string.loading_styles_friends)
-                    );
+                    setProfileSectionsProgress(token, 68, t(R.string.loading_styles_friends));
                     publishProgressiveProfile(r, token, firstRenderReleaseAt);
+                } finally {
+                    finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups);
                 }
+            });
+        } else {
+            synchronized (r) {
+                r.officialProfileAttempted = true;
+                r.officialPhotosAttempted = true;
+                r.officialPhotosSucceeded = false;
+            }
 
-                // Amigos e removidos não compartilham mais o mesmo lote. Assim,
-                // um histórico grande de removidos não segura as datas dos
-                // amigos atuais nem transforma uma falha em falha das duas abas.
-                JSONObject friendsBatch = fetchDirectHabbodexPriorityBatch(
-                        uniqueId,
-                        "friends"
-                );
-                final JSONObject friendsProfileFallback;
-                synchronized (r) {
-                    friendsProfileFallback = copyJsonObject(r.dexProfile);
-                }
-                if (!isActiveToken(token)) return;
-                ProfileSectionPayload friends = historySectionWithDirectFallback(
-                        friendsBatch,
-                        friendsProfileFallback,
-                        uniqueId,
-                        "friends",
-                        "friends",
-                        25
-                );
-                if (friends.success || !friends.items.isEmpty()) {
-                    synchronized (r) {
-                        putComplementSectionLocked(r, "friends", friends.items);
-                        reconcileProfileSources(r);
-                        enrichPhotoRoomInfo(r);
-                    }
-                    setProfileSectionsProgress(
-                            token,
-                            78,
-                            t(R.string.loading_history)
-                    );
-                    publishProgressiveProfile(r, token, firstRenderReleaseAt);
-                }
-
-                JSONObject removedBatch = fetchDirectHabbodexPriorityBatch(
-                        uniqueId,
-                        "previous-friends"
-                );
-                final JSONObject removedProfileFallback;
-                synchronized (r) {
-                    removedProfileFallback = copyJsonObject(r.dexProfile);
-                }
-                if (!isActiveToken(token)) return;
-                ProfileSectionPayload removed = historySectionWithDirectFallback(
-                        removedBatch,
-                        removedProfileFallback,
-                        uniqueId,
-                        "previous-friends",
-                        "previousFriends",
-                        25
-                );
-                if (removed.success || !removed.items.isEmpty()) {
-                    synchronized (r) {
-                        putComplementSectionLocked(
-                                r,
-                                "previousFriends",
-                                removed.items
-                        );
-                        reconcileProfileSources(r);
-                        enrichPhotoRoomInfo(r);
-                    }
-                }
-                setProfileSectionsProgress(
-                        token,
-                        88,
-                        t(R.string.loading_history)
-                );
-                publishProgressiveProfile(r, token, firstRenderReleaseAt);
-
-                if (restrictedProfile) {
+            // 6) Dados exclusivos de perfil privado: somente a primeira página.
+            profileSectionsExecutor.execute(() -> {
+                try {
                     JSONObject privateDetails = fetchDirectHabbodexPriorityBatch(
                             uniqueId,
                             true,
                             "rooms,groups,photos"
                     );
-                    final JSONObject privateProfileFallback;
+                    if (!isActiveToken(token) || privateDetails == null) return;
                     synchronized (r) {
-                        privateProfileFallback = copyJsonObject(r.dexProfile);
-                    }
-                    ProfileSectionPayload rooms = historySectionWithDirectFallback(
-                            privateDetails,
-                            privateProfileFallback,
-                            uniqueId,
-                            "rooms",
-                            "rooms",
-                            25
-                    );
-                    ProfileSectionPayload groups = historySectionWithDirectFallback(
-                            privateDetails,
-                            privateProfileFallback,
-                            uniqueId,
-                            "groups",
-                            "groups",
-                            25
-                    );
-                    ProfileSectionPayload photos = historySectionWithDirectFallback(
-                            privateDetails,
-                            privateProfileFallback,
-                            uniqueId,
-                            "photos",
-                            "photos",
-                            25
-                    );
-                    synchronized (r) {
-                        putComplementSectionLocked(r, "rooms", rooms.items);
-                        putComplementSectionLocked(r, "groups", groups.items);
-                        putComplementSectionLocked(r, "photos", photos.items);
+                        ArrayList<JSONObject> rooms = extractDirectHistoryItems(privateDetails, "rooms");
+                        ArrayList<JSONObject> groups = extractDirectHistoryItems(privateDetails, "groups");
+                        ArrayList<JSONObject> photos = extractDirectHistoryItems(privateDetails, "photos");
+                        putComplementSectionLocked(r, "rooms", rooms);
+                        putComplementSectionLocked(r, "groups", groups);
+                        putComplementSectionLocked(r, "photos", photos);
                         reconcileProfileSources(r);
                         enrichPhotoRoomInfo(r);
                     }
-                    setProfileSectionsProgress(
-                            token,
-                            96,
-                            t(R.string.loading_details)
-                    );
+                    setProfileSectionsProgress(token, 94, t(R.string.loading_details));
                     publishProgressiveProfile(r, token, firstRenderReleaseAt);
+                } finally {
+                    finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups);
                 }
+            });
+        }
 
-                // A API oficial já entrega os emblemas atuais de perfis
-                // públicos. O HabboDex é consultado em segundo plano por apenas
-                // uma página para enriquecer nome/data sem bloquear o perfil nem
-                // repetir 25 páginas em contas com milhares de emblemas.
-                startBackgroundBadgeEnrichment(
-                        r,
-                        token,
-                        firstRenderReleaseAt
-                );
-            } finally {
-                finishProfileSectionsGroup(
-                        r,
-                        token,
-                        firstRenderReleaseAt,
-                        pendingGroups
-                );
-            }
-        });
+        // Emblemas nunca seguram a conclusão visual do perfil.
+        startBackgroundBadgeEnrichment(r, token, firstRenderReleaseAt);
     }
 
     private boolean mayLoadOfficialProfileSections(ProfileResult profile) {
@@ -5040,7 +4898,8 @@ public class MainActivity extends Activity {
         return unwrap(tryJson(habbodexBatchUrl(
                 cleanId,
                 includePrivate,
-                sections
+                sections,
+                1
         )));
     }
 
@@ -5135,19 +4994,9 @@ public class MainActivity extends Activity {
         boolean complete = false;
 
         for (int request = 0; request < pageLimit; request++) {
-            boolean responseFromApi = false;
             JSONObject response = unwrap(tryJson(
                     habbodexListUrl(cleanId, endpoint, page, limit)
             ));
-            if (response == null) {
-                // Mesmo conteúdo do HabboDex, agora solicitado pelo api.php do
-                // próprio projeto. Isso cobre chave ausente/incorreta no APK e
-                // bloqueios pontuais do proxy direto sem trocar a fonte.
-                response = unwrap(tryJson(
-                        apiHabbodexListUrl(cleanId, endpoint, page, limit)
-                ));
-                responseFromApi = true;
-            }
             if (response == null
                     || (response.has("ok") && !response.optBoolean("ok", true))) {
                 return ProfileSectionPayload.list(key, combined, false);
@@ -5155,18 +5004,15 @@ public class MainActivity extends Activity {
             received = true;
 
             ArrayList<JSONObject> items = extractDirectHistoryItems(response, key);
-            if (!responseFromApi && request == 0 && page == 1
+            if (request == 0 && page == 1
                     && "previousNames".equals(key)
                     && items.isEmpty()) {
-                JSONObject confirmed = unwrap(tryJson(
-                        apiHabbodexListUrl(cleanId, endpoint, page, limit)
-                ));
+                JSONObject confirmed = fetchDirectHabbodexProfile(cleanId);
                 ArrayList<JSONObject> confirmedItems = extractDirectHistoryItems(
                         confirmed,
                         key
                 );
                 if (confirmed != null && !confirmedItems.isEmpty()) {
-                    response = confirmed;
                     items = confirmedItems;
                 }
             }
@@ -5543,7 +5389,20 @@ public class MainActivity extends Activity {
 
     private void applyLocalStylesSource(ProfileResult r, ArrayList<JSONObject> source) {
         if (r == null) return;
-        r.allStylesSource = source == null ? new ArrayList<>() : new ArrayList<>(source);
+        ArrayList<JSONObject> clean = source == null ? new ArrayList<>() : new ArrayList<>(source);
+        if (r.stylesRemotePaged) {
+            r.allStylesSource = mergeLists(r.allStylesSource, clean);
+            r.stylesFromComplement = false;
+            if (r.previousStyles == null || r.previousStyles.isEmpty()) {
+                int end = Math.min(PAGE_CHUNK, r.allStylesSource.size());
+                r.previousStyles = new ArrayList<>(r.allStylesSource.subList(0, end));
+            }
+            r.stylesTotal = Math.max(r.stylesTotal, r.allStylesSource.size());
+            r.stylesHasMore = r.previousStyles.size() < r.allStylesSource.size()
+                    || r.stylesRemotePaged;
+            return;
+        }
+        r.allStylesSource = clean;
         r.stylesFromComplement = true;
         int end = Math.min(PAGE_CHUNK, r.allStylesSource.size());
         r.previousStyles = new ArrayList<>(r.allStylesSource.subList(0, end));
@@ -5777,7 +5636,17 @@ public class MainActivity extends Activity {
         try {
             JSONObject pageData = unwrap(getJson(habbodexEndpointUrl(uniqueId, endpoint, out.page, limit)));
             if (pageData == null) return out;
+            out.success = true;
             out.items = extractList(pageData, primaryKey);
+            if (out.items.isEmpty() && "previousFriends".equals(primaryKey)) {
+                out.items = extractList(pageData, "friends");
+            } else if (out.items.isEmpty() && "previousStyles".equals(primaryKey)) {
+                out.items = extractList(pageData, "styles");
+            } else if (out.items.isEmpty() && "previousMottos".equals(primaryKey)) {
+                out.items = extractList(pageData, "mottos");
+            } else if (out.items.isEmpty() && "previousNames".equals(primaryKey)) {
+                out.items = extractList(pageData, "names");
+            }
             out.total = extractTotalCount(pageData);
             JSONObject next = pageData.optJSONObject("next");
             int nextPage = next == null ? 0 : next.optInt("page", 0);
@@ -5867,6 +5736,13 @@ public class MainActivity extends Activity {
         return 0;
     }
 
+    private int extractBatchSectionTotal(JSONObject batch, String key) {
+        if (batch == null || key == null || key.isEmpty()) return 0;
+        JSONObject totals = batch.optJSONObject("totals");
+        if (totals == null) return 0;
+        return Math.max(0, totals.optInt(key, 0));
+    }
+
     private void applyPhotosPage(ProfileResult r, PageResult page, boolean reset) {
         if (r == null || page == null) return;
         if (reset) r.photos.clear();
@@ -5927,36 +5803,91 @@ public class MainActivity extends Activity {
     }
 
     private void loadMoreStyles(ProfileResult r, HorizontalScrollView stylesHsv) {
-        if (r == null || r.stylesLoading || !r.stylesHasMore || r.uniqueId == null || r.uniqueId.isEmpty()) return;
-        if (r.stylesFromComplement && r.allStylesSource != null && !r.allStylesSource.isEmpty()) {
-            stylesScrollX = stylesHsv == null ? 0 : stylesHsv.getScrollX();
-            int end = Math.min(r.previousStyles.size() + PAGE_CHUNK, r.allStylesSource.size());
+        if (r == null || r.stylesLoading || !r.stylesHasMore
+                || r.uniqueId == null || r.uniqueId.isEmpty()) return;
+
+        stylesScrollX = stylesHsv == null ? 0 : stylesHsv.getScrollX();
+
+        // Primeiro libera itens que já vieram na página de rede atual.
+        if (r.allStylesSource != null
+                && r.previousStyles.size() < r.allStylesSource.size()) {
+            int end = Math.min(
+                    r.previousStyles.size() + PAGE_CHUNK,
+                    r.allStylesSource.size()
+            );
             r.previousStyles = new ArrayList<>(r.allStylesSource.subList(0, end));
-            r.stylesTotal = r.allStylesSource.size();
-            r.stylesHasMore = end < r.stylesTotal;
-            r.stylesNextPage = r.stylesHasMore ? (end / PAGE_CHUNK) + 1 : 0;
+            r.stylesHasMore = end < r.allStylesSource.size() || r.stylesRemotePaged;
+            if (!r.stylesHasMore) r.stylesNextPage = 0;
             renderProfile(r);
             return;
         }
-        final int token = activeSearchToken;
-        final int page = r.stylesNextPage <= 0 ? 2 : r.stylesNextPage;
-        r.stylesLoading = true;
-        stylesScrollX = stylesHsv == null ? 0 : stylesHsv.getScrollX();
-        renderProfile(r);
-        executor.execute(() -> {
-            try {
-                PageResult next = fetchPageChunk(r.uniqueId, "previous-styles", null, page, PAGE_CHUNK, PAGE_CHUNK);
-                if (!isActiveToken(token)) return;
-                applyStylesPage(r, next, false);
-            } catch (Exception ignored) {
-            } finally {
-                r.stylesLoading = false;
-                runOnUiThread(() -> {
-                    if (!isActiveToken(token)) return;
-                    renderProfile(r);
-                });
-            }
-        });
+
+        // Quando os 100 itens já baixados foram consumidos, busca a próxima
+        // página remota de 100 e volta a liberar em blocos de PAGE_CHUNK.
+        if (r.stylesRemotePaged) {
+            final int token = activeSearchToken;
+            final int remotePage = r.stylesRemoteNextPage <= 1
+                    ? 2
+                    : r.stylesRemoteNextPage;
+            r.stylesLoading = true;
+            renderProfile(r);
+            executor.execute(() -> {
+                try {
+                    PageResult next = fetchPage(
+                            r.uniqueId,
+                            "previous-styles",
+                            "previousStyles",
+                            remotePage,
+                            100
+                    );
+                    if (!isActiveToken(token) || !next.success) return;
+                    synchronized (r) {
+                        r.allStylesSource = mergeLists(r.allStylesSource, next.items);
+                        if (next.total > 0) {
+                            r.stylesTotal = Math.max(r.stylesTotal, next.total);
+                        }
+                        r.stylesRemoteNextPage = next.nextPage;
+                        r.stylesRemotePaged = next.hasMore
+                                || (r.stylesTotal > 0
+                                && r.allStylesSource.size() < r.stylesTotal);
+                        if (r.stylesRemotePaged
+                                && r.stylesRemoteNextPage <= remotePage) {
+                            r.stylesRemoteNextPage = remotePage + 1;
+                        }
+                        int end = Math.min(
+                                r.previousStyles.size() + PAGE_CHUNK,
+                                r.allStylesSource.size()
+                        );
+                        r.previousStyles = new ArrayList<>(
+                                r.allStylesSource.subList(0, end)
+                        );
+                        r.stylesHasMore = end < r.allStylesSource.size()
+                                || r.stylesRemotePaged;
+                        if (!r.stylesHasMore) r.stylesNextPage = 0;
+                    }
+                } catch(Exception ignored) {
+                } finally {
+                    r.stylesLoading = false;
+                    runOnUiThread(() -> {
+                        if (!isActiveToken(token)) return;
+                        renderProfile(r);
+                    });
+                }
+            });
+            return;
+        }
+
+        // Compatibilidade com fontes locais completas já existentes.
+        if (r.stylesFromComplement && r.allStylesSource != null) {
+            int end = Math.min(
+                    r.previousStyles.size() + PAGE_CHUNK,
+                    r.allStylesSource.size()
+            );
+            r.previousStyles = new ArrayList<>(r.allStylesSource.subList(0, end));
+            r.stylesHasMore = end < r.allStylesSource.size();
+            r.stylesNextPage = r.stylesHasMore ? (end / PAGE_CHUNK) + 1 : 0;
+            renderProfile(r);
+        }
     }
 
     private ArrayList<JSONObject> fetchOfficialPhotos(String uniqueId) throws Exception {
@@ -6074,7 +6005,7 @@ public class MainActivity extends Activity {
         addPreviousStyles(r);
         addPhotos(r);
         addStats(r);
-        addFriendsTabs(r.friends, r.oldFriends);
+        addFriendsTabs(r);
         addRoomsTabs(r.rooms);
         addGroups(r.groups);
         addBadgesSection(r);
@@ -7266,8 +7197,52 @@ public class MainActivity extends Activity {
         return t(R.string.new_badge);
     }
 
-    private void addFriendsTabs(ArrayList<JSONObject> friendsList, ArrayList<JSONObject> removedList) {
-        if (friendsList.isEmpty() && removedList.isEmpty()) return;
+    private void loadMoreRemovedFriends(ProfileResult r) {
+        if (r == null || r.removedFriendsLoading || !r.removedFriendsHasMore
+                || r.uniqueId == null || r.uniqueId.trim().isEmpty()) return;
+        final int token = activeSearchToken;
+        final int nextPage = r.removedFriendsNextPage <= 1 ? 2 : r.removedFriendsNextPage;
+        r.removedFriendsLoading = true;
+        executor.execute(() -> {
+            try {
+                PageResult next = fetchPage(
+                        r.uniqueId,
+                        "previous-friends",
+                        "previousFriends",
+                        nextPage,
+                        100
+                );
+                if (!isActiveToken(token) || !next.success) return;
+                synchronized (r) {
+                    r.oldFriends = mergeLists(r.oldFriends, next.items);
+                    if (next.total > 0) r.removedFriendsTotal = Math.max(r.removedFriendsTotal, next.total);
+                    r.removedFriendsNextPage = next.nextPage;
+                    r.removedFriendsHasMore = next.hasMore
+                            || (r.removedFriendsTotal > 0 && r.oldFriends.size() < r.removedFriendsTotal);
+                    if (r.removedFriendsHasMore && r.removedFriendsNextPage <= nextPage) {
+                        r.removedFriendsNextPage = nextPage + 1;
+                    }
+                }
+            } finally {
+                r.removedFriendsLoading = false;
+                runOnUiThread(() -> {
+                    if (!isActiveToken(token)) return;
+                    renderProfile(r);
+                });
+            }
+        });
+    }
+
+    private void addFriendsTabs(ProfileResult profileResult) {
+        if (profileResult == null) return;
+        ArrayList<JSONObject> friendsList = profileResult.friendsDatesReady
+                ? profileResult.friends
+                : new ArrayList<>();
+        ArrayList<JSONObject> removedList = profileResult.oldFriends == null
+                ? new ArrayList<>()
+                : profileResult.oldFriends;
+        if (friendsList.isEmpty() && removedList.isEmpty()
+                && !profileResult.removedFriendsLoading) return;
         LinearLayout c = sectionCard(null, 0, false);
         LinearLayout tabs = new LinearLayout(this);
         tabs.setOrientation(LinearLayout.HORIZONTAL);
@@ -7283,7 +7258,11 @@ public class MainActivity extends Activity {
         tabs.addView(btRemoved);
 
         LinearLayout content = new LinearLayout(this); content.setOrientation(LinearLayout.VERTICAL); c.addView(content, lp(-1, -2, 0, 0, 0, 0));
-        final boolean[] showingRemoved = {false}; final int[] page = {1};
+        if (!profileResult.friendsDatesReady && !removedList.isEmpty()) {
+            profileResult.friendsTabShowingRemoved = true;
+        }
+        final boolean[] showingRemoved = {profileResult.friendsTabShowingRemoved};
+        final int[] page = {Math.max(1, profileResult.friendsTabPage)};
         Runnable[] render = new Runnable[1];
         render[0] = () -> {
             content.removeAllViews();
@@ -7291,13 +7270,40 @@ public class MainActivity extends Activity {
             btFriends.setTextColor(showingRemoved[0] ? tabInactiveTextColor() : Color.WHITE);
             btRemoved.setBackground(new TrashTabDrawable(showingRemoved[0]));
             btRemoved.setText("");
-            ArrayList<JSONObject> data = showingRemoved[0] ? removedList : friendsList;
+            ArrayList<JSONObject> data = showingRemoved[0]
+                    ? profileResult.oldFriends
+                    : (profileResult.friendsDatesReady ? profileResult.friends : new ArrayList<>());
             if (!showingRemoved[0] && page[0] == 1) profileFriendTutorialTarget = null;
+            int loadedPages = Math.max(1, (int)Math.ceil(data.size() / 10.0));
+            if (page[0] > loadedPages) page[0] = loadedPages;
+            profileResult.friendsTabPage = page[0];
+            profileResult.friendsTabShowingRemoved = showingRemoved[0];
             renderFriendsPage(content, data, page[0], 10, showingRemoved[0]);
-            renderPager(content, data.size(), 10, page, render[0], () -> scrollMainToView(c, dp(12)));
+            renderPager(content, data.size(), 10, page, render[0], () -> {
+                profileResult.friendsTabPage = page[0];
+                profileResult.friendsTabShowingRemoved = showingRemoved[0];
+                scrollMainToView(c, dp(12));
+                if (showingRemoved[0]
+                        && profileResult.removedFriendsHasMore
+                        && page[0] >= Math.max(1, (int)Math.ceil(profileResult.oldFriends.size() / 10.0))) {
+                    loadMoreRemovedFriends(profileResult);
+                }
+            });
         };
-        btFriends.setOnClickListener(v -> { showingRemoved[0] = false; page[0] = 1; render[0].run(); });
-        btRemoved.setOnClickListener(v -> { showingRemoved[0] = true; page[0] = 1; render[0].run(); });
+        btFriends.setOnClickListener(v -> {
+            showingRemoved[0] = false;
+            page[0] = 1;
+            profileResult.friendsTabShowingRemoved = false;
+            profileResult.friendsTabPage = 1;
+            render[0].run();
+        });
+        btRemoved.setOnClickListener(v -> {
+            showingRemoved[0] = true;
+            page[0] = 1;
+            profileResult.friendsTabShowingRemoved = true;
+            profileResult.friendsTabPage = 1;
+            render[0].run();
+        });
         render[0].run();
         addBannerToResultWrap(buildFriendsRemovedBannerAd(), 18);
     }
@@ -8170,9 +8176,19 @@ private int loadingProgressFor(String message) {
             boolean includePrivate,
             String sections
     ) {
+        return habbodexBatchUrl(uniqueId, includePrivate, sections, 25);
+    }
+
+    private String habbodexBatchUrl(
+            String uniqueId,
+            boolean includePrivate,
+            String sections,
+            int maxPages
+    ) {
         String url = HABBODEX_PROXY_API
                 + "?action=batch&id=" + enc(uniqueId)
-                + "&includePrivate=" + (includePrivate ? "true" : "false");
+                + "&includePrivate=" + (includePrivate ? "true" : "false")
+                + "&maxPages=" + Math.max(1, Math.min(25, maxPages));
         String cleanSections = sections == null ? "" : sections.trim();
         return cleanSections.isEmpty()
                 ? url
@@ -8246,10 +8262,7 @@ private int loadingProgressFor(String message) {
                 !extractSuggestionUsers(direct).isEmpty()
                 || validProfileObject(direct) != null
         )) return direct;
-        JSONObject profile = extractHabbodexProfilePayload(unwrap(tryJson(
-                apiHabbodexProfileByNameUrl(clean, hotelKey)
-        )));
-        return suggestionsFromProfile(profile);
+        return direct;
     }
 
     private JSONObject suggestionsFromProfile(JSONObject profile) {
@@ -8350,15 +8363,8 @@ private int loadingProgressFor(String message) {
         JSONObject profile = extractHabbodexProfilePayload(
                 unwrap(tryJson(habbodexProfileUrl(cleanId)))
         );
-        if (profile != null && isSameProfileId(cleanId, profile)) return profile;
-
-        // O api.php atual consulta somente HabboDex para complementos. Ele é
-        // usado aqui como segundo transporte, não como outra fonte de dados.
-        JSONObject fallback = extractHabbodexProfilePayload(
-                unwrap(tryJson(apiHabbodexProfileUrl(cleanId)))
-        );
-        return fallback != null && isSameProfileId(cleanId, fallback)
-                ? fallback
+        return profile != null && isSameProfileId(cleanId, profile)
+                ? profile
                 : null;
     }
 
@@ -8591,7 +8597,48 @@ private int loadingProgressFor(String message) {
         );
     }
 
+    private boolean isFiveMinuteJsonCacheUrl(String u) {
+        if (u == null || u.trim().isEmpty()) return false;
+        if (u.startsWith(HABBODEX_PROXY_API)) return true;
+        if (u.startsWith(PROFILE_API)) {
+            return u.contains("/habboinfo/")
+                    || u.contains("/furnidex/")
+                    || u.contains("endpoint=")
+                    || u.contains("figureString=");
+        }
+        return u.contains("habbo.com.br/api/public/")
+                || u.contains("habbo.com/api/public/")
+                || u.contains("habbo.es/api/public/")
+                || u.contains("habbo.de/api/public/")
+                || u.contains("habbo.fr/api/public/")
+                || u.contains("habbo.fi/api/public/")
+                || u.contains("habbo.it/api/public/")
+                || u.contains("habbo.nl/api/public/")
+                || u.contains("habbo.com.tr/api/public/")
+                || u.contains("/extradata/public/users/");
+    }
+
+    private Object parseCachedJsonBody(String body) throws Exception {
+        String clean = body == null ? "" : body.trim();
+        if (clean.isEmpty()) throw new IOException("Empty cached JSON");
+        return clean.startsWith("[") ? new JSONArray(clean) : new JSONObject(clean);
+    }
+
     private Object getJsonAny(String u) throws Exception {
+        final boolean cacheable = isFiveMinuteJsonCacheUrl(u);
+        final long now = SystemClock.elapsedRealtime();
+        if (cacheable) {
+            CachedJsonResponse cached = jsonResponseCache.get(u);
+            if (cached != null) {
+                if (now - cached.storedAtMs <= JSON_RESPONSE_CACHE_TTL_MS) {
+                    try { return parseCachedJsonBody(cached.body); }
+                    catch(Exception ignored) { jsonResponseCache.remove(u, cached); }
+                } else {
+                    jsonResponseCache.remove(u, cached);
+                }
+            }
+        }
+
         HttpURLConnection c = (HttpURLConnection)new URL(u).openConnection();
         boolean complement = u != null && (u.startsWith(PROFILE_API) || u.startsWith(HABBODEX_PROXY_API));
         boolean largeOfficialProfile = u != null
@@ -8599,11 +8646,9 @@ private int loadingProgressFor(String message) {
                 && u.endsWith("/profile");
         c.setUseCaches(false);
         c.setDefaultUseCaches(false);
-        c.setConnectTimeout(complement ? 10000 : 8000);
-        c.setReadTimeout((complement || largeOfficialProfile) ? 30000 : 15000);
+        c.setConnectTimeout(complement ? 6000 : 5000);
+        c.setReadTimeout(complement ? 12000 : (largeOfficialProfile ? 15000 : 8000));
         c.setRequestProperty("Accept", "application/json, text/plain, */*");
-        c.setRequestProperty("Cache-Control", "no-cache, no-store");
-        c.setRequestProperty("Pragma", "no-cache");
         c.setRequestProperty("User-Agent", "ToxicSearchTool/" + APP_VERSION + " Android (+https://atoxic.com.br)");
         c.setRequestProperty("X-Toxic-App", APP_VERSION);
         if (u != null && u.startsWith(HABBODEX_PROXY_API)) {
@@ -8614,9 +8659,12 @@ private int loadingProgressFor(String message) {
         InputStream is = code >= 200 && code < 300 ? c.getInputStream() : c.getErrorStream();
         String body = readAll(is);
         if (code < 200 || code >= 300 || body == null || body.trim().isEmpty()) throw new IOException("HTTP " + code);
-        String clean = body.trim();
-        return clean.startsWith("[") ? new JSONArray(clean) : new JSONObject(clean);
+        if (cacheable) {
+            jsonResponseCache.put(u, new CachedJsonResponse(body, SystemClock.elapsedRealtime()));
+        }
+        return parseCachedJsonBody(body);
     }
+
     private JSONObject getJson(String u) throws Exception { Object any = getJsonAny(u); if (any instanceof JSONObject) return (JSONObject)any; JSONObject wrap = new JSONObject(); wrap.put("data", any); return wrap; }
     private JSONObject tryJson(String u) { try { return getJson(u); } catch (Exception e) { return null; } }
 
@@ -12822,9 +12870,11 @@ private int loadingProgressFor(String message) {
         c.habboPublic = src.habboPublic; c.dex = src.dex; c.suggest = src.suggest; c.dexProfile = src.dexProfile; c.officialProfile = src.officialProfile;
         c.previousNames = new ArrayList<>(src.previousNames); c.previousMottos = new ArrayList<>(src.previousMottos); c.previousStyles = new ArrayList<>(src.previousStyles); c.photos = new ArrayList<>(src.photos); c.friends = new ArrayList<>(src.friends); c.oldFriends = new ArrayList<>(src.oldFriends); c.rooms = new ArrayList<>(src.rooms); c.oldRooms = new ArrayList<>(src.oldRooms); c.groups = new ArrayList<>(src.groups); c.badges = new ArrayList<>(src.badges); c.badgesWithAchievements = new ArrayList<>(src.badgesWithAchievements); c.totalBadges = src.totalBadges; c.selectedBadges = new ArrayList<>(src.selectedBadges);
         c.allPhotosSource = new ArrayList<>(src.allPhotosSource); c.allStylesSource = new ArrayList<>(src.allStylesSource);
-        c.photosNextPage = src.photosNextPage; c.stylesNextPage = src.stylesNextPage; c.photosTotal = src.photosTotal; c.stylesTotal = src.stylesTotal;
+        c.photosNextPage = src.photosNextPage; c.stylesNextPage = src.stylesNextPage; c.photosTotal = src.photosTotal; c.stylesTotal = src.stylesTotal; c.stylesRemoteNextPage = src.stylesRemoteNextPage;
+        c.removedFriendsNextPage = src.removedFriendsNextPage; c.removedFriendsTotal = src.removedFriendsTotal; c.friendsTabPage = src.friendsTabPage;
         c.photosHasMore = src.photosHasMore; c.stylesHasMore = src.stylesHasMore; c.photosLoading = false; c.stylesLoading = false;
-        c.officialProfileAttempted = src.officialProfileAttempted; c.officialPhotosAttempted = src.officialPhotosAttempted; c.officialPhotosSucceeded = src.officialPhotosSucceeded; c.photosFromOfficial = src.photosFromOfficial; c.stylesFromComplement = src.stylesFromComplement;
+        c.removedFriendsHasMore = src.removedFriendsHasMore; c.removedFriendsLoading = false; c.friendsTabShowingRemoved = src.friendsTabShowingRemoved;
+        c.officialProfileAttempted = src.officialProfileAttempted; c.officialPhotosAttempted = src.officialPhotosAttempted; c.officialPhotosSucceeded = src.officialPhotosSucceeded; c.photosFromOfficial = src.photosFromOfficial; c.stylesFromComplement = src.stylesFromComplement; c.stylesRemotePaged = src.stylesRemotePaged; c.friendsDatesReady = src.friendsDatesReady;
         return c;
     }
 
@@ -14102,6 +14152,16 @@ private int loadingProgressFor(String message) {
         }
     }
 
+    private static class CachedJsonResponse {
+        final String body;
+        final long storedAtMs;
+
+        CachedJsonResponse(String body, long storedAtMs) {
+            this.body = body == null ? "" : body;
+            this.storedAtMs = storedAtMs;
+        }
+    }
+
     private static class ProfileResult {
         String searchedNick = "", uniqueId = "", name = "", motto = "", figure = "", memberSince = "", lastAccess = "", level = "", starGems = "", totalBadges = "", hotelKey = "br";
         boolean online = false, privateProfile = false, banned = false;
@@ -14109,8 +14169,11 @@ private int loadingProgressFor(String message) {
         ArrayList<JSONObject> previousNames = new ArrayList<>(), previousMottos = new ArrayList<>(), previousStyles = new ArrayList<>(), photos = new ArrayList<>(), friends = new ArrayList<>(), oldFriends = new ArrayList<>(), rooms = new ArrayList<>(), oldRooms = new ArrayList<>(), groups = new ArrayList<>(), selectedBadges = new ArrayList<>(), badges = new ArrayList<>(), badgesWithAchievements = new ArrayList<>();
         ArrayList<JSONObject> allPhotosSource = new ArrayList<>(), allStylesSource = new ArrayList<>();
         int photosNextPage = 0, stylesNextPage = 0, photosTotal = 0, stylesTotal = 0;
+        int stylesRemoteNextPage = 0;
+        int removedFriendsNextPage = 0, removedFriendsTotal = 0, friendsTabPage = 1;
         boolean photosHasMore = false, stylesHasMore = false, photosLoading = false, stylesLoading = false;
-        boolean officialProfileAttempted = false, officialPhotosAttempted = false, officialPhotosSucceeded = false, photosFromOfficial = false, stylesFromComplement = false;
+        boolean removedFriendsHasMore = false, removedFriendsLoading = false, friendsTabShowingRemoved = false;
+        boolean officialProfileAttempted = false, officialPhotosAttempted = false, officialPhotosSucceeded = false, photosFromOfficial = false, stylesFromComplement = false, stylesRemotePaged = false, friendsDatesReady = false;
     }
 
     private static class ProfileSectionPayload {
@@ -14147,7 +14210,7 @@ private int loadingProgressFor(String message) {
     private static class PageResult {
         ArrayList<JSONObject> items = new ArrayList<>();
         int page = 1, nextPage = 0, total = 0;
-        boolean hasMore = false;
+        boolean hasMore = false, success = false;
     }
 
 
