@@ -61,7 +61,7 @@ public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_BASE = "https://habbodex.com/api/v1/habboinfo";
     private static final String HABBODEX_FURNIDEX_API = "https://habbodex.com/api/v1/furnidex/furni/from-figure-string";
-    private static final String APP_VERSION = "1.3.29";
+    private static final String APP_VERSION = "1.3.30";
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -4667,20 +4667,27 @@ public class MainActivity extends Activity {
             }
         });
 
-        // 4) Amigos atuais são críticos: busca todas as páginas com retry por página
-        // e só libera a aba quando TODOS os itens recebidos possuem data.
+        // 4) Amigos atuais são críticos, mas agora usam paginação progressiva.
+        // A primeira página (100 itens) é liberada assim que TODOS esses itens tiverem data.
+        // As páginas seguintes são buscadas somente quando o usuário alcança o fim do lote carregado.
         profileSectionsExecutor.execute(() -> {
             try {
-                ProfileSectionPayload friends = fetchCriticalFriendsWithDates(
+                PageResult firstFriends = fetchCriticalFriendsPage(
                         uniqueId,
-                        25
+                        1,
+                        100,
+                        true
                 );
                 if (!isActiveToken(token)) return;
                 JSONObject officialForFriends = restrictedProfile
                         ? null
                         : awaitFutureValue(officialProfileFuture);
-                if (friends.success) {
-                    boolean ready;
+
+                if (firstFriends != null
+                        && firstFriends.success
+                        && firstFriends.items != null
+                        && !firstFriends.items.isEmpty()
+                        && allFriendsHaveAddedDates(firstFriends.items)) {
                     synchronized (r) {
                         if (!restrictedProfile) {
                             r.officialProfileAttempted = true;
@@ -4688,44 +4695,37 @@ public class MainActivity extends Activity {
                                 applyOfficialProfileData(r, officialForFriends);
                             }
                         }
-                        putComplementSectionLocked(r, "friends", friends.items);
+
+                        ArrayList<JSONObject> datedPage = new ArrayList<>(firstFriends.items);
+                        ArrayList<JSONObject> officialFriends = officialForFriends == null
+                                ? new ArrayList<>()
+                                : extractList(officialForFriends, "friends");
+                        // Mantém apenas os amigos já validados pelo HabboDex; a API oficial
+                        // apenas enriquece os mesmos registros e nunca adiciona amigos sem data.
+                        datedPage = mergeListsEnrichingPrimary(datedPage, officialFriends, false);
+
+                        r.friendsPagedMode = true;
+                        r.friends = datedPage;
+                        r.friendsTotal = Math.max(firstFriends.total, officialFriends.size());
+                        r.friendsNextPage = firstFriends.nextPage;
+                        r.friendsHasMore = firstFriends.hasMore
+                                || (r.friendsTotal > 0 && r.friends.size() < r.friendsTotal);
+                        if (r.friendsHasMore && r.friendsNextPage <= 1) {
+                            r.friendsNextPage = 2;
+                        }
+                        r.friendsDatesReady = true;
                         reconcileProfileSources(r);
                         enrichPhotoRoomInfo(r);
-                        ready = allFriendsHaveAddedDates(r.friends);
-                        r.friendsDatesReady = ready;
-                    }
 
-                    // Se a lista oficial tiver algum amigo que ainda não recebeu data,
-                    // invalida as páginas de amigos e faz uma segunda passagem fresca.
-                    if (!ready && isActiveToken(token)) {
-                        invalidateCriticalFriendsCache(uniqueId, 25);
-                        ProfileSectionPayload refreshed = fetchCriticalFriendsWithDates(
-                                uniqueId,
-                                25
-                        );
-                        if (refreshed.success && isActiveToken(token)) {
-                            synchronized (r) {
-                                putComplementSectionLocked(r, "friends", refreshed.items);
-                                reconcileProfileSources(r);
-                                enrichPhotoRoomInfo(r);
-                                ready = allFriendsHaveAddedDates(r.friends);
-                                r.friendsDatesReady = ready;
-                            }
+                        // Se removidos abriu automaticamente enquanto os amigos carregavam,
+                        // volta para a aba principal. Escolha manual continua sendo respeitada.
+                        if (!r.friendsTabSelectionTouched) {
+                            r.friendsTabShowingRemoved = false;
+                            r.friendsTabPage = 1;
                         }
                     }
-
-                    if (ready) {
-                        synchronized (r) {
-                            // Se a aba de removidos foi escolhida automaticamente enquanto
-                            // as datas carregavam, volta para amigos. Respeita escolha manual.
-                            if (!r.friendsTabSelectionTouched) {
-                                r.friendsTabShowingRemoved = false;
-                                r.friendsTabPage = 1;
-                            }
-                        }
-                        setProfileSectionsProgress(token, 76, t(R.string.loading_history));
-                        publishProgressiveProfile(r, token, firstRenderReleaseAt);
-                    }
+                    setProfileSectionsProgress(token, 76, t(R.string.loading_history));
+                    publishProgressiveProfile(r, token, firstRenderReleaseAt);
                 }
             } finally {
                 finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups);
@@ -5305,75 +5305,6 @@ public class MainActivity extends Activity {
         return best == null ? new PageResult() : best;
     }
 
-    private void invalidateCriticalFriendsCache(String uniqueId, int maxPages) {
-        String cleanId = uniqueId == null ? "" : uniqueId.trim();
-        if (cleanId.isEmpty()) return;
-        int pageLimit = Math.max(1, Math.min(25, maxPages));
-        for (int page = 1; page <= pageLimit; page++) {
-            invalidateFiveMinuteJsonCache(
-                    habbodexListUrl(cleanId, "friends", page, 100)
-            );
-        }
-    }
-
-    private ProfileSectionPayload fetchCriticalFriendsWithDates(
-            String uniqueId,
-            int maxPages
-    ) {
-        ArrayList<JSONObject> combined = new ArrayList<>();
-        String cleanId = uniqueId == null ? "" : uniqueId.trim();
-        if (cleanId.isEmpty()) {
-            return ProfileSectionPayload.list("friends", combined, false);
-        }
-
-        int page = 1;
-        int pageLimit = Math.max(1, Math.min(25, maxPages));
-        int knownTotal = 0;
-        boolean complete = false;
-        HashSet<String> seen = new HashSet<>();
-
-        for (int request = 0; request < pageLimit; request++) {
-            // Para a primeira página, vazio nunca é aceito como sucesso crítico:
-            // perfis sem amigos simplesmente permanecem sem a seção de amigos.
-            PageResult part = fetchCriticalFriendsPage(cleanId, page, 100, page == 1);
-            if (part == null || !part.success) {
-                return ProfileSectionPayload.list("friends", combined, false);
-            }
-            if (part.items == null || part.items.isEmpty()) {
-                if (page == 1) {
-                    return ProfileSectionPayload.list("friends", combined, false);
-                }
-                complete = true;
-                break;
-            }
-            if (!allFriendsHaveAddedDates(part.items)) {
-                return ProfileSectionPayload.list("friends", combined, false);
-            }
-
-            knownTotal = Math.max(knownTotal, part.total);
-            for (JSONObject item : part.items) {
-                if (item == null) continue;
-                String key = stableItemKey(item);
-                if (seen.add(key)) combined.add(item);
-            }
-
-            int nextPage = part.nextPage;
-            if (!part.hasMore || nextPage <= page) {
-                complete = true;
-                break;
-            }
-            if (nextPage > pageLimit) {
-                complete = knownTotal <= 0 || combined.size() >= knownTotal;
-                break;
-            }
-            page = nextPage;
-        }
-
-        if (knownTotal > 0 && combined.size() < knownTotal) complete = false;
-        boolean success = complete && allFriendsHaveAddedDates(combined);
-        return ProfileSectionPayload.list("friends", combined, success);
-    }
-
     private ProfileSectionPayload fetchDirectHabbodexListSection(
             String uniqueId,
             String endpoint,
@@ -5638,15 +5569,19 @@ public class MainActivity extends Activity {
             }
 
             if (r.privateProfile) {
-                r.friends = mergeListsEnrichingPrimary(officialFriends, complementFriends, true);
+                r.friends = r.friendsPagedMode
+                        ? mergeListsEnrichingPrimary(r.friends, officialFriends, false)
+                        : mergeListsEnrichingPrimary(officialFriends, complementFriends, true);
                 r.rooms = mergeListsEnrichingPrimary(officialRooms, complementRooms, true);
                 r.groups = mergeListsEnrichingPrimary(officialGroups, complementGroups, true);
                 r.selectedBadges = mergeListsEnrichingPrimary(officialSelected, complementSelected, true);
                 r.badgesWithAchievements = new ArrayList<>(officialBadges);
             } else {
-                r.friends = official.has("friends")
-                        ? mergeListsEnrichingPrimary(officialFriends, complementFriends, false)
-                        : new ArrayList<>(complementFriends);
+                r.friends = r.friendsPagedMode
+                        ? mergeListsEnrichingPrimary(r.friends, officialFriends, false)
+                        : (official.has("friends")
+                                ? mergeListsEnrichingPrimary(officialFriends, complementFriends, false)
+                                : new ArrayList<>(complementFriends));
                 r.rooms = official.has("rooms")
                         ? mergeListsEnrichingPrimary(officialRooms, complementRooms, false)
                         : new ArrayList<>(complementRooms);
@@ -5663,7 +5598,9 @@ public class MainActivity extends Activity {
         } else if (r.privateProfile || r.officialProfileAttempted) {
             // A fonte complementar assume dados atuais somente em perfil privado
             // ou quando a rota oficial completa realmente não respondeu.
-            r.friends = mergeListsEnrichingPrimary(r.friends, complementFriends, true);
+            if (!r.friendsPagedMode) {
+                r.friends = mergeListsEnrichingPrimary(r.friends, complementFriends, true);
+            }
             r.rooms = mergeListsEnrichingPrimary(r.rooms, complementRooms, true);
             r.groups = mergeListsEnrichingPrimary(r.groups, complementGroups, true);
             r.selectedBadges = mergeListsEnrichingPrimary(r.selectedBadges, complementSelected, true);
@@ -7540,6 +7477,60 @@ public class MainActivity extends Activity {
         return t(R.string.new_badge);
     }
 
+    private void loadMoreFriends(ProfileResult r) {
+        if (r == null || r.friendsLoading || !r.friendsHasMore
+                || r.uniqueId == null || r.uniqueId.trim().isEmpty()) return;
+        final int token = activeSearchToken;
+        final int nextPage = r.friendsNextPage <= 1 ? 2 : r.friendsNextPage;
+        r.friendsLoading = true;
+        executor.execute(() -> {
+            try {
+                PageResult next = fetchCriticalFriendsPage(
+                        r.uniqueId,
+                        nextPage,
+                        100,
+                        false
+                );
+                if (!isActiveToken(token)
+                        || next == null
+                        || !next.success
+                        || next.items == null
+                        || next.items.isEmpty()
+                        || !allFriendsHaveAddedDates(next.items)) return;
+
+                synchronized (r) {
+                    ArrayList<JSONObject> officialFriends = r.officialProfile == null
+                            ? new ArrayList<>()
+                            : extractList(r.officialProfile, "friends");
+                    ArrayList<JSONObject> datedPage = mergeListsEnrichingPrimary(
+                            new ArrayList<>(next.items),
+                            officialFriends,
+                            false
+                    );
+                    r.friends = mergeListsEnrichingPrimary(r.friends, datedPage, true);
+                    r.friendsPagedMode = true;
+                    r.friendsDatesReady = allFriendsHaveAddedDates(r.friends);
+                    if (next.total > 0) r.friendsTotal = Math.max(r.friendsTotal, next.total);
+                    if (!officialFriends.isEmpty()) r.friendsTotal = Math.max(r.friendsTotal, officialFriends.size());
+                    r.friendsNextPage = next.nextPage;
+                    r.friendsHasMore = next.hasMore
+                            || (r.friendsTotal > 0 && r.friends.size() < r.friendsTotal);
+                    if (r.friendsHasMore && r.friendsNextPage <= nextPage) {
+                        r.friendsNextPage = nextPage + 1;
+                    }
+                    reconcileProfileSources(r);
+                    enrichPhotoRoomInfo(r);
+                }
+            } finally {
+                r.friendsLoading = false;
+                runOnUiThread(() -> {
+                    if (!isActiveToken(token)) return;
+                    renderProfile(r);
+                });
+            }
+        });
+    }
+
     private void loadMoreRemovedFriends(ProfileResult r) {
         if (r == null || r.removedFriendsLoading || !r.removedFriendsHasMore
                 || r.uniqueId == null || r.uniqueId.trim().isEmpty()) return;
@@ -7592,7 +7583,8 @@ public class MainActivity extends Activity {
         tabs.setGravity(Gravity.CENTER_VERTICAL);
         c.addView(tabs, lp(-1, dp(58), 0, 0, 0, 14));
 
-        TextView btFriends = tabButton(t(R.string.friends) + " (" + formatCount(friendsList.size()) + ")", true);
+        int visibleFriendsTotal = Math.max(profileResult.friendsTotal, friendsList.size());
+        TextView btFriends = tabButton(t(R.string.friends) + " (" + formatCount(visibleFriendsTotal) + ")", true);
         TextView btRemoved = trashTabButton(false);
 
         tabs.addView(btFriends);
@@ -7631,6 +7623,10 @@ public class MainActivity extends Activity {
                         && profileResult.removedFriendsHasMore
                         && page[0] >= Math.max(1, (int)Math.ceil(profileResult.oldFriends.size() / 10.0))) {
                     loadMoreRemovedFriends(profileResult);
+                } else if (!showingRemoved[0]
+                        && profileResult.friendsHasMore
+                        && page[0] >= Math.max(1, (int)Math.ceil(profileResult.friends.size() / 10.0))) {
+                    loadMoreFriends(profileResult);
                 }
             });
         };
@@ -13751,9 +13747,9 @@ private int loadingProgressFor(String message) {
         c.previousNames = new ArrayList<>(src.previousNames); c.previousMottos = new ArrayList<>(src.previousMottos); c.previousStyles = new ArrayList<>(src.previousStyles); c.photos = new ArrayList<>(src.photos); c.friends = new ArrayList<>(src.friends); c.oldFriends = new ArrayList<>(src.oldFriends); c.rooms = new ArrayList<>(src.rooms); c.oldRooms = new ArrayList<>(src.oldRooms); c.groups = new ArrayList<>(src.groups); c.badges = new ArrayList<>(src.badges); c.badgesWithAchievements = new ArrayList<>(src.badgesWithAchievements); c.totalBadges = src.totalBadges; c.selectedBadges = new ArrayList<>(src.selectedBadges);
         c.allPhotosSource = new ArrayList<>(src.allPhotosSource); c.allStylesSource = new ArrayList<>(src.allStylesSource);
         c.photosNextPage = src.photosNextPage; c.stylesNextPage = src.stylesNextPage; c.photosTotal = src.photosTotal; c.stylesTotal = src.stylesTotal; c.stylesRemoteNextPage = src.stylesRemoteNextPage;
-        c.removedFriendsNextPage = src.removedFriendsNextPage; c.removedFriendsTotal = src.removedFriendsTotal; c.friendsTabPage = src.friendsTabPage;
+        c.removedFriendsNextPage = src.removedFriendsNextPage; c.removedFriendsTotal = src.removedFriendsTotal; c.friendsNextPage = src.friendsNextPage; c.friendsTotal = src.friendsTotal; c.friendsTabPage = src.friendsTabPage;
         c.photosHasMore = src.photosHasMore; c.stylesHasMore = src.stylesHasMore; c.photosLoading = false; c.stylesLoading = false;
-        c.removedFriendsHasMore = src.removedFriendsHasMore; c.removedFriendsLoading = false; c.friendsTabShowingRemoved = src.friendsTabShowingRemoved; c.friendsTabSelectionTouched = src.friendsTabSelectionTouched;
+        c.removedFriendsHasMore = src.removedFriendsHasMore; c.removedFriendsLoading = false; c.friendsHasMore = src.friendsHasMore; c.friendsLoading = false; c.friendsPagedMode = src.friendsPagedMode; c.friendsTabShowingRemoved = src.friendsTabShowingRemoved; c.friendsTabSelectionTouched = src.friendsTabSelectionTouched;
         c.officialProfileAttempted = src.officialProfileAttempted; c.officialPhotosAttempted = src.officialPhotosAttempted; c.officialPhotosSucceeded = src.officialPhotosSucceeded; c.photosFromOfficial = src.photosFromOfficial; c.stylesFromComplement = src.stylesFromComplement; c.stylesRemotePaged = src.stylesRemotePaged; c.friendsDatesReady = src.friendsDatesReady;
         return c;
     }
@@ -15050,9 +15046,9 @@ private int loadingProgressFor(String message) {
         ArrayList<JSONObject> allPhotosSource = new ArrayList<>(), allStylesSource = new ArrayList<>();
         int photosNextPage = 0, stylesNextPage = 0, photosTotal = 0, stylesTotal = 0;
         int stylesRemoteNextPage = 0;
-        int removedFriendsNextPage = 0, removedFriendsTotal = 0, friendsTabPage = 1;
+        int removedFriendsNextPage = 0, removedFriendsTotal = 0, friendsNextPage = 0, friendsTotal = 0, friendsTabPage = 1;
         boolean photosHasMore = false, stylesHasMore = false, photosLoading = false, stylesLoading = false;
-        boolean removedFriendsHasMore = false, removedFriendsLoading = false, friendsTabShowingRemoved = false, friendsTabSelectionTouched = false;
+        boolean removedFriendsHasMore = false, removedFriendsLoading = false, friendsHasMore = false, friendsLoading = false, friendsPagedMode = false, friendsTabShowingRemoved = false, friendsTabSelectionTouched = false;
         boolean officialProfileAttempted = false, officialPhotosAttempted = false, officialPhotosSucceeded = false, photosFromOfficial = false, stylesFromComplement = false, stylesRemotePaged = false, friendsDatesReady = false;
     }
 
