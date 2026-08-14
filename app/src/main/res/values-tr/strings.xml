@@ -17,6 +17,7 @@
     <string name="start_note">Bilgileri görüntülemek için seçili otelin takma adını girin.</string>
     <string name="type_nick_toast">Aramak için bir otel takma adı girin.</string>
     <string name="same_profile_loading">Bu profil zaten yükleniyor.</string>
+    <string name="wait_new_search">Başka bir profil aramadan önce %1$ss bekleyin.</string>
     <string name="wait_refresh">Bu profili tekrar yenilemek için %1$ss bekleyin.</string>
     <string name="updating_profile">Profil güncelleniyor...</string>
     <string name="searching_profile">Profil aranıyor...</string>
@@ -209,7 +210,9 @@
     <string name="ad_badge">REK</string>
     <string name="rarity">Nadirlik</string>
     <string name="rarity_details">Nadirlik ayrıntıları</string>
-    <string name="sponsors_title">SPONSORLAR</string>
+    <string name="sponsors_title">Sponsorlar</string>
+    <string name="sponsor_join_carousel">Katıl</string>
+    <string name="sponsor_manage_carousel">Profilim</string>
     <string name="sponsors_loading">Sponsorlar yükleniyor…</string>
     <string name="sponsors_empty">Öne çıkan ilk sponsor sen ol.</string>
     <string name="sponsors_unavailable">Sponsorlar şu anda yüklenemedi.</string>
@@ -236,6 +239,6 @@
     <string name="supporter_validation_pending">Aboneliğin doğrulanıyor. Birkaç saniye sonra tekrar dene.</string>
     <string name="supporter_server_unavailable">Abonelik etkin, ancak sponsor sunucusu şu anda doğrulanamadı. Tekrar dene.</string>
     <string name="supporter_tutorial_title">Öne çıkan profilini seç</string>
-    <string name="supporter_tutorial_body">Reklam düğmesi artık sponsor düğmen. Öne çıkan profili seçmek veya değiştirmek için dokun.</string>
+    <string name="supporter_tutorial_body">Profilin sponsor döngüsünün son öğesidir. Öne çıkan profili seçmek veya değiştirmek için dokun.</string>
     <string name="supporter_choose_now">Şimdi seç</string>
 </resources>
