@@ -61,7 +61,7 @@ public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_BASE = "https://habbodex.com/api/v1/habboinfo";
     private static final String HABBODEX_FURNIDEX_API = "https://habbodex.com/api/v1/furnidex/furni/from-figure-string";
-    private static final String APP_VERSION = "1.3.30";
+    private static final String APP_VERSION = "1.3.31";
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -118,7 +118,17 @@ public class MainActivity extends Activity {
     private volatile boolean profileSectionsInProgress = false;
     private volatile int inlineProgressPct = 0;
     private volatile String inlineProgressMessage = "";
+    // Em aparelhos mais fracos, várias respostas progressivas podem chegar quase
+    // juntas. Coalescemos redesenhos completos para não destruir/recriar toda a UI
+    // várias vezes no mesmo intervalo curto.
+    private static final long PROGRESSIVE_RENDER_MIN_INTERVAL_MS = 260L;
+    private final Object progressiveRenderLock = new Object();
+    private boolean progressiveRenderScheduled = false;
+    private long lastProgressiveRenderAtMs = 0L;
+    private ProfileResult pendingProgressiveSnapshot = null;
+    private int pendingProgressiveToken = 0;
     private ProfileResult activeRenderedProfile = null;
+    private String lastRememberedOpenedProfileKey = "";
     private final ArrayDeque<ProfileResult> profileHistory = new ArrayDeque<>();
     private static final int PROFILE_HISTORY_LIMIT = 25;
     private int visiblePhotosCount = 20;
@@ -4562,8 +4572,14 @@ public class MainActivity extends Activity {
 
         // O perfil principal já foi liberado. Daqui em diante cada seção é
         // independente: uma rota lenta do histórico não segura as demais.
-        final int taskCount = restrictedProfile ? 6 : 7;
+        // +1 tarefa para emblemas paginados do HabboDex. A seção entra em modo
+        // paginado antes do perfil oficial responder, impedindo que milhares de
+        // emblemas oficiais sejam materializados de uma só vez na interface.
+        final int taskCount = restrictedProfile ? 7 : 8;
         final AtomicInteger pendingGroups = new AtomicInteger(taskCount);
+        synchronized (r) {
+            r.badgesPagedMode = true;
+        }
         // O perfil oficial é iniciado uma única vez e compartilhado. A tarefa de
         // amigos espera este resultado antes de liberar a lista, garantindo que
         // nenhum amigo oficial apareça sem a respectiva data do HabboDex.
@@ -4765,8 +4781,30 @@ public class MainActivity extends Activity {
             }
         });
 
+        // 6) Emblemas: primeira página de 100 pelo HabboDex. O restante é
+        // buscado automaticamente quando o usuário chega ao limite carregado,
+        // exatamente como amigos e amigos removidos.
+        profileSectionsExecutor.execute(() -> {
+            try {
+                sleepCriticalRetry(2);
+                PageResult firstBadges = fetchCriticalBadgesPage(uniqueId, 1, 100, true);
+                if (!isActiveToken(token)) return;
+                if (firstBadges != null && firstBadges.success) {
+                    synchronized (r) {
+                        applyBadgesPage(r, firstBadges, true);
+                        reconcileProfileSources(r);
+                        enrichSelectedBadgesWithOwnership(r);
+                    }
+                    setProfileSectionsProgress(token, 88, t(R.string.loading_history));
+                    publishProgressiveProfile(r, token, firstRenderReleaseAt);
+                }
+            } finally {
+                finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups);
+            }
+        });
+
         if (!restrictedProfile) {
-            // 6) Perfil completo oficial.
+            // 7) Perfil completo oficial.
             profileSectionsExecutor.execute(() -> {
                 try {
                     JSONObject official = awaitFutureValue(officialProfileFuture);
@@ -4788,7 +4826,7 @@ public class MainActivity extends Activity {
                 }
             });
 
-            // 7) Fotos oficiais são totalmente independentes do histórico.
+            // 8) Fotos oficiais são totalmente independentes do histórico.
             profileSectionsExecutor.execute(() -> {
                 try {
                     ProfileSectionPayload photos;
@@ -4824,7 +4862,7 @@ public class MainActivity extends Activity {
                 r.officialPhotosSucceeded = false;
             }
 
-            // 6) Dados exclusivos de perfil privado: somente a primeira página.
+            // 7) Dados exclusivos de perfil privado: somente a primeira página.
             profileSectionsExecutor.execute(() -> {
                 try {
                     JSONObject privateDetails = fetchDirectHabbodexPriorityBatch(
@@ -4851,7 +4889,8 @@ public class MainActivity extends Activity {
             });
         }
 
-        // Emblemas são carregados somente pela API oficial no bloco de perfil.
+        // Emblemas são paginados pelo HabboDex; a API oficial apenas enriquece
+        // metadados dos itens já carregados e mantém a contagem total.
     }
 
     private boolean mayLoadOfficialProfileSections(ProfileResult profile) {
@@ -5196,7 +5235,8 @@ public class MainActivity extends Activity {
         );
         if (profile == null || !isSameProfileId(cleanId, profile)) return null;
         profile.remove("badges");
-        profile.remove("selectedBadges");
+        // selectedBadges é pequeno e útil para trazer Obtido em dos emblemas
+        // selecionados sem baixar a coleção completa.
         profile.remove("totalBadges");
         profile.remove("badgeCount");
         profile.remove("badgesCount");
@@ -5439,22 +5479,41 @@ public class MainActivity extends Activity {
 
         final ProfileResult snapshot;
         synchronized (source) {
-            reconcileProfileSources(source);
-            enrichPhotoRoomInfo(source);
             snapshot = copyProfileResult(source);
         }
-        runOnUiThread(() -> {
-            if (!isActiveToken(token) || searchInProgress || activeRenderedProfile == null) return;
-            if (!sameProfile(activeRenderedProfile, snapshot)
+
+        long delay;
+        synchronized (progressiveRenderLock) {
+            pendingProgressiveSnapshot = snapshot;
+            pendingProgressiveToken = token;
+            if (progressiveRenderScheduled) return;
+            long elapsed = SystemClock.elapsedRealtime() - lastProgressiveRenderAtMs;
+            delay = Math.max(0L, PROGRESSIVE_RENDER_MIN_INTERVAL_MS - elapsed);
+            progressiveRenderScheduled = true;
+        }
+
+        uiHandler.postDelayed(() -> {
+            final ProfileResult pending;
+            final int pendingToken;
+            synchronized (progressiveRenderLock) {
+                pending = pendingProgressiveSnapshot;
+                pendingToken = pendingProgressiveToken;
+                pendingProgressiveSnapshot = null;
+                progressiveRenderScheduled = false;
+                lastProgressiveRenderAtMs = SystemClock.elapsedRealtime();
+            }
+            if (pending == null || !isActiveToken(pendingToken)
+                    || searchInProgress || activeRenderedProfile == null) return;
+            if (!sameProfile(activeRenderedProfile, pending)
                     || !normalizeHotelKey(activeRenderedProfile.hotelKey).equals(
-                            normalizeHotelKey(snapshot.hotelKey)
+                            normalizeHotelKey(pending.hotelKey)
                     )) return;
             final int scrollY = mainScroll == null ? 0 : mainScroll.getScrollY();
-            renderProfile(snapshot);
+            renderProfile(pending);
             if (mainScroll != null && scrollY > 0) {
                 mainScroll.post(() -> mainScroll.scrollTo(0, scrollY));
             }
-        });
+        }, delay);
     }
 
     private void applyOfficialProfileData(ProfileResult r, JSONObject profile) {
@@ -5484,6 +5543,28 @@ public class MainActivity extends Activity {
         if (!value.isEmpty()) r.starGems = value;
         value = firstText(identity, "totalBadges", "badgeCount", "badgesCount", "badgesTotal");
         if (!value.isEmpty()) r.totalBadges = value;
+        if (r.badgesPagedMode && (r.officialBadgeLookup == null || r.officialBadgeLookup.isEmpty())) {
+            ArrayList<JSONObject> officialBadgeList = extractList(profile, "badges");
+            HashMap<String, JSONObject> lookup = new HashMap<>();
+            addBadgesToLookup(lookup, officialBadgeList);
+            r.officialBadgeLookup = lookup;
+            if ((r.totalBadges == null || r.totalBadges.trim().isEmpty()) && !lookup.isEmpty()) {
+                r.totalBadges = String.valueOf(lookup.size());
+            }
+            // Se a primeira página do HabboDex chegou antes do perfil oficial,
+            // enriquece somente os itens já carregados, sem revarrer a coleção
+            // oficial nos próximos renders.
+            if (r.badgesWithAchievements != null && !r.badgesWithAchievements.isEmpty()) {
+                for (JSONObject badge : r.badgesWithAchievements) {
+                    if (badge == null) continue;
+                    String code = firstText(badge, "code", "badgeCode");
+                    if (code.isEmpty()) continue;
+                    JSONObject meta = lookup.get(code.toUpperCase(Locale.ROOT));
+                    if (meta != null) fillMissingJsonFields(badge, meta);
+                }
+                r.badges = withoutAchievementBadges(r.badgesWithAchievements);
+            }
+        }
         r.online = optBoolAny(identity, r.online, "online", "isOnline");
         r.privateProfile = resolveProfilePrivate(
                 r.habboPublic,
@@ -5553,14 +5634,16 @@ public class MainActivity extends Activity {
         ArrayList<JSONObject> complementFriends = extractList(complement, "friends");
         ArrayList<JSONObject> complementRooms = extractList(complement, "rooms");
         ArrayList<JSONObject> complementGroups = extractList(complement, "groups");
-        // Emblemas selecionados também permanecem exclusivos da API oficial.
-        ArrayList<JSONObject> complementSelected = new ArrayList<>();
+        // O HabboDex só enriquece os selecionados com a data de obtenção.
+        ArrayList<JSONObject> complementSelected = extractList(complement, "selectedBadges");
 
         if (official != null) {
             ArrayList<JSONObject> officialFriends = extractList(official, "friends");
             ArrayList<JSONObject> officialRooms = extractList(official, "rooms");
             ArrayList<JSONObject> officialGroups = extractList(official, "groups");
-            ArrayList<JSONObject> officialBadges = extractList(official, "badges");
+            ArrayList<JSONObject> officialBadges = r.badgesPagedMode
+                    ? new ArrayList<>()
+                    : extractList(official, "badges");
             ArrayList<JSONObject> officialSelected = extractList(officialUser, "selectedBadges");
             boolean hasOfficialSelected = officialUser != null && officialUser.has("selectedBadges");
             if (!hasOfficialSelected && r.habboPublic != null && r.habboPublic.has("selectedBadges")) {
@@ -5575,7 +5658,9 @@ public class MainActivity extends Activity {
                 r.rooms = mergeListsEnrichingPrimary(officialRooms, complementRooms, true);
                 r.groups = mergeListsEnrichingPrimary(officialGroups, complementGroups, true);
                 r.selectedBadges = mergeListsEnrichingPrimary(officialSelected, complementSelected, true);
-                r.badgesWithAchievements = new ArrayList<>(officialBadges);
+                r.badgesWithAchievements = r.badgesPagedMode
+                        ? mergeListsEnrichingPrimary(r.badgesWithAchievements, officialBadges, false)
+                        : new ArrayList<>(officialBadges);
             } else {
                 r.friends = r.friendsPagedMode
                         ? mergeListsEnrichingPrimary(r.friends, officialFriends, false)
@@ -5591,9 +5676,15 @@ public class MainActivity extends Activity {
                 r.selectedBadges = hasOfficialSelected
                         ? mergeListsEnrichingPrimary(officialSelected, complementSelected, false)
                         : new ArrayList<>(complementSelected);
-                r.badgesWithAchievements = official.has("badges")
-                        ? new ArrayList<>(officialBadges)
-                        : new ArrayList<>();
+                if (r.badgesPagedMode) {
+                    r.badgesWithAchievements = mergeListsEnrichingPrimary(
+                            r.badgesWithAchievements, officialBadges, false
+                    );
+                } else {
+                    r.badgesWithAchievements = official.has("badges")
+                            ? new ArrayList<>(officialBadges)
+                            : new ArrayList<>();
+                }
             }
         } else if (r.privateProfile || r.officialProfileAttempted) {
             // A fonte complementar assume dados atuais somente em perfil privado
@@ -5604,14 +5695,15 @@ public class MainActivity extends Activity {
             r.rooms = mergeListsEnrichingPrimary(r.rooms, complementRooms, true);
             r.groups = mergeListsEnrichingPrimary(r.groups, complementGroups, true);
             r.selectedBadges = mergeListsEnrichingPrimary(r.selectedBadges, complementSelected, true);
-            // Sem fallback de emblemas via HabboDex.
+            // Emblemas paginados já carregados pelo HabboDex permanecem soberanos.
         }
 
         r.badges = withoutAchievementBadges(r.badgesWithAchievements);
         if (r.badgesWithAchievements != null && !r.badgesWithAchievements.isEmpty()) {
             int declared = 0;
             try { declared = Integer.parseInt(r.totalBadges); } catch(Exception ignored) {}
-            r.totalBadges = String.valueOf(Math.max(declared, r.badgesWithAchievements.size()));
+            int pagedTotal = Math.max(r.badgesTotal, r.badgesWithAchievements.size());
+            r.totalBadges = String.valueOf(Math.max(declared, pagedTotal));
         }
         sortProfileChronologyNewestFirst(r);
 
@@ -5646,9 +5738,9 @@ public class MainActivity extends Activity {
                 profile.rooms,
                 "creationTime", "createdAt", "date", "updatedAt"
         );
-        // Emblemas vêm somente da API oficial e não possuem o histórico de
-        // obtenção do HabboDex; preservar a ordem oficial evita ordenar milhares
-        // de itens inutilmente em cada publicação progressiva.
+        // Emblemas chegam paginados pelo HabboDex, já na ordem da fonte. Não
+        // reordenamos toda a coleção a cada página para manter paginação estável
+        // e evitar trabalho extra em aparelhos mais fracos.
     }
 
     private void sortJsonNewestFirst(ArrayList<JSONObject> items, String... dateKeys) {
@@ -5906,6 +5998,86 @@ public class MainActivity extends Activity {
     }
 
 
+
+    private boolean allBadgesHaveObtainedDates(ArrayList<JSONObject> list) {
+        if (list == null || list.isEmpty()) return true;
+        for (JSONObject badge : list) {
+            if (badge == null) continue;
+            String code = firstText(badge, "code", "badgeCode");
+            if (code.isEmpty()) continue;
+            if (badgeObtainedDate(badge).isEmpty()) return false;
+        }
+        return true;
+    }
+
+    private PageResult fetchCriticalBadgesPage(
+            String uniqueId,
+            int page,
+            int limit,
+            boolean initial
+    ) {
+        PageResult best = null;
+        int attempts = initial ? 3 : 2;
+        String url = habbodexListUrl(uniqueId, "badges", page, limit);
+        for (int attempt = 0; attempt < attempts; attempt++) {
+            if (attempt > 0) {
+                invalidateFiveMinuteJsonCache(url);
+                sleepCriticalRetry(attempt);
+            }
+            PageResult candidate = fetchPage(uniqueId, "badges", "badges", page, limit);
+            if (candidate != null && candidate.success) {
+                best = candidate;
+                boolean empty = candidate.items == null || candidate.items.isEmpty();
+                if (empty) {
+                    // Um 200 vazio pode ser transitório no WebView/HabboDex. Só
+                    // aceita vazio depois de esgotar as tentativas frescas.
+                    if (attempt >= attempts - 1) return candidate;
+                    continue;
+                }
+                if (allBadgesHaveObtainedDates(candidate.items)) return candidate;
+            }
+        }
+        return best == null ? new PageResult() : best;
+    }
+
+    private void applyBadgesPage(ProfileResult r, PageResult page, boolean replace) {
+        if (r == null || page == null || !page.success) return;
+        ArrayList<JSONObject> incoming = page.items == null
+                ? new ArrayList<>()
+                : new ArrayList<>(page.items);
+        // Enriquecimento O(100): consulta somente os códigos desta página no
+        // índice oficial criado uma vez, em vez de percorrer milhares de badges.
+        if (r.officialBadgeLookup != null && !r.officialBadgeLookup.isEmpty()) {
+            for (JSONObject badge : incoming) {
+                if (badge == null) continue;
+                String code = firstText(badge, "code", "badgeCode");
+                if (code.isEmpty()) continue;
+                JSONObject officialMeta = r.officialBadgeLookup.get(code.toUpperCase(Locale.ROOT));
+                if (officialMeta != null) fillMissingJsonFields(badge, officialMeta);
+            }
+        }
+        r.badgesPagedMode = true;
+        r.badgesWithAchievements = replace
+                ? incoming
+                : mergeListsEnrichingPrimary(r.badgesWithAchievements, incoming, true);
+        r.badges = withoutAchievementBadges(r.badgesWithAchievements);
+
+        int declared = 0;
+        try { declared = Integer.parseInt(r.totalBadges); } catch(Exception ignored) {}
+        int officialCount = r.officialBadgeLookup == null ? 0 : r.officialBadgeLookup.size();
+        r.badgesTotal = Math.max(
+                Math.max(r.badgesTotal, page.total),
+                Math.max(declared, Math.max(officialCount, r.badgesWithAchievements.size()))
+        );
+        if (r.badgesTotal > 0) r.totalBadges = String.valueOf(r.badgesTotal);
+        r.badgesNextPage = page.nextPage;
+        r.badgesHasMore = page.hasMore
+                || (r.badgesTotal > 0 && r.badgesWithAchievements.size() < r.badgesTotal);
+        if (r.badgesHasMore && r.badgesNextPage <= page.page) {
+            r.badgesNextPage = page.page + 1;
+        }
+        enrichSelectedBadgesWithOwnership(r);
+    }
 
     private PageResult fetchPage(String uniqueId, String endpoint, String primaryKey, int page, int limit) {
         PageResult out = new PageResult();
@@ -6441,19 +6613,40 @@ public class MainActivity extends Activity {
         HorizontalScrollView hsv = new HorizontalScrollView(this);
         hsv.setHorizontalScrollBarEnabled(false);
         hsv.setFillViewport(true);
-        LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.HORIZONTAL); row.setGravity(Gravity.CENTER);
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER);
         row.setMinimumWidth(getResources().getDisplayMetrics().widthPixels - dp(36));
         row.setPadding(dp(2), dp(2), dp(2), dp(2));
         hsv.addView(row);
         resultWrap.addView(hsv, lp(-1, dp(72), 0, 0, 0, 14));
-        for (int i=0; i<Math.min(list.size(), 12); i++) {
-            JSONObject b = list.get(i); String code = firstText(b, "code", "badgeCode");
-            ImageView img = new ImageView(this); img.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        for (int i = 0; i < Math.min(list.size(), 12); i++) {
+            JSONObject b = list.get(i);
+            String code = firstText(b, "code", "badgeCode");
+
+            FrameLayout cell = new FrameLayout(this);
+            LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(dp(54), dp(58));
+            p.rightMargin = dp(8);
+            row.addView(cell, p);
+
+            ImageView img = new ImageView(this);
+            img.setScaleType(ImageView.ScaleType.FIT_CENTER);
             img.setPadding(dp(2), dp(2), dp(2), dp(2));
-            LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(dp(50), dp(50)); p.rightMargin = dp(10); row.addView(img, p);
+            cell.addView(img, new FrameLayout.LayoutParams(dp(50), dp(50), Gravity.CENTER));
             if (!code.isEmpty()) loadImage(img, badgeImageUrl(code));
+
+            if (isTodayCreationTime(badgeObtainedDate(b))) {
+                TextView newBadge = text(newBadgeLabel(), 8, Color.WHITE, true);
+                newBadge.setGravity(Gravity.CENTER);
+                newBadge.setPadding(dp(5), 0, dp(5), 0);
+                newBadge.setBackground(round(Color.rgb(39, 174, 96), dp(999), Color.argb(95,255,255,255), 1));
+                FrameLayout.LayoutParams nlp = new FrameLayout.LayoutParams(-2, dp(16), Gravity.TOP | Gravity.RIGHT);
+                nlp.topMargin = dp(1);
+                nlp.rightMargin = dp(1);
+                cell.addView(newBadge, nlp);
+            }
             final JSONObject badgeObj = b;
-            img.setOnClickListener(v -> showBadgeDialog(badgeObj));
+            cell.setOnClickListener(v -> showBadgeDialog(badgeObj));
         }
     }
 
@@ -7477,6 +7670,37 @@ public class MainActivity extends Activity {
         return t(R.string.new_badge);
     }
 
+    private void loadMoreBadges(ProfileResult r) {
+        if (r == null || r.badgesLoading || !r.badgesHasMore
+                || r.uniqueId == null || r.uniqueId.trim().isEmpty()) return;
+        final int token = activeSearchToken;
+        final int nextPage = r.badgesNextPage <= 1 ? 2 : r.badgesNextPage;
+        r.badgesLoading = true;
+        executor.execute(() -> {
+            try {
+                PageResult next = fetchCriticalBadgesPage(
+                        r.uniqueId, nextPage, 100, false
+                );
+                if (!isActiveToken(token) || next == null || !next.success) return;
+                synchronized (r) {
+                    applyBadgesPage(r, next, false);
+                    reconcileProfileSources(r);
+                    enrichSelectedBadgesWithOwnership(r);
+                }
+            } finally {
+                r.badgesLoading = false;
+                runOnUiThread(() -> {
+                    if (!isActiveToken(token)) return;
+                    final int scrollY = mainScroll == null ? 0 : mainScroll.getScrollY();
+                    renderProfile(r);
+                    if (mainScroll != null && scrollY > 0) {
+                        mainScroll.post(() -> mainScroll.scrollTo(0, scrollY));
+                    }
+                });
+            }
+        });
+    }
+
     private void loadMoreFriends(ProfileResult r) {
         if (r == null || r.friendsLoading || !r.friendsHasMore
                 || r.uniqueId == null || r.uniqueId.trim().isEmpty()) return;
@@ -7848,9 +8072,12 @@ public class MainActivity extends Activity {
         ArrayList<JSONObject> normal = r.badges == null ? new ArrayList<>() : r.badges;
         ArrayList<JSONObject> withAchievements = r.badgesWithAchievements == null ? new ArrayList<>() : r.badgesWithAchievements;
 
-        int total = 0;
-        try { total = Integer.parseInt(String.valueOf(r.totalBadges)); } catch(Exception ignored) {}
+        int total = Math.max(0, r.badgesTotal);
+        try { total = Math.max(total, Integer.parseInt(String.valueOf(r.totalBadges))); } catch(Exception ignored) {}
         total = Math.max(total, Math.max(normal.size(), withAchievements.size()));
+        // Em modo remoto paginado, não mostra uma grade vazia enquanto a
+        // primeira página do HabboDex ainda está chegando.
+        if (r.badgesPagedMode && normal.isEmpty() && withAchievements.isEmpty()) return;
         if (total <= 0 && normal.isEmpty() && withAchievements.isEmpty()) return;
 
         LinearLayout c = sectionCard(t(R.string.badges), total, true);
@@ -7860,8 +8087,8 @@ public class MainActivity extends Activity {
         controls.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
         c.addView(controls, lp(-1, dp(46), 0, 0, 0, 10));
 
-        final boolean[] hideAchievementBadges = {true};
-        final int[] page = {1};
+        final boolean[] hideAchievementBadges = {r.hideAchievementBadges};
+        final int[] page = {Math.max(1, r.badgesTabPage)};
 
         TextView hideLabel = text(t(R.string.hide_badges), 15, lightTheme ? Color.rgb(33,33,33) : Color.WHITE, true);
         hideLabel.setGravity(Gravity.CENTER_VERTICAL);
@@ -7881,19 +8108,39 @@ public class MainActivity extends Activity {
         Runnable[] render = new Runnable[1];
         render[0] = () -> {
             content.removeAllViews();
-
             hideToggle.setText("");
             hideToggle.setBackground(new AchievementSwitchDrawable(hideAchievementBadges[0]));
-            
-            ArrayList<JSONObject> data = hideAchievementBadges[0] ? normal : withAchievements;
+
+            ArrayList<JSONObject> data = hideAchievementBadges[0] ? r.badges : r.badgesWithAchievements;
             if (data == null) data = new ArrayList<>();
+            int loadedPages = Math.max(1, (int)Math.ceil(data.size() / 24.0));
+            if (page[0] > loadedPages) page[0] = loadedPages;
+            r.badgesTabPage = page[0];
+            r.hideAchievementBadges = hideAchievementBadges[0];
+
             renderBadgePage(content, data, page[0], 24);
-            renderPager(content, data.size(), 24, page, render[0]);
+            final ArrayList<JSONObject> currentData = data;
+            renderPager(content, currentData.size(), 24, page, render[0], () -> {
+                r.badgesTabPage = page[0];
+                r.hideAchievementBadges = hideAchievementBadges[0];
+                if (r.badgesHasMore
+                        && page[0] >= Math.max(1, (int)Math.ceil(currentData.size() / 24.0))) {
+                    loadMoreBadges(r);
+                }
+            });
+            if (r.badgesHasMore && currentData.size() <= 24 && !r.badgesLoading) {
+                uiHandler.post(() -> loadMoreBadges(r));
+            }
+            if (r.badgesLoading) {
+                content.addView(centerNote(t(R.string.loading_history)));
+            }
         };
 
         View.OnClickListener toggleAction = v -> {
             hideAchievementBadges[0] = !hideAchievementBadges[0];
+            r.hideAchievementBadges = hideAchievementBadges[0];
             page[0] = 1;
+            r.badgesTabPage = 1;
             render[0].run();
         };
         hideToggle.setOnClickListener(toggleAction);
@@ -8648,10 +8895,11 @@ private int loadingProgressFor(String message) {
                 unwrap(tryJson(habbodexProfileUrl(cleanId)))
         );
         if (profile == null || !isSameProfileId(cleanId, profile)) return null;
-        // O HabboDex continua servindo históricos, nunca emblemas. Remove também
-        // campos eventualmente embutidos no payload completo para impedir merge.
+        // A coleção completa de emblemas não entra pelo payload de perfil; ela
+        // usa a rota paginada /badges. selectedBadges permanece por ser pequena.
         profile.remove("badges");
-        profile.remove("selectedBadges");
+        // selectedBadges é pequeno e útil para trazer Obtido em dos emblemas
+        // selecionados sem baixar a coleção completa.
         profile.remove("totalBadges");
         profile.remove("badgeCount");
         profile.remove("badgesCount");
@@ -9347,11 +9595,12 @@ private int loadingProgressFor(String message) {
         String quotedUrl = JSONObject.quote(url);
         String script = "(function(){var token=" + quotedToken + ";var id=" + quotedId + ";var u=" + quotedUrl + ";"
                 + "var send=function(o){try{ToxicNative.deliver(token,id,JSON.stringify(o));}catch(e){}};"
+                + "var isBadgeList=/\\/badges(?:\\?|$)/i.test(u);"
                 + "var scrub=function(o,d){if(!o||typeof o!=='object'||d>3)return;"
-                + "['badges','selectedBadges','badgeList','achievementBadges','achievements'].forEach(function(k){try{if(Object.prototype.hasOwnProperty.call(o,k))delete o[k];}catch(e){}});"
+                + "['badges','badgeList','achievementBadges','achievements'].forEach(function(k){try{if(Object.prototype.hasOwnProperty.call(o,k))delete o[k];}catch(e){}});"
                 + "['data','profile','user','habbo','result'].forEach(function(k){try{scrub(o[k],d+1);}catch(e){}});};"
                 + "fetch(u,{method:'GET',credentials:'include',cache:'no-store',headers:{'Accept':'application/json,text/plain,*/*'}})"
-                + ".then(function(r){return r.text().then(function(t){var body=t;try{var j=JSON.parse(t);scrub(j,0);body=JSON.stringify(j);}catch(e){}"
+                + ".then(function(r){return r.text().then(function(t){var body=t;try{var j=JSON.parse(t);if(!isBadgeList)scrub(j,0);body=JSON.stringify(j);}catch(e){}"
                 + "send({ok:r.ok,status:r.status,url:r.url||u,contentType:r.headers.get('content-type')||'',body:body});});})"
                 + ".catch(function(e){send({ok:false,status:0,url:u,error:String(e),body:''});});})();";
 
@@ -13567,6 +13816,10 @@ private int loadingProgressFor(String message) {
         String hotel = normalizeHotelKey(r.hotelKey);
         if (hotel.isEmpty()) hotel = currentHotelKey;
         String key = profileIdentityKey(hotel, r.uniqueId, r.name);
+        // Um perfil progressivo pode ser redesenhado várias vezes; não regrava
+        // o mesmo histórico em SharedPreferences a cada pequena atualização.
+        if (key.equals(lastRememberedOpenedProfileKey)) return;
+        lastRememberedOpenedProfileKey = key;
         for (int i = openedProfilesHistory.size() - 1; i >= 0; i--) {
             ProfileHistoryItem item = openedProfilesHistory.get(i);
             if (profileIdentityKey(item.hotelKey, item.uniqueId, item.nick).equals(key)) openedProfilesHistory.remove(i);
@@ -13743,13 +13996,13 @@ private int loadingProgressFor(String message) {
         if (src == null) return c;
         c.searchedNick = src.searchedNick; c.uniqueId = src.uniqueId; c.name = src.name; c.motto = src.motto; c.figure = src.figure; c.memberSince = src.memberSince; c.lastAccess = src.lastAccess; c.level = src.level; c.starGems = src.starGems; c.hotelKey = src.hotelKey;
         c.online = src.online; c.privateProfile = src.privateProfile; c.banned = src.banned;
-        c.habboPublic = src.habboPublic; c.dex = src.dex; c.suggest = src.suggest; c.dexProfile = src.dexProfile; c.officialProfile = src.officialProfile;
+        c.habboPublic = src.habboPublic; c.dex = src.dex; c.suggest = src.suggest; c.dexProfile = src.dexProfile; c.officialProfile = src.officialProfile; c.officialBadgeLookup = src.officialBadgeLookup;
         c.previousNames = new ArrayList<>(src.previousNames); c.previousMottos = new ArrayList<>(src.previousMottos); c.previousStyles = new ArrayList<>(src.previousStyles); c.photos = new ArrayList<>(src.photos); c.friends = new ArrayList<>(src.friends); c.oldFriends = new ArrayList<>(src.oldFriends); c.rooms = new ArrayList<>(src.rooms); c.oldRooms = new ArrayList<>(src.oldRooms); c.groups = new ArrayList<>(src.groups); c.badges = new ArrayList<>(src.badges); c.badgesWithAchievements = new ArrayList<>(src.badgesWithAchievements); c.totalBadges = src.totalBadges; c.selectedBadges = new ArrayList<>(src.selectedBadges);
         c.allPhotosSource = new ArrayList<>(src.allPhotosSource); c.allStylesSource = new ArrayList<>(src.allStylesSource);
         c.photosNextPage = src.photosNextPage; c.stylesNextPage = src.stylesNextPage; c.photosTotal = src.photosTotal; c.stylesTotal = src.stylesTotal; c.stylesRemoteNextPage = src.stylesRemoteNextPage;
-        c.removedFriendsNextPage = src.removedFriendsNextPage; c.removedFriendsTotal = src.removedFriendsTotal; c.friendsNextPage = src.friendsNextPage; c.friendsTotal = src.friendsTotal; c.friendsTabPage = src.friendsTabPage;
+        c.removedFriendsNextPage = src.removedFriendsNextPage; c.removedFriendsTotal = src.removedFriendsTotal; c.friendsNextPage = src.friendsNextPage; c.friendsTotal = src.friendsTotal; c.friendsTabPage = src.friendsTabPage; c.badgesNextPage = src.badgesNextPage; c.badgesTotal = src.badgesTotal; c.badgesTabPage = src.badgesTabPage;
         c.photosHasMore = src.photosHasMore; c.stylesHasMore = src.stylesHasMore; c.photosLoading = false; c.stylesLoading = false;
-        c.removedFriendsHasMore = src.removedFriendsHasMore; c.removedFriendsLoading = false; c.friendsHasMore = src.friendsHasMore; c.friendsLoading = false; c.friendsPagedMode = src.friendsPagedMode; c.friendsTabShowingRemoved = src.friendsTabShowingRemoved; c.friendsTabSelectionTouched = src.friendsTabSelectionTouched;
+        c.removedFriendsHasMore = src.removedFriendsHasMore; c.removedFriendsLoading = false; c.friendsHasMore = src.friendsHasMore; c.friendsLoading = false; c.friendsPagedMode = src.friendsPagedMode; c.friendsTabShowingRemoved = src.friendsTabShowingRemoved; c.friendsTabSelectionTouched = src.friendsTabSelectionTouched; c.badgesHasMore = src.badgesHasMore; c.badgesLoading = false; c.badgesPagedMode = src.badgesPagedMode; c.hideAchievementBadges = src.hideAchievementBadges;
         c.officialProfileAttempted = src.officialProfileAttempted; c.officialPhotosAttempted = src.officialPhotosAttempted; c.officialPhotosSucceeded = src.officialPhotosSucceeded; c.photosFromOfficial = src.photosFromOfficial; c.stylesFromComplement = src.stylesFromComplement; c.stylesRemotePaged = src.stylesRemotePaged; c.friendsDatesReady = src.friendsDatesReady;
         return c;
     }
@@ -15042,13 +15295,16 @@ private int loadingProgressFor(String message) {
         String searchedNick = "", uniqueId = "", name = "", motto = "", figure = "", memberSince = "", lastAccess = "", level = "", starGems = "", totalBadges = "", hotelKey = "br";
         boolean online = false, privateProfile = false, banned = false;
         JSONObject habboPublic, dex, suggest, dexProfile, officialProfile;
+        HashMap<String, JSONObject> officialBadgeLookup = new HashMap<>();
         ArrayList<JSONObject> previousNames = new ArrayList<>(), previousMottos = new ArrayList<>(), previousStyles = new ArrayList<>(), photos = new ArrayList<>(), friends = new ArrayList<>(), oldFriends = new ArrayList<>(), rooms = new ArrayList<>(), oldRooms = new ArrayList<>(), groups = new ArrayList<>(), selectedBadges = new ArrayList<>(), badges = new ArrayList<>(), badgesWithAchievements = new ArrayList<>();
         ArrayList<JSONObject> allPhotosSource = new ArrayList<>(), allStylesSource = new ArrayList<>();
         int photosNextPage = 0, stylesNextPage = 0, photosTotal = 0, stylesTotal = 0;
         int stylesRemoteNextPage = 0;
         int removedFriendsNextPage = 0, removedFriendsTotal = 0, friendsNextPage = 0, friendsTotal = 0, friendsTabPage = 1;
+        int badgesNextPage = 0, badgesTotal = 0, badgesTabPage = 1;
         boolean photosHasMore = false, stylesHasMore = false, photosLoading = false, stylesLoading = false;
         boolean removedFriendsHasMore = false, removedFriendsLoading = false, friendsHasMore = false, friendsLoading = false, friendsPagedMode = false, friendsTabShowingRemoved = false, friendsTabSelectionTouched = false;
+        boolean badgesHasMore = false, badgesLoading = false, badgesPagedMode = false, hideAchievementBadges = true;
         boolean officialProfileAttempted = false, officialPhotosAttempted = false, officialPhotosSucceeded = false, photosFromOfficial = false, stylesFromComplement = false, stylesRemotePaged = false, friendsDatesReady = false;
     }
 
