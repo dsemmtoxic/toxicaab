@@ -58,7 +58,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_PROXY_API = "https://atoxic.com.br/habbodex.php";
-    private static final String APP_VERSION = "1.3.21";
+    private static final String APP_VERSION = "1.3.22";
     private static final long PROFILE_MIN_LOADING_MS = 4_000L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -4380,7 +4380,9 @@ public class MainActivity extends Activity {
         }
         if (base == null) throw new ProfileNotFoundException(r.searchedNick, new ArrayList<>());
 
-        if (r.uniqueId.isEmpty()) r.uniqueId = firstText(base, "uniqueId", "id", "habboId");
+        if (r.uniqueId.isEmpty()) r.uniqueId = firstText(
+                base, "uniqueId", "habboUniqueId", "id", "habboId"
+        );
         r.name = firstText(base, "name", "username", "habboName");
         if (r.name.isEmpty()) r.name = r.searchedNick;
         r.figure = firstText(base, "figureString", "figure", "figure_string");
@@ -4459,7 +4461,7 @@ public class MainActivity extends Activity {
         r.dex = complementByName;
         r.dexProfile = complementByName;
         r.suggest = suggest;
-        r.uniqueId = firstText(base, "uniqueId", "id", "habboId");
+        r.uniqueId = firstText(base, "uniqueId", "habboUniqueId", "id", "habboId");
         r.name = firstText(base, "name", "username", "habboName");
         if (r.name.isEmpty()) r.name = nick;
         r.figure = firstText(base, "figureString", "figure", "figure_string");
@@ -4531,7 +4533,7 @@ public class MainActivity extends Activity {
         }
         updateLoadingSkeletonProgress(token, 8);
         final AtomicInteger pendingGroups = new AtomicInteger(
-                restrictedProfile ? 1 : 2
+                restrictedProfile ? 2 : 3
         );
         final String earlySections = "previous-names,previous-mottos,previous-styles";
         final String laterSections = "friends,previous-friends,badges";
@@ -4544,8 +4546,12 @@ public class MainActivity extends Activity {
         final Future<JSONObject> earlyHistoryFuture = executor.submit(
                 () -> fetchDirectHabbodexPriorityBatch(uniqueId, earlySections)
         );
-        final Future<JSONObject> laterHistoryFuture = executor.submit(
-                () -> fetchDirectHabbodexPriorityBatch(uniqueId, laterSections)
+        // O endpoint completo e a rota /previous-names não são equivalentes no
+        // HabboDex. O site consulta o perfil completo com prioridade porque é
+        // nele que previousNames aparece com mais consistência. A mesma resposta
+        // também serve de reserva para seções que falharem no lote.
+        final Future<JSONObject> historicalProfileFuture = executor.submit(
+                () -> fetchDirectHabbodexProfile(uniqueId)
         );
         final Future<ProfileSectionPayload> officialPhotosFuture = restrictedProfile
                 ? null
@@ -4564,16 +4570,6 @@ public class MainActivity extends Activity {
                         );
                     }
                 });
-        final Future<JSONObject> privateDetailsFuture = restrictedProfile
-                ? executor.submit(() -> unwrap(tryJson(
-                        habbodexBatchUrl(
-                                uniqueId,
-                                true,
-                                "rooms,groups,photos"
-                        )
-                )))
-                : null;
-
         if (restrictedProfile) {
             synchronized (r) {
                 // A API pública por nome/ID já forneceu a identidade. Em perfil
@@ -4612,12 +4608,92 @@ public class MainActivity extends Activity {
 
         profileSectionsExecutor.execute(() -> {
             try {
+                JSONObject historicalProfile = awaitFutureValue(
+                        historicalProfileFuture
+                );
+                if (!isActiveToken(token) || historicalProfile == null) return;
+                synchronized (r) {
+                    applyComplementProfileData(
+                            r,
+                            mergeComplementPayloads(
+                                    historicalProfile,
+                                    r.dexProfile
+                            )
+                    );
+                    reconcileProfileSources(r);
+                    enrichPhotoRoomInfo(r);
+                }
+                setProfileSectionsProgress(
+                        token,
+                        36,
+                        t(R.string.loading_history)
+                );
+                publishProgressiveProfile(r, token, firstRenderReleaseAt);
+            } finally {
+                finishProfileSectionsGroup(
+                        r,
+                        token,
+                        firstRenderReleaseAt,
+                        pendingGroups
+                );
+            }
+        });
+
+        profileSectionsExecutor.execute(() -> {
+            try {
                 JSONObject early = awaitFutureValue(earlyHistoryFuture);
                 if (!isActiveToken(token)) return;
+                final JSONObject earlyProfileFallback;
+                synchronized (r) {
+                    earlyProfileFallback = copyJsonObject(r.dexProfile);
+                }
+
+                ProfileSectionPayload earlyNames = historySectionFromBatch(
+                        early,
+                        "previousNames"
+                );
+                ProfileSectionPayload earlyMottos = historySectionFromBatch(
+                        early,
+                        "previousMottos"
+                );
+                ProfileSectionPayload earlyStyles = historySectionFromBatch(
+                        early,
+                        "previousStyles"
+                );
+                if (!earlyNames.items.isEmpty()
+                        || !earlyMottos.items.isEmpty()
+                        || !earlyStyles.items.isEmpty()) {
+                    synchronized (r) {
+                        if (!earlyNames.items.isEmpty()) {
+                            putComplementSectionLocked(
+                                    r, "previousNames", earlyNames.items
+                            );
+                        }
+                        if (!earlyMottos.items.isEmpty()) {
+                            putComplementSectionLocked(
+                                    r, "previousMottos", earlyMottos.items
+                            );
+                        }
+                        if (!earlyStyles.items.isEmpty()) {
+                            putComplementSectionLocked(
+                                    r, "previousStyles", earlyStyles.items
+                            );
+                        }
+                        reconcileProfileSources(r);
+                        enrichPhotoRoomInfo(r);
+                    }
+                    setProfileSectionsProgress(
+                            token,
+                            44,
+                            t(R.string.loading_history)
+                    );
+                    publishProgressiveProfile(r, token, firstRenderReleaseAt);
+                }
 
                 Future<ProfileSectionPayload> namesSectionFuture = executor.submit(
                         () -> historySectionWithDirectFallback(
                                 early,
+                                earlyProfileFallback,
                                 uniqueId,
                                 "previous-names",
                                 "previousNames",
@@ -4627,6 +4703,7 @@ public class MainActivity extends Activity {
                 Future<ProfileSectionPayload> stylesSectionFuture = executor.submit(
                         () -> historySectionWithDirectFallback(
                                 early,
+                                earlyProfileFallback,
                                 uniqueId,
                                 "previous-styles",
                                 "previousStyles",
@@ -4636,6 +4713,7 @@ public class MainActivity extends Activity {
                 Future<ProfileSectionPayload> mottosSectionFuture = executor.submit(
                         () -> historySectionWithDirectFallback(
                                 early,
+                                earlyProfileFallback,
                                 uniqueId,
                                 "previous-mottos",
                                 "previousMottos",
@@ -4706,11 +4784,61 @@ public class MainActivity extends Activity {
                     publishProgressiveProfile(r, token, firstRenderReleaseAt);
                 }
 
-                JSONObject later = awaitFutureValue(laterHistoryFuture);
+                // As seções menos prioritárias só começam depois que nomes,
+                // missões e visuais foram aplicados. Isso reduz rajadas de
+                // requisições simultâneas ao HabboDex e evita respostas parciais.
+                JSONObject later = fetchDirectHabbodexPriorityBatch(
+                        uniqueId,
+                        laterSections
+                );
+                final JSONObject laterProfileFallback;
+                synchronized (r) {
+                    laterProfileFallback = copyJsonObject(r.dexProfile);
+                }
                 if (!isActiveToken(token)) return;
+
+                ProfileSectionPayload laterFriends = historySectionFromBatch(
+                        later,
+                        "friends"
+                );
+                ProfileSectionPayload laterRemoved = historySectionFromBatch(
+                        later,
+                        "previousFriends"
+                );
+                ProfileSectionPayload laterBadges = historySectionFromBatch(
+                        later,
+                        "badges"
+                );
+                if (!laterFriends.items.isEmpty()
+                        || !laterRemoved.items.isEmpty()
+                        || !laterBadges.items.isEmpty()) {
+                    synchronized (r) {
+                        if (!laterFriends.items.isEmpty()) {
+                            putComplementSectionLocked(r, "friends", laterFriends.items);
+                        }
+                        if (!laterRemoved.items.isEmpty()) {
+                            putComplementSectionLocked(
+                                    r, "previousFriends", laterRemoved.items
+                            );
+                        }
+                        if (!laterBadges.items.isEmpty()) {
+                            putComplementSectionLocked(r, "badges", laterBadges.items);
+                        }
+                        reconcileProfileSources(r);
+                        enrichPhotoRoomInfo(r);
+                    }
+                    setProfileSectionsProgress(
+                            token,
+                            78,
+                            t(R.string.loading_history)
+                    );
+                    publishProgressiveProfile(r, token, firstRenderReleaseAt);
+                }
+
                 Future<ProfileSectionPayload> friendsSectionFuture = executor.submit(
                         () -> historySectionWithDirectFallback(
                                 later,
+                                laterProfileFallback,
                                 uniqueId,
                                 "friends",
                                 "friends",
@@ -4720,6 +4848,7 @@ public class MainActivity extends Activity {
                 Future<ProfileSectionPayload> removedSectionFuture = executor.submit(
                         () -> historySectionWithDirectFallback(
                                 later,
+                                laterProfileFallback,
                                 uniqueId,
                                 "previous-friends",
                                 "previousFriends",
@@ -4729,6 +4858,7 @@ public class MainActivity extends Activity {
                 Future<ProfileSectionPayload> badgesSectionFuture = executor.submit(
                         () -> historySectionWithDirectFallback(
                                 later,
+                                laterProfileFallback,
                                 uniqueId,
                                 "badges",
                                 "badges",
@@ -4775,9 +4905,18 @@ public class MainActivity extends Activity {
                 publishProgressiveProfile(r, token, firstRenderReleaseAt);
 
                 if (restrictedProfile) {
-                    JSONObject privateDetails = awaitFutureValue(privateDetailsFuture);
+                    JSONObject privateDetails = fetchDirectHabbodexPriorityBatch(
+                            uniqueId,
+                            true,
+                            "rooms,groups,photos"
+                    );
+                    final JSONObject privateProfileFallback;
+                    synchronized (r) {
+                        privateProfileFallback = copyJsonObject(r.dexProfile);
+                    }
                     ProfileSectionPayload rooms = historySectionWithDirectFallback(
                             privateDetails,
+                            privateProfileFallback,
                             uniqueId,
                             "rooms",
                             "rooms",
@@ -4785,6 +4924,7 @@ public class MainActivity extends Activity {
                     );
                     ProfileSectionPayload groups = historySectionWithDirectFallback(
                             privateDetails,
+                            privateProfileFallback,
                             uniqueId,
                             "groups",
                             "groups",
@@ -4792,6 +4932,7 @@ public class MainActivity extends Activity {
                     );
                     ProfileSectionPayload photos = historySectionWithDirectFallback(
                             privateDetails,
+                            privateProfileFallback,
                             uniqueId,
                             "photos",
                             "photos",
@@ -4885,9 +5026,21 @@ public class MainActivity extends Activity {
             String uniqueId,
             String sections
     ) {
+        return fetchDirectHabbodexPriorityBatch(uniqueId, false, sections);
+    }
+
+    private JSONObject fetchDirectHabbodexPriorityBatch(
+            String uniqueId,
+            boolean includePrivate,
+            String sections
+    ) {
         String cleanId = uniqueId == null ? "" : uniqueId.trim();
         if (cleanId.isEmpty()) return null;
-        return unwrap(tryJson(habbodexBatchUrl(cleanId, false, sections)));
+        return unwrap(tryJson(habbodexBatchUrl(
+                cleanId,
+                includePrivate,
+                sections
+        )));
     }
 
     private ProfileSectionPayload historySectionFromBatch(
@@ -4899,11 +5052,10 @@ public class MainActivity extends Activity {
         }
         ArrayList<JSONObject> items = extractList(batch, key);
         JSONObject errors = batch.optJSONObject("errors");
-        boolean success = batch.has(key) && (errors == null || !errors.has(key));
-        if (batch.optBoolean("partial", false)
-                && (errors == null || errors.length() == 0)) {
-            success = false;
-        }
+        // "partial" descreve o lote inteiro. Uma falha em amigos não deve
+        // invalidar nomes, visuais ou missões que já vieram corretamente.
+        boolean success = hasNamedListDeep(batch, key)
+                && (errors == null || !errors.has(key));
         JSONObject totals = batch.optJSONObject("totals");
         if (totals != null && totals.has(key)
                 && totals.optInt(key, items.size()) > items.size()) {
@@ -4914,13 +5066,31 @@ public class MainActivity extends Activity {
 
     private ProfileSectionPayload historySectionWithDirectFallback(
             JSONObject batch,
+            JSONObject profileFallback,
             String uniqueId,
             String endpoint,
             String key,
             int maxPages
     ) {
         ProfileSectionPayload fromBatch = historySectionFromBatch(batch, key);
-        if (fromBatch.success) return fromBatch;
+        ProfileSectionPayload fromProfile = ProfileSectionPayload.list(
+                key,
+                extractList(profileFallback, key),
+                hasNamedListDeep(profileFallback, key)
+        );
+        ArrayList<JSONObject> available = mergeListsEnrichingPrimary(
+                fromBatch.items,
+                fromProfile.items,
+                true
+        );
+        boolean confirmEmptyPreviousNames = "previousNames".equals(key)
+                && available.isEmpty();
+        if (!confirmEmptyPreviousNames && (
+                fromBatch.success
+                || (fromProfile.success && !available.isEmpty())
+        )) {
+            return ProfileSectionPayload.list(key, available, true);
+        }
 
         ProfileSectionPayload fromList = fetchDirectHabbodexListSection(
                 uniqueId,
@@ -4929,14 +5099,14 @@ public class MainActivity extends Activity {
                 maxPages
         );
         ArrayList<JSONObject> combined = mergeListsEnrichingPrimary(
-                fromBatch.items,
+                available,
                 fromList.items,
                 true
         );
         return ProfileSectionPayload.list(
                 key,
                 combined,
-                fromList.success
+                fromList.success || fromProfile.success
         );
     }
 
@@ -4960,9 +5130,19 @@ public class MainActivity extends Activity {
         boolean complete = false;
 
         for (int request = 0; request < pageLimit; request++) {
+            boolean responseFromApi = false;
             JSONObject response = unwrap(tryJson(
                     habbodexListUrl(cleanId, endpoint, page, limit)
             ));
+            if (response == null) {
+                // Mesmo conteúdo do HabboDex, agora solicitado pelo api.php do
+                // próprio projeto. Isso cobre chave ausente/incorreta no APK e
+                // bloqueios pontuais do proxy direto sem trocar a fonte.
+                response = unwrap(tryJson(
+                        apiHabbodexListUrl(cleanId, endpoint, page, limit)
+                ));
+                responseFromApi = true;
+            }
             if (response == null
                     || (response.has("ok") && !response.optBoolean("ok", true))) {
                 return ProfileSectionPayload.list(key, combined, false);
@@ -4970,6 +5150,21 @@ public class MainActivity extends Activity {
             received = true;
 
             ArrayList<JSONObject> items = extractDirectHistoryItems(response, key);
+            if (!responseFromApi && request == 0 && page == 1
+                    && "previousNames".equals(key)
+                    && items.isEmpty()) {
+                JSONObject confirmed = unwrap(tryJson(
+                        apiHabbodexListUrl(cleanId, endpoint, page, limit)
+                ));
+                ArrayList<JSONObject> confirmedItems = extractDirectHistoryItems(
+                        confirmed,
+                        key
+                );
+                if (confirmed != null && !confirmedItems.isEmpty()) {
+                    response = confirmed;
+                    items = confirmedItems;
+                }
+            }
             combined = mergeListsEnrichingPrimary(combined, items, true);
             knownTotal = Math.max(knownTotal, extractTotalCount(response));
 
@@ -5087,7 +5282,9 @@ public class MainActivity extends Activity {
         JSONObject user = profile.optJSONObject("user");
         JSONObject identity = user != null ? user : profile;
 
-        String value = firstText(identity, "uniqueId", "id", "habboId");
+        String value = firstText(
+                identity, "uniqueId", "habboUniqueId", "id", "habboId"
+        );
         if (!value.isEmpty()) r.uniqueId = value;
         value = firstText(identity, "name", "username", "habboName");
         if (!value.isEmpty()) r.name = value;
@@ -5370,23 +5567,45 @@ public class MainActivity extends Activity {
             for (JSONObject item : primary) {
                 if (item == null) continue;
                 out.add(item);
-                byKey.put(stableItemKey(item), item);
+                for (String key : matchingItemKeys(item)) byKey.put(key, item);
             }
         }
         if (supplement != null) {
             for (JSONObject item : supplement) {
                 if (item == null) continue;
-                String key = stableItemKey(item);
-                JSONObject target = byKey.get(key);
+                ArrayList<String> keys = matchingItemKeys(item);
+                JSONObject target = null;
+                for (String key : keys) {
+                    target = byKey.get(key);
+                    if (target != null) break;
+                }
                 if (target != null) {
                     fillMissingJsonFields(target, item);
+                    for (String key : matchingItemKeys(target)) byKey.put(key, target);
                 } else if (appendMissing) {
                     out.add(item);
-                    byKey.put(key, item);
+                    for (String key : keys) byKey.put(key, item);
                 }
             }
         }
         return out;
+    }
+
+    private ArrayList<String> matchingItemKeys(JSONObject item) {
+        ArrayList<String> keys = new ArrayList<>();
+        if (item == null) return keys;
+        String id = normalizeNickKey(firstText(
+                item, "uniqueId", "habboUniqueId", "habboId", "userId", "id"
+        ));
+        String badge = normalizeNickKey(firstText(item, "badgeCode", "code"));
+        String name = normalizeNickKey(firstText(
+                item, "name", "username", "habboName", "nickname"
+        ));
+        if (!id.isEmpty()) keys.add("id:" + id);
+        if (!badge.isEmpty()) keys.add("badge:" + badge);
+        if (!name.isEmpty()) keys.add("name:" + name);
+        if (keys.isEmpty()) keys.add(stableItemKey(item));
+        return keys;
     }
 
     private void fillMissingJsonFields(JSONObject target, JSONObject supplement) {
@@ -7948,6 +8167,37 @@ private int loadingProgressFor(String message) {
         return HABBODEX_PROXY_API + "?action=profile&id=" + enc(uniqueId);
     }
 
+    private String apiHabbodexProfileUrl(String uniqueId) {
+        return PROFILE_API
+                + "/habboinfo/" + enc(uniqueId)
+                + "?hotel=" + enc(normalizeHotelKey(currentHotelKey))
+                + "&complementOnly=true";
+    }
+
+    private String apiHabbodexListUrl(
+            String uniqueId,
+            String endpoint,
+            int page,
+            int limit
+    ) {
+        return PROFILE_API
+                + "/habboinfo/" + enc(uniqueId)
+                + "/" + enc(endpoint)
+                + "?hotel=" + enc(normalizeHotelKey(currentHotelKey))
+                + "&complementOnly=true"
+                + "&page=" + Math.max(1, page)
+                + "&limit=" + Math.max(1, Math.min(100, limit));
+    }
+
+    private String apiHabbodexProfileByNameUrl(String name, String hotelKey) {
+        String hotel = normalizeHotelKey(hotelKey);
+        return PROFILE_API
+                + "/habboinfo/" + enc(hotel)
+                + "/habbo?name=" + enc(name)
+                + "&hotel=" + enc(hotel)
+                + "&complementOnly=true";
+    }
+
     private String habbodexSuggestUrl(String name) {
         return habbodexSuggestUrl(name, currentHotelKey);
     }
@@ -7965,7 +8215,15 @@ private int loadingProgressFor(String message) {
     private JSONObject fetchDirectHabbodexSuggestions(String name, String hotelKey) {
         String clean = name == null ? "" : name.trim();
         if (clean.isEmpty()) return null;
-        return unwrap(tryJson(habbodexSuggestUrl(clean, hotelKey)));
+        JSONObject direct = unwrap(tryJson(habbodexSuggestUrl(clean, hotelKey)));
+        if (direct != null && (
+                !extractSuggestionUsers(direct).isEmpty()
+                || validProfileObject(direct) != null
+        )) return direct;
+        JSONObject profile = extractHabbodexProfilePayload(unwrap(tryJson(
+                apiHabbodexProfileByNameUrl(clean, hotelKey)
+        )));
+        return suggestionsFromProfile(profile);
     }
 
     private JSONObject suggestionsFromProfile(JSONObject profile) {
@@ -8021,7 +8279,9 @@ private int loadingProgressFor(String message) {
                 : previousNameMatch;
         if (candidate == null) return null;
 
-        String uniqueId = firstText(candidate, "uniqueId", "id", "habboId");
+        String uniqueId = firstText(
+                candidate, "uniqueId", "habboUniqueId", "id", "habboId"
+        );
         JSONObject fullProfile = fetchDirectHabbodexProfile(uniqueId);
         return fullProfile != null ? fullProfile : validProfileObject(candidate);
     }
@@ -8061,8 +8321,19 @@ private int loadingProgressFor(String message) {
     private JSONObject fetchDirectHabbodexProfile(String uniqueId) {
         String cleanId = uniqueId == null ? "" : uniqueId.trim();
         if (cleanId.isEmpty()) return null;
-        JSONObject profile = validProfileObject(unwrap(tryJson(habbodexProfileUrl(cleanId))));
-        return profile != null && isSameProfileId(cleanId, profile) ? profile : null;
+        JSONObject profile = extractHabbodexProfilePayload(
+                unwrap(tryJson(habbodexProfileUrl(cleanId)))
+        );
+        if (profile != null && isSameProfileId(cleanId, profile)) return profile;
+
+        // O api.php atual consulta somente HabboDex para complementos. Ele é
+        // usado aqui como segundo transporte, não como outra fonte de dados.
+        JSONObject fallback = extractHabbodexProfilePayload(
+                unwrap(tryJson(apiHabbodexProfileUrl(cleanId)))
+        );
+        return fallback != null && isSameProfileId(cleanId, fallback)
+                ? fallback
+                : null;
     }
 
     private JSONObject fetchDirectHabbodexHistoricalComplement(
@@ -8093,7 +8364,9 @@ private int loadingProgressFor(String message) {
 
         JSONObject directProfile = batch.optJSONObject("profile");
         if (directProfile != null) {
-            String returnedId = firstText(directProfile, "uniqueId", "id", "habboId");
+            String returnedId = firstText(
+                    directProfile, "uniqueId", "habboUniqueId", "id", "habboId"
+            );
             if (!returnedId.isEmpty() && !normalizeNickKey(cleanId).equals(normalizeNickKey(returnedId))) {
                 return null;
             }
@@ -8479,16 +8752,83 @@ private int loadingProgressFor(String message) {
                 || status.contains("banido")
                 || status.contains("banida");
     }
+    private boolean hasProfileIdentity(JSONObject obj) {
+        return obj != null && !firstText(
+                obj,
+                "uniqueId", "habboUniqueId", "id", "habboId",
+                "name", "username", "habboName",
+                "figureString", "figure"
+        ).isEmpty();
+    }
+
+    private void addProfileCandidate(
+            ArrayList<JSONObject> candidates,
+            JSONObject candidate
+    ) {
+        if (candidate == null || candidates == null) return;
+        for (JSONObject existing : candidates) if (existing == candidate) return;
+        candidates.add(candidate);
+    }
+
+    private JSONObject extractHabbodexProfilePayload(JSONObject payload) {
+        JSONObject root = unwrap(payload);
+        if (root == null) return null;
+
+        ArrayList<JSONObject> candidates = new ArrayList<>();
+        JSONObject data = root.optJSONObject("data");
+        JSONObject nestedPayload = root.optJSONObject("payload");
+        addProfileCandidate(candidates, data == null ? null : data.optJSONObject("profile"));
+        addProfileCandidate(candidates, root.optJSONObject("profile"));
+        addProfileCandidate(candidates, data);
+        addProfileCandidate(candidates, root.optJSONObject("user"));
+        addProfileCandidate(candidates, root.optJSONObject("habbo"));
+        addProfileCandidate(candidates, data == null ? null : data.optJSONObject("user"));
+        addProfileCandidate(candidates, data == null ? null : data.optJSONObject("habbo"));
+        addProfileCandidate(candidates, nestedPayload == null ? null : nestedPayload.optJSONObject("profile"));
+        addProfileCandidate(candidates, nestedPayload);
+        addProfileCandidate(candidates, root);
+
+        JSONObject withHistory = null;
+        JSONObject withIdentity = null;
+        for (JSONObject candidate : candidates) {
+            if (withHistory == null && (
+                    hasNamedListDeep(candidate, "previousNames")
+                    || hasNamedListDeep(candidate, "previousMottos")
+                    || hasNamedListDeep(candidate, "previousStyles")
+                    || hasNamedListDeep(candidate, "friends")
+            )) {
+                withHistory = candidate;
+            }
+            if (withIdentity == null && hasProfileIdentity(candidate)) {
+                withIdentity = candidate;
+            }
+        }
+
+        JSONObject selected = withHistory != null ? withHistory : withIdentity;
+        if (selected == null) return null;
+        if (withIdentity == null || selected == withIdentity) return selected;
+
+        JSONObject merged = copyJsonObject(selected);
+        if (merged == null) return selected;
+        fillMissingJsonFields(merged, withIdentity);
+        return merged;
+    }
+
     private JSONObject validProfileObject(JSONObject obj) {
         if (obj == null) return null;
         if (obj.has("ok") && !obj.optBoolean("ok", true) && !obj.has("data")) return null;
-        if (!firstText(obj, "uniqueId", "id", "habboId", "name", "username", "habboName", "figureString", "figure").isEmpty()) return obj;
-        JSONObject d = obj.optJSONObject("data");
-        if (d != null && !firstText(d, "uniqueId", "id", "habboId", "name", "username", "habboName", "figureString", "figure").isEmpty()) return d;
-        return null;
+        JSONObject profile = extractHabbodexProfilePayload(obj);
+        return hasProfileIdentity(profile) ? profile : null;
     }
 
-    private JSONObject unwrap(JSONObject obj) { if (obj == null) return null; if (obj.has("ok") && obj.has("data")) { Object data = obj.opt("data"); return data instanceof JSONObject ? (JSONObject)data : obj; } return obj; }
+    private JSONObject unwrap(JSONObject obj) {
+        if (obj == null) return null;
+        if (obj.has("ok") && obj.has("data")) {
+            Object data = obj.opt("data");
+            return data instanceof JSONObject ? unwrap((JSONObject)data) : obj;
+        }
+        return obj;
+    }
     private JSONObject firstObject(JSONObject... objects) { for (JSONObject o : objects) if (o != null && o.length() > 0) return o; return null; }
     private JSONObject firstFromList(JSONObject obj) { ArrayList<JSONObject> list = extractList(obj, null); return list.isEmpty() ? null : list.get(0); }
 
@@ -8507,6 +8847,8 @@ private int loadingProgressFor(String message) {
     private ArrayList<JSONObject> extractPreviousNamesFromUser(JSONObject user) {
         ArrayList<JSONObject> out = new ArrayList<>();
         if (user == null) return out;
+        out = extractList(user, "previousNames");
+        if (!out.isEmpty() || hasNamedListDeep(user, "previousNames")) return out;
         JSONArray values = user.optJSONArray("previousNames");
         JSONObject data = user.optJSONObject("data");
         if (values == null && data != null) values = data.optJSONArray("previousNames");
@@ -8548,54 +8890,7 @@ private int loadingProgressFor(String message) {
     private ArrayList<JSONObject> extractList(JSONObject data, String primaryKey) {
         ArrayList<JSONObject> out = new ArrayList<>();
         if (data == null) return out;
-        JSONArray arr = null;
-        if (primaryKey != null && !primaryKey.isEmpty()) arr = data.optJSONArray(primaryKey);
-        if (arr == null && isHistoricalKey(primaryKey, "previousNames", "names", "oldNames")) {
-            arr = firstJsonArray(data, "previousNames", "names", "oldNames", "nameHistory");
-        }
-        if (arr == null && isHistoricalKey(primaryKey, "previousMottos", "mottos", "missions")) {
-            arr = firstJsonArray(data, "previousMottos", "mottos", "missions", "previousMissions");
-        }
-        if (arr == null && isHistoricalKey(primaryKey, "previousStyles", "styles", "looks")) {
-            arr = firstJsonArray(data, "previousStyles", "styles", "looks", "previousLooks");
-        }
-        if (arr == null && isHistoricalKey(primaryKey, "previousFriends", "removedFriends")) {
-            arr = firstJsonArray(data, "previousFriends", "removedFriends", "oldFriends");
-        }
-        if (arr == null) arr = data.optJSONArray("result");
-        if (arr == null) arr = data.optJSONArray("results");
-        if (arr == null) arr = data.optJSONArray("data");
-        if (arr == null) arr = data.optJSONArray("items");
-        if (arr == null) arr = data.optJSONArray("history");
-        if (arr == null) arr = data.optJSONArray("list");
-        if (arr == null) arr = data.optJSONArray("habbos");
-        if (arr == null) arr = data.optJSONArray("users");
-        if (arr == null) arr = data.optJSONArray("profiles");
-        JSONObject d = data.optJSONObject("data");
-        if (d == null) d = data.optJSONObject("payload");
-        if (arr == null && d != null) {
-            if (primaryKey != null && !primaryKey.isEmpty()) arr = d.optJSONArray(primaryKey);
-            if (arr == null && isHistoricalKey(primaryKey, "previousNames", "names", "oldNames")) {
-                arr = firstJsonArray(d, "previousNames", "names", "oldNames", "nameHistory");
-            }
-            if (arr == null && isHistoricalKey(primaryKey, "previousMottos", "mottos", "missions")) {
-                arr = firstJsonArray(d, "previousMottos", "mottos", "missions", "previousMissions");
-            }
-            if (arr == null && isHistoricalKey(primaryKey, "previousStyles", "styles", "looks")) {
-                arr = firstJsonArray(d, "previousStyles", "styles", "looks", "previousLooks");
-            }
-            if (arr == null && isHistoricalKey(primaryKey, "previousFriends", "removedFriends")) {
-                arr = firstJsonArray(d, "previousFriends", "removedFriends", "oldFriends");
-            }
-            if (arr == null) arr = d.optJSONArray("result");
-            if (arr == null) arr = d.optJSONArray("results");
-            if (arr == null) arr = d.optJSONArray("items");
-            if (arr == null) arr = d.optJSONArray("history");
-            if (arr == null) arr = d.optJSONArray("list");
-            if (arr == null) arr = d.optJSONArray("habbos");
-            if (arr == null) arr = d.optJSONArray("users");
-            if (arr == null) arr = d.optJSONArray("profiles");
-        }
+        JSONArray arr = findListArrayDeep(data, primaryKey, 0);
         if (arr != null) {
             for (int i = 0; i < arr.length(); i++) {
                 Object value = arr.opt(i);
@@ -8606,6 +8901,93 @@ private int loadingProgressFor(String message) {
             }
         }
         return out;
+    }
+
+    private String[] namedListKeys(String primaryKey) {
+        if (isHistoricalKey(primaryKey, "previousNames", "names", "oldNames")) {
+            return new String[]{
+                    "previousNames", "previous_names", "names",
+                    "oldNames", "old_names", "nameHistory", "name_history"
+            };
+        }
+        if (isHistoricalKey(primaryKey, "previousMottos", "mottos", "missions")) {
+            return new String[]{
+                    "previousMottos", "previous_mottos", "mottos", "missions",
+                    "previousMissions", "previous_missions", "mottoHistory", "motto_history"
+            };
+        }
+        if (isHistoricalKey(primaryKey, "previousStyles", "styles", "looks")) {
+            return new String[]{
+                    "previousStyles", "previous_styles", "styles", "looks",
+                    "previousLooks", "previous_looks", "lookHistory", "look_history"
+            };
+        }
+        if (isHistoricalKey(primaryKey, "previousFriends", "removedFriends")) {
+            return new String[]{
+                    "previousFriends", "previous_friends", "removedFriends",
+                    "removed_friends", "oldFriends", "old_friends"
+            };
+        }
+        if (primaryKey == null || primaryKey.trim().isEmpty()) return new String[0];
+        return new String[]{primaryKey};
+    }
+
+    private JSONArray findNamedListAtLevel(JSONObject object, String primaryKey) {
+        if (object == null) return null;
+        for (String key : namedListKeys(primaryKey)) {
+            JSONArray value = object.optJSONArray(key);
+            if (value != null) return value;
+        }
+        return null;
+    }
+
+    private JSONArray findNamedListDeep(
+            JSONObject object,
+            String primaryKey,
+            int depth
+    ) {
+        if (object == null || depth > 4) return null;
+        JSONArray direct = findNamedListAtLevel(object, primaryKey);
+        if (direct != null) return direct;
+
+        String[] wrappers = new String[]{"data", "payload", "profile", "user", "habbo"};
+        for (String wrapper : wrappers) {
+            JSONObject child = object.optJSONObject(wrapper);
+            JSONArray nested = findNamedListDeep(child, primaryKey, depth + 1);
+            if (nested != null) return nested;
+        }
+        return null;
+    }
+
+    private boolean hasNamedListDeep(JSONObject object, String primaryKey) {
+        return findNamedListDeep(object, primaryKey, 0) != null;
+    }
+
+    private JSONArray findListArrayDeep(
+            JSONObject object,
+            String primaryKey,
+            int depth
+    ) {
+        if (object == null || depth > 4) return null;
+        JSONArray direct = findNamedListAtLevel(object, primaryKey);
+        if (direct != null) return direct;
+
+        String[] genericKeys = new String[]{
+                "result", "results", "data", "items", "history", "list",
+                "habbos", "users", "profiles"
+        };
+        for (String key : genericKeys) {
+            JSONArray value = object.optJSONArray(key);
+            if (value != null) return value;
+        }
+
+        String[] wrappers = new String[]{"data", "payload", "profile", "user", "habbo"};
+        for (String wrapper : wrappers) {
+            JSONObject child = object.optJSONObject(wrapper);
+            JSONArray nested = findListArrayDeep(child, primaryKey, depth + 1);
+            if (nested != null) return nested;
+        }
+        return null;
     }
 
     private JSONArray firstJsonArray(JSONObject object, String... keys) {
@@ -8647,21 +9029,59 @@ private int loadingProgressFor(String message) {
     private JSONObject normalizeHistoricalItem(JSONObject item, String primaryKey) {
         if (item == null) return null;
         try {
-            if (isHistoricalKey(primaryKey, "previousNames", "names", "oldNames")) {
+            // Algumas rotas do HabboDex mantêm a identidade em user/habbo e
+            // deixam a data no objeto externo. Achata apenas os campos usados
+            // pelo aplicativo para que amigos e emblemas oficiais recebam datas.
+            JSONObject identity = item.optJSONObject("user");
+            if (identity == null) identity = item.optJSONObject("habbo");
+            if (identity == null) identity = item.optJSONObject("profile");
+            if (identity != null) {
+                putIfMissing(item, "uniqueId", firstText(
+                        identity, "uniqueId", "habboUniqueId", "id", "habboId", "userId"
+                ));
                 putIfMissing(item, "name", firstText(
-                        item, "oldName", "previousName", "username", "nickname", "value"
+                        identity, "name", "username", "habboName", "nickname"
                 ));
-            } else if (isHistoricalKey(primaryKey, "previousMottos", "mottos", "missions")) {
-                putIfMissing(item, "text", firstText(
-                        item, "motto", "mission", "previousMotto", "value"
-                ));
-            } else if (isHistoricalKey(primaryKey, "previousStyles", "styles", "looks")) {
                 putIfMissing(item, "figureString", firstText(
-                        item, "figure", "figure_string", "look", "previousFigure", "value"
+                        identity, "figureString", "figure", "figure_string", "look"
                 ));
             }
 
-            String id = firstText(item, "uniqueId", "id", "habboId", "userId");
+            JSONObject badge = item.optJSONObject("badge");
+            if (badge != null) {
+                putIfMissing(item, "badgeCode", firstText(
+                        badge, "badgeCode", "code", "id"
+                ));
+                putIfMissing(item, "code", firstText(
+                        badge, "code", "badgeCode", "id"
+                ));
+                putIfMissing(item, "name", firstText(
+                        badge, "name", "title"
+                ));
+                putIfMissing(item, "description", firstText(
+                        badge, "description", "desc"
+                ));
+            }
+
+            if (isHistoricalKey(primaryKey, "previousNames", "names", "oldNames")) {
+                putIfMissing(item, "name", firstText(
+                        item, "oldName", "old_name", "previousName", "previous_name",
+                        "username", "nickname", "value"
+                ));
+            } else if (isHistoricalKey(primaryKey, "previousMottos", "mottos", "missions")) {
+                putIfMissing(item, "text", firstText(
+                        item, "motto", "mission", "previousMotto", "previous_motto", "value"
+                ));
+            } else if (isHistoricalKey(primaryKey, "previousStyles", "styles", "looks")) {
+                putIfMissing(item, "figureString", firstText(
+                        item, "figure", "figure_string", "look", "previousFigure",
+                        "previous_figure", "previousLook", "previous_look", "value"
+                ));
+            }
+
+            String id = firstText(
+                    item, "uniqueId", "habboUniqueId", "id", "habboId", "userId"
+            );
             putIfMissing(item, "uniqueId", id);
             String figure = firstText(item, "figureString", "figure", "figure_string", "look");
             putIfMissing(item, "figureString", figure);
@@ -8671,7 +9091,9 @@ private int loadingProgressFor(String message) {
                     "changedAt", "removedAt", "leftAt", "obtainedAt", "acquiredAt",
                     "receivedAt", "creationTime", "friendSince", "addedAt",
                     "createdAt", "date", "timestamp", "datetime",
-                    "changed_at", "removed_at", "created_at", "observedAt", "updatedAt"
+                    "changed_at", "removed_at", "created_at", "observedAt", "updatedAt",
+                    "since", "friendshipSince", "friend_since", "detectedAt",
+                    "detected_at", "detectionDate", "firstSeenAt", "first_seen_at"
             );
             if (isHistoricalKey(primaryKey, "previousNames", "names", "oldNames",
                     "previousMottos", "mottos", "missions", "previousStyles", "styles", "looks")) {
@@ -8700,12 +9122,18 @@ private int loadingProgressFor(String message) {
     private void addUnique(ArrayList<JSONObject> out, HashSet<String> seen, ArrayList<JSONObject> src) { for (JSONObject o : src) { String key = stableItemKey(o); if (seen.add(key)) out.add(o); } }
     private String stableItemKey(JSONObject o) {
         if (o == null) return String.valueOf(System.identityHashCode(o));
-        String key = firstText(o, "uniqueId", "id", "badgeCode", "code");
-        if (!key.isEmpty()) return key;
-        String figure = firstText(o, "figureString", "figure");
+        String id = normalizeNickKey(firstText(
+                o, "uniqueId", "habboUniqueId", "habboId", "userId", "id"
+        ));
+        if (!id.isEmpty()) return "id:" + id;
+        String badge = normalizeNickKey(firstText(o, "badgeCode", "code"));
+        if (!badge.isEmpty()) return "badge:" + badge;
+        String figure = normalizeNickKey(firstText(o, "figureString", "figure"));
         String when = firstText(o, "changedAt", "date", "createdAt", "creationTime", "time");
         if (!figure.isEmpty() || !when.isEmpty()) return "fig:" + figure + "|" + when;
-        String name = firstText(o, "name", "username", "habboName", "motto");
+        String name = normalizeNickKey(firstText(
+                o, "name", "username", "habboName", "motto", "text", "mission"
+        ));
         if (!name.isEmpty() || !when.isEmpty()) return "txt:" + name + "|" + when;
         return String.valueOf(o.toString().hashCode());
     }
@@ -12325,15 +12753,17 @@ private int loadingProgressFor(String message) {
     private boolean isSameProfileObject(JSONObject a, JSONObject b) {
         if (a == null || b == null) return false;
         if (a == b) return true;
-        String aId = normalizeNickKey(firstText(a, "uniqueId", "id", "habboId"));
-        String bId = normalizeNickKey(firstText(b, "uniqueId", "id", "habboId"));
+        String aId = normalizeNickKey(firstText(a, "uniqueId", "habboUniqueId", "id", "habboId"));
+        String bId = normalizeNickKey(firstText(b, "uniqueId", "habboUniqueId", "id", "habboId"));
         return !aId.isEmpty() && aId.equals(bId);
     }
 
     private boolean isSameProfileId(String expectedUniqueId, JSONObject obj) {
         String expected = normalizeNickKey(expectedUniqueId);
         if (expected.isEmpty() || obj == null) return false;
-        String actual = normalizeNickKey(firstText(obj, "uniqueId", "id", "habboId"));
+        String actual = normalizeNickKey(firstText(
+                obj, "uniqueId", "habboUniqueId", "id", "habboId"
+        ));
         return !actual.isEmpty() && expected.equals(actual);
     }
 
