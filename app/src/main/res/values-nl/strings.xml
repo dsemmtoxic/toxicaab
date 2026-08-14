@@ -17,6 +17,7 @@
     <string name="start_note">Voer een bijnaam van het geselecteerde hotel in om de informatie te bekijken.</string>
     <string name="type_nick_toast">Voer een hotelbijnaam in om te zoeken.</string>
     <string name="same_profile_loading">Dit profiel wordt al geladen.</string>
+    <string name="wait_new_search">Wacht %1$ss voordat je een ander profiel zoekt.</string>
     <string name="wait_refresh">Wacht %1$ss voordat je dit profiel opnieuw ververst.</string>
     <string name="updating_profile">Profiel bijwerken...</string>
     <string name="searching_profile">Profiel zoeken...</string>
@@ -209,7 +210,9 @@
     <string name="ad_badge">ADV</string>
     <string name="rarity">Zeldzaamheid</string>
     <string name="rarity_details">Details van de zeldzaamheid</string>
-    <string name="sponsors_title">SPONSORS</string>
+    <string name="sponsors_title">Sponsors</string>
+    <string name="sponsor_join_carousel">Doe mee</string>
+    <string name="sponsor_manage_carousel">Mijn profiel</string>
     <string name="sponsors_loading">Sponsors laden…</string>
     <string name="sponsors_empty">Word de eerste uitgelichte sponsor.</string>
     <string name="sponsors_unavailable">Sponsors kunnen nu niet worden geladen.</string>
@@ -236,6 +239,6 @@
     <string name="supporter_validation_pending">Je abonnement wordt gevalideerd. Probeer het over een paar seconden opnieuw.</string>
     <string name="supporter_server_unavailable">Het abonnement is actief, maar de sponsorserver kon nu niet worden gevalideerd. Probeer opnieuw.</string>
     <string name="supporter_tutorial_title">Kies je uitgelichte profiel</string>
-    <string name="supporter_tutorial_body">De advertentieknop is nu je sponsorknop. Tik erop om het uitgelichte profiel te kiezen of te wijzigen.</string>
+    <string name="supporter_tutorial_body">Je profiel is het laatste item in de sponsorcarrousel. Tik erop om het uitgelichte profiel te kiezen of te wijzigen.</string>
     <string name="supporter_choose_now">Nu kiezen</string>
 </resources>
