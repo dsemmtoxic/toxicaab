@@ -17,6 +17,7 @@
     <string name="start_note">Inserisci un nick dell\'hotel selezionato per consultare le informazioni.</string>
     <string name="type_nick_toast">Inserisci un nick dell\'hotel per cercare.</string>
     <string name="same_profile_loading">Questo profilo è già in caricamento.</string>
+    <string name="wait_new_search">Attendi %1$ss prima di cercare un altro profilo.</string>
     <string name="wait_refresh">Attendi %1$ss prima di aggiornare di nuovo questo profilo.</string>
     <string name="updating_profile">Aggiornamento profilo...</string>
     <string name="searching_profile">Ricerca profilo...</string>
@@ -209,7 +210,9 @@
     <string name="ad_badge">PUB</string>
     <string name="rarity">Rarità</string>
     <string name="rarity_details">Dettagli della rarità</string>
-    <string name="sponsors_title">SPONSOR</string>
+    <string name="sponsors_title">Sponsor</string>
+    <string name="sponsor_join_carousel">Partecipa</string>
+    <string name="sponsor_manage_carousel">Il mio profilo</string>
     <string name="sponsors_loading">Caricamento sponsor…</string>
     <string name="sponsors_empty">Diventa il primo sponsor in evidenza.</string>
     <string name="sponsors_unavailable">Impossibile caricare gli sponsor ora.</string>
@@ -236,6 +239,6 @@
     <string name="supporter_validation_pending">Convalida dell’abbonamento. Riprova tra qualche secondo.</string>
     <string name="supporter_server_unavailable">L’abbonamento è attivo, ma non è stato possibile convalidare il server degli sponsor. Riprova.</string>
     <string name="supporter_tutorial_title">Scegli il profilo in evidenza</string>
-    <string name="supporter_tutorial_body">Il pulsante degli annunci ora è il tuo pulsante sponsor. Toccalo per scegliere o cambiare il profilo in evidenza.</string>
+    <string name="supporter_tutorial_body">Il tuo profilo è l’ultimo elemento del carosello sponsor. Toccalo per scegliere o cambiare il profilo in evidenza.</string>
     <string name="supporter_choose_now">Scegli ora</string>
 </resources>
