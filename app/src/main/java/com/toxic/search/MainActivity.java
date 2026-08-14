@@ -61,15 +61,129 @@ public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_BASE = "https://habbodex.com/api/v1/habboinfo";
     private static final String HABBODEX_FURNIDEX_API = "https://habbodex.com/api/v1/furnidex/furni/from-figure-string";
-    private static final String APP_VERSION = "1.3.33";
+    private static final String APP_VERSION = "1.3.34";
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
     // os ícones nunca desapareçam por bloqueio de rede ou cache externo.
+    // Índice técnico embutido do HabboNews: liga cada código de roupa (ex.: ch-240)
+    // ao mesmo ícone de raridade usado no iframe. Ele era aplicado no api.php;
+    // como o perfil agora consulta o HabboDex diretamente, o índice passou para o APK.
+    private static final String HABBONEWS_TRANSPARENT_ICON = "OuxYRCz";
+    private static final String HABBONEWS_RARITY_SEED_GZIP_BASE64 =
+            "H4sIAAAAAAACA3WdSc9lN3Jg/0uuKwEyRlK7gntYNNyD7QYM71SpzJJcUqNgVVc2YNR/bzzetN69ZBzgW3yI80gGg8F5uP/+4a8fvuu/+/DHz//n8799/5fP" +
+            "P/z+Lx+++yBN4mMbH1v/p9a+W3//8uF3H376y+dffv3w3b9/+PHfPvbW1n8fvut/+90l8E3Q91/0/ReyC3QX2C7wXRC7ILdkvR2CLYjvmvquqcv+C90Fdgj2" +
+            "OHz/xZ4Xz10w4ymIPAS5C8YumJtg9KdgNNkEff+FjF2wRTp2ewzd49A9FdVdYLvAd0HsgtwFu6a6a7oX1LBdU9s1tV1T2zXdC3vYrqntmtquqe2a7g4zfNfU" +
+            "d01919R3TXenG75r6rumvmvqu6axaxq7prFrGrumsWu61+wRu6axaxq7prFrurcOI3dNc9c0d01z13Tsqcw9lbmnMvdU5paKtma7ZK+X2rrskr2l0iZHKDli" +
+            "3ltibXvN0mZHzHbEbEcu7Ehrd3xtuwtq2w2oPU5JPyRySHZ9eh6/mXZIdmvIYUPZ67OKH7/xI54jp3LkS3Z/U9nbdJW9DVeVla+fPnz3Ib//+V+7/f2H34gT" +
+            "udrGilxtQEUCw1xVqyQY2wgiV30oCYUxRXI1DBWZlB/vv8X2z//l6z/7py9vgmGkIaFS8KunrAhq7VgK0QS0jkaxxVu3PQz6QVzNdUkop/H2kJ/mv/zf//zz" +
+            "f3qTjmEUCWqQQem8S3sj2RwJ+UG2JNJJt+yYjhgSsmi+fWfXQJWIUS3Jd5nuYdAT810K+um/25/+/n++SRIZ5KM5HAlqPSaFmQ0J+dtoVINHZ0KlMDrp9m0E" +
+            "XcVmqJuRJ34bXVbEf7P1v/70+Q8//FV+I0HW+TbQqgi28QNr8BRKZwqV6VTSYBrVrOlkg5lIBtWSib4zJ2owoZZYo37BmkCds0b9grVJsfWeSEi3LmBr69S6" +
+            "WH/76Pf/+6v+/L/+65sohQnUOoTI6HUbYp3aEOsD80NjChPq603ePe0P/6/99fd/0t/Iuy4cROuW3CSNyNt3Ng30bdHNBupkA33beg8TGFuCx9t8l/azDbH5" +
+            "bke//OMf/vH3f/j1TcCi3vpAAm2iN4VS8G+zkoL0NmutvVOL5P1dG/fY3n3wTkwotiQbCPUlLkbWEWphXdKJDCTkb6403nEVsrVKJ0KtmCv1P65JFtUBNct1" +
+            "DNJgkO/opPxYI+uYJoXRgYQ0MPutfP7b1//xhy9/9/1vJJw0oDbRvSmk49QvuBv0P/5tebKKzWF87f4eOexhIknrpFrvWHKOJedvv97Suc2MtnTiPfY/wgSF" +
+            "QYsGtmKBvhPoO4HWidGQUJ3LTvU0uxDB1jLRQ9LJDzKpFDKV0pmYnwmzKR8Nxi5+G19vuo1B5TNoZOezCxKqWVOMwqgSCUyH1gJ8Yo8xydbReiMioFs0hV4z" +
+            "mjoRd4otlMLkIDJQt2H1CCUa9Y2BI+LokkQSSjuEZoch1J+GUH8aOB4N7WQDpdWI0E4WVSxtNbKbog10QmsZRjOjMOlElPJjTlrf+tMtp0Z9VlgkkYmxTYrN" +
+            "G9Usb2RRf49D/ulP7ad/+Af/jVBLMf25jfbDxz7aLvBNMPdfzO0X0touOH4RuyB3wdgF8ymIPZXYU4m+/6Lvv5D9F3L8InZB7oKxCzZNtT13dJZEDokeEjsk" +
+            "fkjikOQhGYdk17DvxtTe+iGRQ6KHxA6JH5JdZ3+v4NxXCBZJIFGvvS2iSIxIPfP44bVuW87CX0TKtvqH10qeQpjRKbZRt5Q/vNaqgkjdUv7w0Vr3Wje79cxP" +
+            "i1oPsJv1BLuZtHIkuIgiMSSOJIgEk0QyiOQkMhoSSkcHWNSbIqlHnIuArf22jrYTZwKl4NoDSSIZSMCibgoWda/3JxcxDAO+4zEotsDyiWFInMiEeupplNPE" +
+            "0s45kJBFhyaSgQRjQ63HwNgGxjYpttmhFKI1sE40aneiUbsTjdqdaNTuRKN2J1pLJAPJJCKdbEB1IZpgfgTzI5gfwfwYxmYYm3FsaJ2knHZPJBRbd7L1bf1+" +
+            "i02oFQvpGBvmRwaGmdCGhAaMKcK0XP1bJJCQbka1PoxqfRi1VWEeoLW/a8ltTvLpx4/yGJsvgW8C2X8h+y90/4Xuv7D9F7b/wvdf+P6Lx0GhJTh+Ebsgn4LY" +
+            "NY1d09g1jV3T2DWNXdOI/Rdx/GJX7HHm7SXIPY7c4xj7L8b+i7n/4jH/+fTjx/GYOCyB7QLfBbELcheMXbBlbnTZBbsefddjd8vRdz36rkff9ei7HrtrD9kN" +
+            "JLumsmsqu6Z79Riya7oX5cjjF3tecs9L7nnZ3WGMPS9jz8vY8zL2vOwupa31Q3L8Zi9NbXtxautHqN3U2vbaqk3P3xxpaRySsUvsSN2OUDZ3iR/6+GENP0LF" +
+            "EWqv/drySH33AO17LdK+t93aez8kckj0kOyl0w+r9r2h1K6HhnH85shpH0fMh4/1eYSae95lb7lU9mZH5cipHDk9ujuVww/lsIboEc9hDbHjN4fXHb2eHn2Y" +
+            "Sh55n7s+Wg5bL6JEVJAYEkcSRKwhQQ0c8xOJZBBJjC1Rg/KI6YtYo/xYDySktclAghpgyZkqEkxHMR0sHzNMx9AGjukMDDPQbgNjm1g+syPBnE7UbaJuk2zt" +
+            "R+9ZbyNchFL23pAkEtRJMIxwGLK+K+qGHujogY5th0e1GbrIqI65XUSIcIlhOxDdkURxiOkiiWEGhZHq+PMi2pAEkiTiZIPAmhvvNnePLVDr8qDQRVCDRA2G" +
+            "IFEkXmwvXySQYPmMCSRlQE5TJhF1sFuWx4UvgukE2S2zIUHdRkOCGmDLmlORkPfmJO8d2FqOlkgGErLb6FQKo5MNhhoSR4L5wdZyYGs5DHNqGJtTCzsc8xNo" +
+            "g4G6DeqV6wXpi9AIdQppPbVDPZ0qSAxjo5KbRq3y7UjuQQSJIkkkAwm1yrcDSbfjdItkQ9LJBtjGT2xdJrYuc2A6I5GQJ85J/faksZ61BrpZax2J1n2J3TZA" +
+            "diJOGoRQOjQSskZzJWs0V7JG/ba1bEg6EkGiSIzISCSDyGQCLZ/1RjntrVMYGpNb7xhGyG5dBAl4vHUabVh/9xjPca/1d1t1ECHiTumU2w8XIU/sNOq0Ho4k" +
+            "kJD3dvTRjj7ax6T8zIYE2lGT1oiU210XmUTKY4gX6UgEiSIxJI4kkCQStIGgDRRtoGgDRRso2kDRBoo2ULSBog0UbaBoA0MbGNrA0AaGNjC0gaENDG1gaAND" +
+            "GxjawNEGjjZwtIGjDRxt4GgDRxs42iBhDmiSQWRgmMFhqLWUSS2fKrXkSus7pjRjMVwbNnVqYW9rwwehkdBtO39re/U9rjoI9T+K/Y+WF2YuMogMGg0qrVOY" +
+            "0qzalGbVNrGWTKwlM2jsUl9tWCSplsx0JAHWuY399zBDkCgS1G1Qvz3R1pNtPQ1j85p4ffjpIkGkw1jZW3ciAvXHG61KedOGBGbi3mivyJtifqhv9EZ9ozdD" +
+            "DQw1sEQyiISQBqFIDAnaINAGgTbIhqQjwfzQPok3qgveqC54m1g+E8uHZuKO8yzHeZZ3WnX3TrsiXh9bWyQako5EkMCcyXskkkGEdsW8v0vudjjtIl4fDfPb" +
+            "jGXTWlpHAusUfjtufhBHQn4gtKrr0gWJIjEkjgR166wblY9IQ0K+g7M2x1mb46zNcZ7lt9nH5ju32cdBsEyNPB7Hyo5jZRcfSDA/WIMF66lgGy+BpU2rbK5N" +
+            "kJCPKrZ8ii2f0pzWlea0rgbzBVdacXaldWW/jeMPglo7tW/qNELRwNgCbY0trGILq7Ru6Urrlq4TbT0dSSChumA0d3ajubObk3Xqa5mL0Kq7G626u79b2K2l" +
+            "8O5IqIV1WmFypxUmd1phcseWz2mFyZ1WmNyd6oJHQ4KxDUeCNhhog4E2wLGY41gssA8O2ln125mF516bB+3PeajCnCnUiND6jget73jQ+o4Hre94YJ8V2GcF" +
+            "9lmBfVZgnxXoO4G9WWBvFjhjiUAb4FwmcC4TE0sOZ8hBq1KetD/n2Smnt+f+DuJIKKeJs92knXxP7JkyqO29nafYrHM7T7GR0RxJEHnX0+fakw/tSGD9zfEE" +
+            "hA+sPwPrz8D6M7D+DKw/A+vPwPozsP4M2lX0SedGfdKuok8cJ04cJ85mSBxJIEkk1MZPnP/MzmHQbjgzmoJ2E7SboN0U08Ex0sQx0nQsBcdScCwFR4s6WtTR" +
+            "onRiwGdQPZ0T0yGPj9ZhpTFaFySOsQURQQ2oTAPXE6PRXls0x/zQjCUazViiBepGLVLgGmS0gdahM9TRaCYRbaJ1Jlmn02pR9E7pdKrB0akGR6c91+i0rhzd" +
+            "UIMku/VMJORvnU65hVAbH0JtfIgwUSK0GhG4GhFC+zIhEzWg9d7A1YhQWpkLpTY+8GZLKJ1bDzUmAwmV6W0F4yCom2NOHe1GPUbo+1z0c8QV+vbEndBMPG73" +
+            "V7Yw1joRGiuH0Vg5jMbKYdgeGJ2ECaOTMGE0Rw+jOXoYnQIJoxWzMOppA2+2hNEIP4xG+GHYIhm2SIa10Wj3JfD+SuD9lXD0EH+3Yjt5r1s+9xfCadU9HEcB" +
+            "uCYUePclnFbDo36s5Oc/fpTH9esl8E0w9l887tsuwRYk5iGIpyBb2wVbkOz7L/rxiz1S2YKMx9NZP//xdYc3dkk/fvO4Tn1J5i553I5eEjvi8VNyxBx9l+Tx" +
+            "m7FL+p5z7Y97mpfk/M0RTxy/ySOe2Q5JPyRySPa0ZC9xldYPyR6PHDl9PrmwJIedn88hLMk4Yh57CcqRUz00rPvviwwi5V3FiySR8pn9RRxjK+dbiwTGVn4o" +
+            "4yIY28AwA/MzSQNrTBIJ2do6EiWtrRwRLRJU2jaoFPzwYRfKoZefGFhkErmtRd/OKy8i1X7WIpPKMssbBxch64/ytuwi6E2zkwaz/MTAIu96c1snX6Tca1uk" +
+            "PH328x9fdxGkTsfq2ftFIKfWehIhP7MWQWT0Oj/WhiBRIpO07o1i610pTHny6iKTwohTGB1g6x5k0T6pfLSRRbWRboplquSjhq2xqQ8i5T2jRVKRkAaTvMpv" +
+            "z3U9reO9PE23yLu0bzuRFwG7eS/3mRYp14gv4qTbbKBBfaZ+kfLjHYuU60gXMSSOhDRA33FVso6GUphy7ekiE4gb1Cx3CwyTSEiD2w3yp4+6D7KolztdLxJC" +
+            "HhLljcQXSSVbpzmkM6nW+5Qkkg0J1LlorRHp4KOBPUbc7nQdBPITXZSIQmlHp1FgSPlU4otoUyI02gyjWhJG44OwJBsY9Wbh7377Nt9ehPwt6vMUv/748Tn4" +
+            "XwJ/CrS1XbD9ImUXaNsF+y9s+8XcI52PGesS5C4Yu2I9donkLtEjf49vnF6SI+bHx0R/XW8q7fF03+N5vvF9SfbfyJ5Plcf3Y5ck/ZDs+apvZyxiSMoVyUXK" +
+            "HnmRcgbw63oDZxJRis3K0c+v6wUS0u12+uU2E1hkUjrRO4QJ1DqkWgtbZJDWMaux+4tkr04NLVLOrRcpP4T26+tua7lKtkh5kn+RMAoTYDfrZZu2SLnv9eu6" +
+            "ZaBEytHCIuWo5CKTSCqQXt53WaQcF/26zsAisepk9UWSSIKtXSblVGYgSSDaoG67lqfhLkIW1XKlfRH32nvdyKvcjUrBTZBQmTqWqQflNJRyGkY5DY4NPTES" +
+            "arDXn1D9dZ00ojLNThqkQFvloymUz8D8DMzPSLL1QB+d6G9TKbZp0JdEIw+JRh4Sjep2dIfWMvroSKDlC21Qg8ME2tEw6mnDHMPUz6l//7E/3+i8JHJI9JDY" +
+            "IfFDEockD8k4JHOXPL8IsiSHzv3QuR8690PnfujcD537oXM/dO6HznLoLIfOcugsh85y6CyHznLoLJvOevxGm9suGftv+p537XvetcvcJdoOyfEbO35jdkh8" +
+            "l/gRyg+dsx8SPSS7PtIOyV6C+u2dgIckDsluHzly+u2u/UMih2TX+dtN84fEDsmRizjSCj8kh8556DOPeOYe6jm5uyR6SPbU4fORL1KezLhI+eHPF3GhMPUH" +
+            "WV4kMEz9cZUXGRhmMjEgVr7xc5FJYcqV1kWkIxEkZB0rT8VdBNOx8kNYi2CYcj/iIh2JIFEkhsSRBJIkEphT9KrbmY37Z34WGUgmkdGQdCSCZFCZsl+/5ydb" +
+            "Pb19Km0n772SndQfvF/EkDgR60gwNqNa4m+v2ux2+8jqQYJIYGyBsQXHlpSfbEjQOkMpnYElN1DrgVqjv3n50tIik7SOxoTa0ag/k/wi5Ynki1DdDvTrECqF" +
+            "EExHqBRCyHdu+wRbWxVYs26frd21Niq5sEQykFArFt6QdCSCRCk/Tn3w7T7XQYJIYMkFtSG3+097+ST6KPYYMdCrBrVvMalVDmzjs1HvnK38UPMik0hvSDro" +
+            "ljhCSewXUqlHT6VSSMOcmiChkkts/dMTyUBC9SejIelIBIkiwZxGUJkGjfATPT6TWuVEvx6NxnxDaJw4jFry4TSmGJ4Yhjx+4OxjYus/hUp7KtXgiZ54u7G0" +
+            "p4Oj6Imj6Fl/Bv5Fklq+iSOHOaC0rTWIzVqD+mO3j7wdsU0KU56GW0SSYqNe0273hfYw3pB0JIJEkRgSR4Kl4GiDQK0H+I614UgCyaTymZjOpHR6I7t1aRRG" +
+            "qRS6QhtiXWGUZrd7SXtsWHK3nahdt4T2wPpI0o1G3tZpbcN6eW7lIo4kkCQSGFOYlLcNLlJ+1nCRQaS8w3IRJ4J+LZMJzJBNZmAYGKGY0ljMtMH4zbSRH9Rv" +
+            "yFxEkcCoxm6flN28Smn+YyodiSBRJIbEkQQS6mVuu6UHoV7mtlt6kI5EkCgS9AMbUH9uq607wRapPtm0SGKZJuk2UbdZvlWzCGowoyGh/MzyzbyLCJEBcxmv" +
+            "z75dROvYHD6E+yK9IelIhAjVRr99uvbZungTR5IUG62leaOxvzca+3vLSWRgfkZHIkgUiSFxJEEeMhIJ5nQm2W0OJDB68o6e2Gn1y3v5OtNFqOS6TEpHG5KO" +
+            "RJBgftSQkN067WN4N8yPO5GgMr2d298tOlHr98jhdqbzIokERkIuNCJ2oZmR16/KXwTTwdKuX0dfxMg6EuTXkkJhElbzXJJqloyOxIhM8tHbPfmDGBLKqbaO" +
+            "xJBQ26tC3qsSSJKIYmxY2moNSUciSBSJIUGtaaXEb7cDN39TWgl2HCO5Yt+oybEl6ZawTuG3twI2Yg3mgG5NiXTyAxOYsbiJIFEkhsSRBJJEMoigV5k3JFRP" +
+            "jUaqbjGQUHtgibElalDes7qIYxjyxPrG50UMSZAn4kjo9sLBQah39kZtiOP42juHoXbHcXztOHZxbC0dW0tXqnNOa3bugRpMzCna2mkVx0PIE+Nd57bSDuyD" +
+            "A/0gJnlvTLJO4jwr6SyOJ62UeAq1BymYDva0iT1tYk+bOOLCfTNPg9U8T5qje6JFb99H3MpndJozDRUYiw2jOdMw8uthAwnqRuvxPmg93getx/ug9XgfjjYI" +
+            "8pARjiSQUPlMnIFNHAlNw9iCbH1bD9nDDIxtDCSo9cR0qBWL1sGvo1ELG41a2MB9mWh0CjEa7R3GbdVjT4csGm02im3COnnc7rwfRIF0mmNEpzlGdJpjRKc9" +
+            "vei0Sh29DSSTSMd0qGcKXD+IPh1JIoFaEtLI1kLnkUIwpyJka7GGpCNRJIYkkKDWjrollcJtjr6TgWGwPdDWkHAYIUKna0Od6rYGkoT1xFAaCYV1soHRTkpY" +
+            "Uk4t4axUWKIGtA4bhm1V/U35Hz9/7PG8tbIkckj0kNgh8UMShyQPyTgkc5c8b618ft0Enrskj99kPyRHqHH8Zmx5125xSPZ4vq1H3iVhu+RIq49xSPaYpe+/" +
+            "EclDcv7miEcPiR+hctf5eev8kuypa3kj+CKTiA8i9Yx3EYxtOJFJxIIJpXO7BfkWJf54IMEE6sZ6kY5EkKBuaH531C1Qt0DdAnWrG7cXqRu3z6/juOUi0iKD" +
+            "wpggUSSGxImgdaK+IPD5dXRTIT9Zb/G8iFJ+svz8+UUwHcfYXJEYErJOJqaT5SGUz6+Dhg5aDyEPGUKeOOrjQy+CdWEE+ehIRUL1Zwyy2xiYzsSc1sfzFxEk" +
+            "qPWkJnx2iu32pPx94PIiOqHkZn39aBHyg/rZm0Um2M1ah1Kw2/NUz9pozTHMBN+x22ThPqx7kXqhcxElUn5e4SKYTmA65SNUFxEkqFu9gLKIE0nUIFGDMcjW" +
+            "WApK7ahpp9iUWnJT6jUNByCmoyHpSKBvtNtS0ZafaY4EegybQb4zsXxmZl0bbVKL5E0hp95oVOMty8PKLzKgPXBYjvn8Ov4AbaLfHqE6yCRSL8u9yASLev2R" +
+            "80VoTOGSlB8hf3PthsSJKOVHDUZPfvPr+4bri0xoKdyozrnVy38vUj7lsgjVRr89C/7sf9wiKEz5jNyLuFN+3KE2uid5lSfpFp38Oow0CDMkjiSQJJKBhDw+" +
+            "vCHpRCb5W2INTmxDknpNz6BakjT584wgDd6L/luZ5kANBtktJ9ltlI+iXoQ8cdCYwkd9iHiRRDKQTCLSkHQkgkSRkPcOoVIY9RbcIg5kdurNZqc6NwPGFD4n" +
+            "tBTROnhINMpPNFUi5NfRqE2MFolkEKGxSzSaSURvSkS8rlnRlWzQlezWrSHpSASJIXEkgQTz41RyPTsStOhAMik/QiOHEFrgC1FoLUOUvEocNQhMZwYSSqd+" +
+            "gu0ik4iRBkrrO6FBZarZkCgSainqZ+4vQtZRGq1H/QD+ixiNQ8KwLhj1c+FY671VR2s/f/+x22ND4pLIIdFDYofED0k8JdrGFo/2xxbFJRm7xPohOX4Tp2Tu" +
+            "ksemxZLMXUMROyTHb0J2yRFzPRdeZBCpj5ItUq4lfV7PXRgSRxJIEskAEuWcbpHyMZ2LdCKTrJPlVuRFqpXqRYx0S29ISLfRqBRGeeRzkUG2HoNsPcut70XK" +
+            "y9iLREPSkQgRKm1r5Zrv53WVs9c2MCmPFH5eV/jAbqYGdrNZ9gCLlB+RvkggSSSQjreWSDjMBFJ/6G8RCySUTncKoxNKwa2cHb2IJxMoHw8qbY9y3nQRIyLV" +
+            "IdpFyvHlRUiDNEUya7/2UY55XmSWhyc/ryNRkE7Uz/VeBGwQ9ccXLkKx9Ql+EKKdCJV21I/lLqIYBtOpP5dwEUViSBxJIEkkAwnawNAGDr4TmmidJOuYkdb1" +
+            "cftFMDaXjqQK8+X7j/350a5LIodED4kdEj8kcUjykIxDMnfJ4/DKJTl07pvO2i13ydxyoaJtl2TskrlL6jnORRxJEPFdBy0/nfBlPdYnRMrH0y7SkQgSRWJI" +
+            "HEkAcad0/N1/vUWU+dvZ/luH8mW9YkUJZCODZVaDqxcZnTQYnTI/OmV+lC+gLRLkRqN8DePLGvgpxDbL9zgu4kiCSLmJ+GW9TcPEiFi1gHkRRWJIHEkgSSQD" +
+            "ySTiUHWtB5IBpW1S3uhZZEBp+22Y8tTNmxsSRxJIEslAMomU74J9WTeyoZHy7llbx3u5ofFl3RLuta29HkItMqqvDn9ZdyZn3e64lt9UuogjCSSUU52kdf01" +
+            "4IsYEtLNyrcFFykXvxeZUrej7uXXyhZxaBM9GpVClG/tLCIGGoQGkUkeEtT/eDaydSrFlk4lly5IMB2nMs3yeMuXdd+JdBsKLZJPo5o1k3xnDrBbtAlhon6H" +
+            "YRFtSDoSIVIeHfiyplQURoy0ro/rXARjSyMymKAG1IaENopNI4lMjG1CbxbmMK4KCypTG4rEkJANvMFoI7xs+T59/7GPxyToksgh0UNih8QPSRySPCTjkMxd" +
+            "8pgEXZJD537o3A+d+6FzP3Tuh8790LkfOvdNZ23DDsmWlnbtu8QPSR6hMg5J7pKxS6Sfkl1nET0ke+oyNzurlneRPq2X8RuSjkSQcDpGRDCMcBgnUm5LLmIY" +
+            "WzkqXiQwTLndvsioXqn7tN5xp5z6XlfUjXJ4GwFs8Wf5xeFFyndPPq0NhmoJ/SJCpHzRYZHyENwiHqD1CPKzkWTjMQSJkgZYLrNTOrOT3aaQ1lOro5UXGUSS" +
+            "PGMOKtNZvpR1kVkTaw28ym43dw+SEFvvFFsni1qXSaT8ft5FMJ1UCjO0trXVrxAtMsHjTVEDLUfqi1BdsPpbLYtQe2OaQrGVG2eLjEGxDSqF24GC3QYTWgpz" +
+            "I91m+XL4RRLJQDKJOPnb9EQykJB1ZpC/1UfDFqG211t5O/YiQqSDRf32vd+dvDe0bvPZi4DveP21t4tgfspt7EWojffeGhIOI0gGkXJjZpFyvrRIom4JdcF7" +
+            "ChJFYkicyKTyEbRBffN9kfLQ5SJKHiI2iZRHhi/SkQgSzKkbEirT2534rS5Iot2oD3Ytv8xzEbK10hjZ6+2+RdA66uQ7Gk7pDPJeK192X6Q3JB2JIFEkhsSR" +
+            "BBGBMYWbkica9dtef0vyIo6E/MCC/Pq28bWHSatHG26ZSCaR8s3dT+t9L/I3pxGxO42Ivf46+iJavd9xEUMyMDaqP24NCYwp3LEV8+xIDAm1SD7QOlOgrYoG" +
+            "o1uPRt4bnTSITn1jCMyZPNRJg6T8BNogksoU57SejTTIFkgSCbX+SSsKntg3plKdS8N0nPrgdPLrDIwtqJ4mjmoS/TozkKBuA2NDj8/hSNA6kzx+NBoR1/vh" +
+            "i9Cakw8ccY1JtR5XFnyqIXEkHFsiGUjIQ6Y1JNTG3w6DbhadoyOhkdAcYJ1oHVqKaNIojEIbEo36hWjWkRgRR62p5YtGqxHRyROj06wt6ve0Fwmh2CKRDCST" +
+            "CNXg6COQJJKBBHM6GxIKI41sgLOpEFoFj/oBgIuQ70j57YyLJIYZSDCn6pQO9WYhOonQyk/gfC5wPhfiMI4PKU9zXGQgmUSiIelIBIkSSSrT24tKz9Ft1F9X" +
+            "ucigMLS7E0prXKE0Lwktz5MsQj1g6HQksx7DhtHKXNyO920a1O8oLzKhlwkr19++fv9R2mNX9ZLIIdFDYofED0kckjwk45DMXfLYVb0kh85901lbnhI9JLZL" +
+            "xpaW9tw0VNn1Udn1UTn0+VZDHpI99dofFyl32r6uXcAEUu+xf10nLjuQLPcSFilPE3xdO1QCYUb5LtnXdTqv1WGslUeqv67vQUFOvQto7ZqQjlsHW7uVjzV9" +
+            "XXPR6rtGX9fcrerTLhJAsrwUvUg5UrrIIFK+7HoRQWJISOuh4Ik+B5BoCf4W3Y1IuZewSLkytEh50u4iYIMQNSIB3htCdSGUvCrq1/sukkRQa52ktZWXST59" +
+            "+vitw/+P7fVPH79dkbsLcheMp0CffcMl0UOSh+SMZ+6S3naJHr+J2CXPUycvyZ4J/XaN5yHRQ3KGGodk16fvFtRvJ9LuEjt+Y+OQ7DFLHJLRDsnxm2mHZP+N" +
+            "HiWobQ9Vvz57kSRS794vYkTKB6Uu0pFMIhNjm6h1WZNfxOpTAouQdUxIA7NEQhp4SyQchqzj9UxtEUVCNrhdVToIxqYYJplgbJMJ+VvUOzsvUu/svIiWe0uL" +
+            "OJF3u31fMV4kMEwCyS5IFAn5TnbyncQyTSzTVIxNyRNzkkVzkkVhRXIRRxJIyDqjPn+zSEfCsZF16m9FXATTCSqFgS3sSLROotaJWs+AWnK7rHuQgYRq42wN" +
+            "SUciSBSJIXEkgSSRDCRoA2yRZkcbYK2fgroJ6mbUVt2+lLqTSd47ywdbP3163TxrROr1wEUGkklEUQOFmmUtIad2+8bGQRLJQDKJjEZkogbUl1j9jY2LOJJA" +
+            "kkgGakA57aJIjEiW+5+LBJIEP+g5kEyKrXzw+EWkUzr1lycuMohM8gOpzyR+ej3zQTVLsbSVxpamvSMhr6rfub8I+Y4OqvU6yKKwW7cIjJ5smiLBdOoV/UUU" +
+            "CVlnll/suAh5yCxXpy5CLV/9MN9FwOO9Ufl4o/GB9/L+0kWcSK++drmIBIWRRDKIGOrmjQjaoFNL7p1acu/UknsfHYkgUdJtGIZxJIEkkZANRKEuuKgjoTKV" +
+            "+jbDIoFhOLaBZBKZDUkHotQ3uopQGFEk5L1a3vq9SBJBr7JGOTVqYd2sIwmMjcrH6hsdn17n8cgGjq3L7fm9gySSgYQ85PapkV3rpNL2pNL2+kziIh1ICHli" +
+            "oL/dPijyXKfwkAkkaazsqUbEYCzmaUkkyKsG1rkxKaeT1gJ8GvnONCrtiT3GpNm7zwgkSYTzMxWJIYGcRkvIacAtgxfpDUlHwrEpEkMyiKhRfgJGxNFDkRgR" +
+            "Wl2JPkhroRY2pFndXoc0J0I9bQitgoZSmxhKbWIolrZS6x+GfmBCtjYa84XRmC+MxnxhQn6Na97TY9sbmt9e+vkPyZ8/an/eSH5JpB2SfkjkkOghsUNypP54" +
+            "GPWS5CEZm+T5GNgl8UOyxyPjCDWOUCMOyRnPro8eaWk7f7PbWXs7JP2QyCHRQ2KHxA9JHJJd5/rb9hfRmnj91N2LWPmexSKBpG7vF3EkgSSBjHq0soghcSSB" +
+            "hDUYSCaR8lTERToSQYI2GGiDgTYYZIOJfjANwySTRDKQgEWjke8E3Mb78+sM4EBC6QiVXAiVXAiVXMB8cBHSTbsjCSSUjlINDg1FYkhIt1uLdB8rLKJIDIkj" +
+            "qeadf/7L6/ZNVaaLlJ8Lu0gnUj7u/iJZPjf7IqPcN1iEw5R3fV/k9pDzM6fRFLSOFpNINiRZax29TyJOsfUIClOu371IvWK9CMYmk3TT8lW4RagUQpPSqU+E" +
+            "XEQhjGE6VrYHFyHr1CcoFin3uhcpV4V/eZ08Kc85vsjtJYHb3PtFsny95Ze1N5wQZpZzlF9eu0TlY/CLlO+rvUj9ibEXqe8Hv4iW7xL88lrrCdDAbY7abu7l" +
+            "/GmRPiA2L2vji2TZm73IKPdOLlKtey7SGxFxSkdItzEpTP1Q/SImRCinUX+47pc1w4Z0QjqFEYXyCSnX/BYpb8RfBGwQ9WO9i1BpR/0xwhexctfrIpMI2uD2" +
+            "ZtPTd6J+mWkRo5zWq6gXGUjIBoa2NhfSOjppHajBwHQG5ee2vnr7WMoixez/b3/7/4RHUQmqMgEA";
     private static final long JSON_RESPONSE_CACHE_TTL_MS = 5L * 60L * 1000L;
     private final ExecutorService executor = Executors.newFixedThreadPool(10);
     private final ExecutorService profileSectionsExecutor = Executors.newFixedThreadPool(6);
     private final ConcurrentHashMap<String, CachedJsonResponse> jsonResponseCache = new ConcurrentHashMap<>();
+    private static volatile JSONObject habbonewsRarityItemsMemory;
 
     // Transporte HabboDex via WebView: mantém uma sessão web real no próprio aparelho.
     // O WebView fica oculto (1x1 px) e só é exibido se houver uma verificação interativa.
@@ -7067,6 +7181,7 @@ public class MainActivity extends Activity {
             try {
                 JSONObject data = unwrap(getJson(habbodexFigureUrl(figure)));
                 final ArrayList<JSONObject> clothes = normalizeClothingEntries(data);
+                enrichClothingEntriesWithHabbonews(clothes, figure);
                 final ArrayList<JSONObject> visibleClothes = new ArrayList<>();
                 for (JSONObject item : clothes) {
                     if (item != null && !isDefaultClothing(item)) visibleClothes.add(item);
@@ -7182,11 +7297,12 @@ public class MainActivity extends Activity {
     }
 
     private boolean isDefaultClothing(JSONObject item) {
-        return item != null && optBoolAny(
-                item,
-                false,
-                "isDefaultClothing", "defaultClothing", "hidden"
-        );
+        if (item == null) return false;
+        if (optBoolAny(item, false, "isDefaultClothing", "defaultClothing", "hidden")) {
+            return true;
+        }
+        JSONObject classification = habbonewsRarityRecord(clothingFigureCode(item));
+        return classification != null && classification.optInt("h", 0) == 1;
     }
 
     private String clothingRarityIconCode(JSONObject item) {
@@ -7195,7 +7311,11 @@ public class MainActivity extends Activity {
                 item,
                 "rarityIconCode", "rarityCode", "habbonewsIconCode", "rarityKey"
         ).trim();
-        if (!code.matches("^[A-Za-z0-9]{5,12}$") || "OuxYRCz".equalsIgnoreCase(code)) {
+        if (!code.matches("^[A-Za-z0-9]{5,12}$") || HABBONEWS_TRANSPARENT_ICON.equalsIgnoreCase(code)) {
+            JSONObject classification = habbonewsRarityRecord(clothingFigureCode(item));
+            code = classification == null ? "" : classification.optString("i", "").trim();
+        }
+        if (!code.matches("^[A-Za-z0-9]{5,12}$") || HABBONEWS_TRANSPARENT_ICON.equalsIgnoreCase(code)) {
             return "";
         }
         return code;
@@ -7342,6 +7462,123 @@ public class MainActivity extends Activity {
         }
         if (!out.isEmpty()) return out;
         return extractList(clothingData, null);
+    }
+
+
+    private JSONObject habbonewsRarityItems() {
+        JSONObject ready = habbonewsRarityItemsMemory;
+        if (ready != null) return ready;
+        synchronized (MainActivity.class) {
+            ready = habbonewsRarityItemsMemory;
+            if (ready != null) return ready;
+            try {
+                byte[] compressed = android.util.Base64.decode(
+                        HABBONEWS_RARITY_SEED_GZIP_BASE64,
+                        android.util.Base64.DEFAULT
+                );
+                ByteArrayOutputStream decoded = new ByteArrayOutputStream(96 * 1024);
+                try (java.util.zip.GZIPInputStream gzip = new java.util.zip.GZIPInputStream(
+                        new ByteArrayInputStream(compressed)
+                )) {
+                    byte[] buffer = new byte[8192];
+                    int count;
+                    while ((count = gzip.read(buffer)) >= 0) {
+                        if (count > 0) decoded.write(buffer, 0, count);
+                    }
+                }
+                JSONObject root = new JSONObject(decoded.toString("UTF-8"));
+                JSONObject items = root.optJSONObject("items");
+                if (items != null && items.length() >= 2500) {
+                    habbonewsRarityItemsMemory = items;
+                    return items;
+                }
+            } catch(Exception ignored) {}
+            habbonewsRarityItemsMemory = new JSONObject();
+            return habbonewsRarityItemsMemory;
+        }
+    }
+
+    private JSONObject habbonewsRarityRecord(String figureCode) {
+        String code = normalizeClothingFigureCode(figureCode, "");
+        if (code.isEmpty()) return null;
+        return habbonewsRarityItems().optJSONObject(code);
+    }
+
+    private String normalizeClothingFigureCode(String raw, String slot) {
+        String value = raw == null ? "" : raw.trim().toLowerCase(Locale.ROOT);
+        String cleanSlot = slot == null ? "" : slot.trim().toLowerCase(Locale.ROOT);
+        if (value.isEmpty()) return "";
+        if (value.matches("^\\d+$") && cleanSlot.matches("^[a-z]{2}$")) {
+            return cleanSlot + "-" + value;
+        }
+        String[] parts = value.split("-");
+        if (parts.length >= 2 && parts[0].matches("^[a-z]{2}$") && parts[1].matches("^\\d+$")) {
+            return parts[0] + "-" + parts[1];
+        }
+        return "";
+    }
+
+    private String clothingFigureCode(JSONObject item) {
+        if (item == null) return "";
+        String direct = firstText(item, "_figureCode", "figureCode");
+        String normalized = normalizeClothingFigureCode(direct, "");
+        if (!normalized.isEmpty()) return normalized;
+        String slot = firstText(item, "_slot", "slot", "type", "partType", "category");
+        String raw = firstText(
+                item,
+                "code", "classname", "className", "furniCode", "id", "typeId", "figureId"
+        );
+        return normalizeClothingFigureCode(raw, slot);
+    }
+
+    private HashMap<String, String> figureCodesBySlot(String figure) {
+        HashMap<String, String> out = new HashMap<>();
+        if (figure == null || figure.trim().isEmpty()) return out;
+        for (String part : figure.split("\\.")) {
+            String code = normalizeClothingFigureCode(part, "");
+            if (code.isEmpty()) continue;
+            int dash = code.indexOf('-');
+            if (dash > 0) out.put(code.substring(0, dash), code);
+        }
+        return out;
+    }
+
+    private void applyHabbonewsRarity(JSONObject item, String figureCode) {
+        if (item == null) return;
+        String code = normalizeClothingFigureCode(figureCode, "");
+        if (code.isEmpty()) code = clothingFigureCode(item);
+        if (code.isEmpty()) return;
+        JSONObject classification = habbonewsRarityRecord(code);
+        if (classification == null) return;
+        boolean hidden = classification.optInt("h", 0) == 1;
+        String iconCode = classification.optString("i", "").trim();
+        if (HABBONEWS_TRANSPARENT_ICON.equalsIgnoreCase(iconCode)) iconCode = "";
+        try {
+            item.put("_figureCode", code);
+            item.put("rarityKnown", true);
+            item.put("raritySource", "habbonews-iframe");
+            item.put("isDefaultClothing", hidden);
+            if (!hidden && iconCode.matches("^[A-Za-z0-9]{5,12}$")) {
+                item.put("rarityKey", iconCode);
+                item.put("rarityCode", iconCode);
+                item.put("rarityIconCode", iconCode);
+                item.put("habbonewsIconCode", iconCode);
+                item.put("rarityIconUrl", "https://i.imgur.com/" + iconCode + ".gif");
+            }
+        } catch(Exception ignored) {}
+    }
+
+    private void enrichClothingEntriesWithHabbonews(ArrayList<JSONObject> clothes, String figure) {
+        if (clothes == null || clothes.isEmpty()) return;
+        HashMap<String, String> codes = figureCodesBySlot(figure);
+        for (JSONObject item : clothes) {
+            if (item == null) continue;
+            String slot = firstText(item, "_slot", "slot", "type", "partType", "category")
+                    .trim().toLowerCase(Locale.ROOT);
+            String figureCode = codes.get(slot);
+            if (figureCode == null || figureCode.isEmpty()) figureCode = clothingFigureCode(item);
+            applyHabbonewsRarity(item, figureCode);
+        }
     }
 
     private void enrichPhotoRoomInfo(ProfileResult r) {
@@ -13024,24 +13261,35 @@ private int loadingProgressFor(String message) {
         dialog.setContentView(scroll);
         applySafeAreaInsets(dialog.getWindow(), scroll);
 
+        FrameLayout previewStage = new FrameLayout(this);
+        previewStage.setBackground(round(
+                lightTheme ? Color.rgb(248,248,248) : Color.argb(22,255,255,255),
+                dp(18),
+                lightTheme ? Color.rgb(220,220,220) : Color.argb(35,255,255,255),
+                1
+        ));
+        wrap.addView(previewStage, lp(-1, dp(164), 0, 0, 0, 12));
+
         LinearLayout previewLine = new LinearLayout(this);
         previewLine.setOrientation(LinearLayout.HORIZONTAL);
         previewLine.setGravity(Gravity.CENTER_VERTICAL);
-        wrap.addView(previewLine, lp(-1, dp(150), 0, 0, 0, 12));
+        previewLine.setPadding(dp(14), dp(6), dp(18), dp(6));
+        previewStage.addView(previewLine, new FrameLayout.LayoutParams(-1, -1));
 
         ImageView avatarImage = new ImageView(this);
         avatarImage.setAdjustViewBounds(true);
         avatarImage.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        avatarImage.setBackground(round(lightTheme ? Color.rgb(248,248,248) : Color.argb(22,255,255,255), dp(18), lightTheme ? Color.rgb(220,220,220) : Color.argb(35,255,255,255), 1));
-        previewLine.addView(avatarImage, new LinearLayout.LayoutParams(0, -1, 1));
+        LinearLayout.LayoutParams avatarLp = new LinearLayout.LayoutParams(0, -1, 1);
+        previewLine.addView(avatarImage, avatarLp);
         loadAvatarImageKeepingCurrent(avatarImage, avatarFull(previewFigure, 2));
 
         ImageView rarityThumbnail = new ImageView(this);
         rarityThumbnail.setAdjustViewBounds(true);
         rarityThumbnail.setScaleType(ImageView.ScaleType.FIT_CENTER);
         rarityThumbnail.setVisibility(View.INVISIBLE);
-        LinearLayout.LayoutParams rarityLp = new LinearLayout.LayoutParams(dp(46), dp(46));
-        rarityLp.leftMargin = dp(12);
+        LinearLayout.LayoutParams rarityLp = new LinearLayout.LayoutParams(dp(50), dp(50));
+        rarityLp.leftMargin = dp(8);
+        rarityLp.rightMargin = dp(8);
         previewLine.addView(rarityThumbnail, rarityLp);
 
         LinearLayout info = new LinearLayout(this);
@@ -13070,6 +13318,7 @@ private int loadingProgressFor(String message) {
             try {
                 JSONObject payload = unwrap(getJson(habbodexFigureUrl(previewFigure)));
                 ArrayList<JSONObject> clothes = normalizeClothingEntries(payload);
+                enrichClothingEntriesWithHabbonews(clothes, previewFigure);
                 for (JSONObject o : clothes) {
                     String slot = firstText(o, "_slot", "type", "partType", "category");
                     if (type.equals(slot)) { found = o; break; }
