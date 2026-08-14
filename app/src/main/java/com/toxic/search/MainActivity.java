@@ -61,7 +61,7 @@ public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_BASE = "https://habbodex.com/api/v1/habboinfo";
     private static final String HABBODEX_FURNIDEX_API = "https://habbodex.com/api/v1/furnidex/furni/from-figure-string";
-    private static final String APP_VERSION = "1.3.28";
+    private static final String APP_VERSION = "1.3.29";
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -4564,28 +4564,30 @@ public class MainActivity extends Activity {
         // independente: uma rota lenta do histórico não segura as demais.
         final int taskCount = restrictedProfile ? 6 : 7;
         final AtomicInteger pendingGroups = new AtomicInteger(taskCount);
+        // O perfil oficial é iniciado uma única vez e compartilhado. A tarefa de
+        // amigos espera este resultado antes de liberar a lista, garantindo que
+        // nenhum amigo oficial apareça sem a respectiva data do HabboDex.
+        final Future<JSONObject> officialProfileFuture = restrictedProfile
+                ? null
+                : executor.submit(() -> tryJson(
+                        habboApiUrl("/api/public/users/" + enc(uniqueId) + "/profile")
+                ));
 
-        // 1) Nomes anteriores têm prioridade absoluta entre os complementos.
+        // 1) Nomes anteriores são críticos. Não aceita uma resposta vazia transitória
+        // do cache como confirmação definitiva: tenta rota dedicada, perfil completo
+        // e busca por nome antes de concluir que não existe histórico.
         profileSectionsExecutor.execute(() -> {
             try {
-                JSONObject namesBatch = fetchDirectHabbodexPriorityBatch(
+                ProfileSectionPayload names = fetchCriticalPreviousNames(
                         uniqueId,
-                        "previous-names"
+                        r.name
                 );
                 if (!isActiveToken(token)) return;
-                final JSONObject fallback;
-                synchronized (r) { fallback = copyJsonObject(r.dexProfile); }
-                ProfileSectionPayload names = historySectionWithDirectFallback(
-                        namesBatch,
-                        fallback,
-                        uniqueId,
-                        "previous-names",
-                        "previousNames",
-                        1
-                );
                 if (names.success || !names.items.isEmpty()) {
                     synchronized (r) {
-                        putComplementSectionLocked(r, "previousNames", names.items);
+                        if (!names.items.isEmpty()) {
+                            putComplementSectionLocked(r, "previousNames", names.items);
+                        }
                         reconcileProfileSources(r);
                         enrichPhotoRoomInfo(r);
                     }
@@ -4600,6 +4602,8 @@ public class MainActivity extends Activity {
         // 2) Perfil completo do HabboDex serve apenas como enriquecimento/fallback.
         profileSectionsExecutor.execute(() -> {
             try {
+                // Dá vantagem às duas seções críticas (nomes e amigos).
+                sleepCriticalRetry(1);
                 JSONObject historicalProfile = fetchDirectHabbodexProfile(uniqueId);
                 if (!isActiveToken(token) || historicalProfile == null) return;
                 synchronized (r) {
@@ -4620,6 +4624,7 @@ public class MainActivity extends Activity {
         // 3) Missões e visuais: somente a primeira página no carregamento inicial.
         profileSectionsExecutor.execute(() -> {
             try {
+                sleepCriticalRetry(1);
                 JSONObject secondary = fetchDirectHabbodexPriorityBatch(
                         uniqueId,
                         "previous-mottos,previous-styles"
@@ -4662,26 +4667,65 @@ public class MainActivity extends Activity {
             }
         });
 
-        // 4) Amigos atuais: todas as páginas são buscadas em segundo plano.
-        // A UI só libera a lista depois que o complemento com as datas terminou.
+        // 4) Amigos atuais são críticos: busca todas as páginas com retry por página
+        // e só libera a aba quando TODOS os itens recebidos possuem data.
         profileSectionsExecutor.execute(() -> {
             try {
-                ProfileSectionPayload friends = fetchDirectHabbodexListSection(
+                ProfileSectionPayload friends = fetchCriticalFriendsWithDates(
                         uniqueId,
-                        "friends",
-                        "friends",
                         25
                 );
                 if (!isActiveToken(token)) return;
+                JSONObject officialForFriends = restrictedProfile
+                        ? null
+                        : awaitFutureValue(officialProfileFuture);
                 if (friends.success) {
+                    boolean ready;
                     synchronized (r) {
+                        if (!restrictedProfile) {
+                            r.officialProfileAttempted = true;
+                            if (officialForFriends != null) {
+                                applyOfficialProfileData(r, officialForFriends);
+                            }
+                        }
                         putComplementSectionLocked(r, "friends", friends.items);
                         reconcileProfileSources(r);
                         enrichPhotoRoomInfo(r);
-                        r.friendsDatesReady = true;
+                        ready = allFriendsHaveAddedDates(r.friends);
+                        r.friendsDatesReady = ready;
                     }
-                    setProfileSectionsProgress(token, 76, t(R.string.loading_history));
-                    publishProgressiveProfile(r, token, firstRenderReleaseAt);
+
+                    // Se a lista oficial tiver algum amigo que ainda não recebeu data,
+                    // invalida as páginas de amigos e faz uma segunda passagem fresca.
+                    if (!ready && isActiveToken(token)) {
+                        invalidateCriticalFriendsCache(uniqueId, 25);
+                        ProfileSectionPayload refreshed = fetchCriticalFriendsWithDates(
+                                uniqueId,
+                                25
+                        );
+                        if (refreshed.success && isActiveToken(token)) {
+                            synchronized (r) {
+                                putComplementSectionLocked(r, "friends", refreshed.items);
+                                reconcileProfileSources(r);
+                                enrichPhotoRoomInfo(r);
+                                ready = allFriendsHaveAddedDates(r.friends);
+                                r.friendsDatesReady = ready;
+                            }
+                        }
+                    }
+
+                    if (ready) {
+                        synchronized (r) {
+                            // Se a aba de removidos foi escolhida automaticamente enquanto
+                            // as datas carregavam, volta para amigos. Respeita escolha manual.
+                            if (!r.friendsTabSelectionTouched) {
+                                r.friendsTabShowingRemoved = false;
+                                r.friendsTabPage = 1;
+                            }
+                        }
+                        setProfileSectionsProgress(token, 76, t(R.string.loading_history));
+                        publishProgressiveProfile(r, token, firstRenderReleaseAt);
+                    }
                 }
             } finally {
                 finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups);
@@ -4691,6 +4735,7 @@ public class MainActivity extends Activity {
         // 5) Amigos removidos não bloqueiam os atuais e começam com uma página.
         profileSectionsExecutor.execute(() -> {
             try {
+                sleepCriticalRetry(1);
                 PageResult removed = fetchPage(
                         uniqueId,
                         "previous-friends",
@@ -4724,9 +4769,7 @@ public class MainActivity extends Activity {
             // 6) Perfil completo oficial.
             profileSectionsExecutor.execute(() -> {
                 try {
-                    JSONObject official = tryJson(
-                            habboApiUrl("/api/public/users/" + enc(uniqueId) + "/profile")
-                    );
+                    JSONObject official = awaitFutureValue(officialProfileFuture);
                     if (!isActiveToken(token)) return;
                     synchronized (r) {
                         r.officialProfileAttempted = true;
@@ -5121,6 +5164,214 @@ public class MainActivity extends Activity {
                 combined,
                 fromList.success || fromProfile.success
         );
+    }
+
+    private void sleepCriticalRetry(int attempt) {
+        try {
+            Thread.sleep(attempt <= 0 ? 180L : Math.min(700L, 220L + (attempt * 180L)));
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private void invalidateFiveMinuteJsonCache(String url) {
+        if (url == null || url.trim().isEmpty()) return;
+        jsonResponseCache.remove(url);
+        try {
+            File file = fiveMinuteJsonCacheFile(url);
+            if (file != null && file.isFile()) file.delete();
+        } catch(Exception ignored) {}
+    }
+
+    private JSONObject tryJsonFresh(String url) {
+        invalidateFiveMinuteJsonCache(url);
+        return tryJson(url);
+    }
+
+    private JSONObject fetchDirectHabbodexProfileFresh(String uniqueId) {
+        String cleanId = uniqueId == null ? "" : uniqueId.trim();
+        if (cleanId.isEmpty()) return null;
+        JSONObject profile = extractHabbodexProfilePayload(
+                unwrap(tryJsonFresh(habbodexProfileUrl(cleanId)))
+        );
+        if (profile == null || !isSameProfileId(cleanId, profile)) return null;
+        profile.remove("badges");
+        profile.remove("selectedBadges");
+        profile.remove("totalBadges");
+        profile.remove("badgeCount");
+        profile.remove("badgesCount");
+        profile.remove("badgesTotal");
+        return profile;
+    }
+
+    private ProfileSectionPayload fetchCriticalPreviousNames(
+            String uniqueId,
+            String currentName
+    ) {
+        ArrayList<JSONObject> combined = new ArrayList<>();
+        String cleanId = uniqueId == null ? "" : uniqueId.trim();
+        String cleanName = currentName == null ? "" : currentName.trim();
+        if (cleanId.isEmpty()) {
+            return ProfileSectionPayload.list("previousNames", combined, false);
+        }
+
+        boolean receivedAnyValidResponse = false;
+        String listUrl = habbodexListUrl(cleanId, "previous-names", 1, 100);
+
+        // Resposta vazia pode ser transitória. A primeira tentativa pode usar o cache;
+        // as seguintes são obrigatoriamente frescas para não repetir um vazio cacheado.
+        for (int attempt = 0; attempt < 3 && combined.isEmpty(); attempt++) {
+            JSONObject response = unwrap(attempt == 0 ? tryJson(listUrl) : tryJsonFresh(listUrl));
+            if (response != null) {
+                receivedAnyValidResponse = true;
+                ArrayList<JSONObject> items = extractDirectHistoryItems(response, "previousNames");
+                combined = mergeListsEnrichingPrimary(combined, items, true);
+                if (!combined.isEmpty()) break;
+            }
+            if (attempt < 2) sleepCriticalRetry(attempt);
+        }
+
+        // O perfil completo costuma conter previousNames mesmo quando a rota dedicada
+        // responde [] temporariamente.
+        if (combined.isEmpty()) {
+            JSONObject profile = fetchDirectHabbodexProfileFresh(cleanId);
+            if (profile != null) {
+                receivedAnyValidResponse = true;
+                combined = mergeListsEnrichingPrimary(
+                        combined,
+                        extractDirectHistoryItems(profile, "previousNames"),
+                        true
+                );
+            }
+        }
+
+        // Último caminho independente: busca por nick com includePreviousNames=true.
+        if (combined.isEmpty() && !cleanName.isEmpty()) {
+            String suggestUrl = habbodexSuggestUrl(cleanName, currentHotelKey);
+            JSONObject suggest = unwrap(tryJsonFresh(suggestUrl));
+            if (suggest != null) {
+                receivedAnyValidResponse = true;
+                combined = mergeListsEnrichingPrimary(
+                        combined,
+                        extractPreviousNamesFromSuggest(suggest, cleanName),
+                        true
+                );
+            }
+        }
+
+        return ProfileSectionPayload.list(
+                "previousNames",
+                combined,
+                receivedAnyValidResponse
+        );
+    }
+
+    private boolean friendHasAddedDate(JSONObject friend) {
+        if (friend == null) return false;
+        return !firstText(
+                friend,
+                "creationTime", "friendSince", "addedAt", "createdAt", "date",
+                "since", "friendshipSince", "friend_since", "detectedAt", "detected_at"
+        ).isEmpty();
+    }
+
+    private boolean allFriendsHaveAddedDates(ArrayList<JSONObject> friends) {
+        if (friends == null || friends.isEmpty()) return false;
+        for (JSONObject friend : friends) {
+            if (!friendHasAddedDate(friend)) return false;
+        }
+        return true;
+    }
+
+    private PageResult fetchCriticalFriendsPage(
+            String uniqueId,
+            int page,
+            int limit,
+            boolean requireItems
+    ) {
+        PageResult best = null;
+        String url = habbodexListUrl(uniqueId, "friends", page, limit);
+        for (int attempt = 0; attempt < 3; attempt++) {
+            if (attempt > 0) invalidateFiveMinuteJsonCache(url);
+            PageResult candidate = fetchPage(uniqueId, "friends", "friends", page, limit);
+            if (candidate != null && candidate.success) {
+                best = candidate;
+                boolean hasItems = candidate.items != null && !candidate.items.isEmpty();
+                boolean datesReady = hasItems && allFriendsHaveAddedDates(candidate.items);
+                if ((!requireItems && !hasItems) || datesReady) return candidate;
+            }
+            if (attempt < 2) sleepCriticalRetry(attempt);
+        }
+        return best == null ? new PageResult() : best;
+    }
+
+    private void invalidateCriticalFriendsCache(String uniqueId, int maxPages) {
+        String cleanId = uniqueId == null ? "" : uniqueId.trim();
+        if (cleanId.isEmpty()) return;
+        int pageLimit = Math.max(1, Math.min(25, maxPages));
+        for (int page = 1; page <= pageLimit; page++) {
+            invalidateFiveMinuteJsonCache(
+                    habbodexListUrl(cleanId, "friends", page, 100)
+            );
+        }
+    }
+
+    private ProfileSectionPayload fetchCriticalFriendsWithDates(
+            String uniqueId,
+            int maxPages
+    ) {
+        ArrayList<JSONObject> combined = new ArrayList<>();
+        String cleanId = uniqueId == null ? "" : uniqueId.trim();
+        if (cleanId.isEmpty()) {
+            return ProfileSectionPayload.list("friends", combined, false);
+        }
+
+        int page = 1;
+        int pageLimit = Math.max(1, Math.min(25, maxPages));
+        int knownTotal = 0;
+        boolean complete = false;
+        HashSet<String> seen = new HashSet<>();
+
+        for (int request = 0; request < pageLimit; request++) {
+            // Para a primeira página, vazio nunca é aceito como sucesso crítico:
+            // perfis sem amigos simplesmente permanecem sem a seção de amigos.
+            PageResult part = fetchCriticalFriendsPage(cleanId, page, 100, page == 1);
+            if (part == null || !part.success) {
+                return ProfileSectionPayload.list("friends", combined, false);
+            }
+            if (part.items == null || part.items.isEmpty()) {
+                if (page == 1) {
+                    return ProfileSectionPayload.list("friends", combined, false);
+                }
+                complete = true;
+                break;
+            }
+            if (!allFriendsHaveAddedDates(part.items)) {
+                return ProfileSectionPayload.list("friends", combined, false);
+            }
+
+            knownTotal = Math.max(knownTotal, part.total);
+            for (JSONObject item : part.items) {
+                if (item == null) continue;
+                String key = stableItemKey(item);
+                if (seen.add(key)) combined.add(item);
+            }
+
+            int nextPage = part.nextPage;
+            if (!part.hasMore || nextPage <= page) {
+                complete = true;
+                break;
+            }
+            if (nextPage > pageLimit) {
+                complete = knownTotal <= 0 || combined.size() >= knownTotal;
+                break;
+            }
+            page = nextPage;
+        }
+
+        if (knownTotal > 0 && combined.size() < knownTotal) complete = false;
+        boolean success = complete && allFriendsHaveAddedDates(combined);
+        return ProfileSectionPayload.list("friends", combined, success);
     }
 
     private ProfileSectionPayload fetchDirectHabbodexListSection(
@@ -7350,7 +7601,8 @@ public class MainActivity extends Activity {
         tabs.addView(btRemoved);
 
         LinearLayout content = new LinearLayout(this); content.setOrientation(LinearLayout.VERTICAL); c.addView(content, lp(-1, -2, 0, 0, 0, 0));
-        if (!profileResult.friendsDatesReady && !removedList.isEmpty()) {
+        if (!profileResult.friendsDatesReady && !removedList.isEmpty()
+                && !profileResult.friendsTabSelectionTouched) {
             profileResult.friendsTabShowingRemoved = true;
         }
         final boolean[] showingRemoved = {profileResult.friendsTabShowingRemoved};
@@ -7385,6 +7637,7 @@ public class MainActivity extends Activity {
         btFriends.setOnClickListener(v -> {
             showingRemoved[0] = false;
             page[0] = 1;
+            profileResult.friendsTabSelectionTouched = true;
             profileResult.friendsTabShowingRemoved = false;
             profileResult.friendsTabPage = 1;
             render[0].run();
@@ -7392,6 +7645,7 @@ public class MainActivity extends Activity {
         btRemoved.setOnClickListener(v -> {
             showingRemoved[0] = true;
             page[0] = 1;
+            profileResult.friendsTabSelectionTouched = true;
             profileResult.friendsTabShowingRemoved = true;
             profileResult.friendsTabPage = 1;
             render[0].run();
@@ -13499,7 +13753,7 @@ private int loadingProgressFor(String message) {
         c.photosNextPage = src.photosNextPage; c.stylesNextPage = src.stylesNextPage; c.photosTotal = src.photosTotal; c.stylesTotal = src.stylesTotal; c.stylesRemoteNextPage = src.stylesRemoteNextPage;
         c.removedFriendsNextPage = src.removedFriendsNextPage; c.removedFriendsTotal = src.removedFriendsTotal; c.friendsTabPage = src.friendsTabPage;
         c.photosHasMore = src.photosHasMore; c.stylesHasMore = src.stylesHasMore; c.photosLoading = false; c.stylesLoading = false;
-        c.removedFriendsHasMore = src.removedFriendsHasMore; c.removedFriendsLoading = false; c.friendsTabShowingRemoved = src.friendsTabShowingRemoved;
+        c.removedFriendsHasMore = src.removedFriendsHasMore; c.removedFriendsLoading = false; c.friendsTabShowingRemoved = src.friendsTabShowingRemoved; c.friendsTabSelectionTouched = src.friendsTabSelectionTouched;
         c.officialProfileAttempted = src.officialProfileAttempted; c.officialPhotosAttempted = src.officialPhotosAttempted; c.officialPhotosSucceeded = src.officialPhotosSucceeded; c.photosFromOfficial = src.photosFromOfficial; c.stylesFromComplement = src.stylesFromComplement; c.stylesRemotePaged = src.stylesRemotePaged; c.friendsDatesReady = src.friendsDatesReady;
         return c;
     }
@@ -14798,7 +15052,7 @@ private int loadingProgressFor(String message) {
         int stylesRemoteNextPage = 0;
         int removedFriendsNextPage = 0, removedFriendsTotal = 0, friendsTabPage = 1;
         boolean photosHasMore = false, stylesHasMore = false, photosLoading = false, stylesLoading = false;
-        boolean removedFriendsHasMore = false, removedFriendsLoading = false, friendsTabShowingRemoved = false;
+        boolean removedFriendsHasMore = false, removedFriendsLoading = false, friendsTabShowingRemoved = false, friendsTabSelectionTouched = false;
         boolean officialProfileAttempted = false, officialPhotosAttempted = false, officialPhotosSucceeded = false, photosFromOfficial = false, stylesFromComplement = false, stylesRemotePaged = false, friendsDatesReady = false;
     }
 
