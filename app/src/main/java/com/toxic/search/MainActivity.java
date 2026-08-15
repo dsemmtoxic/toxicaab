@@ -61,7 +61,7 @@ public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_BASE = "https://habbodex.com/api/v1/habboinfo";
     private static final String HABBODEX_FURNIDEX_API = "https://habbodex.com/api/v1/furnidex/furni/from-figure-string";
-    private static final String APP_VERSION = "1.3.38-test-interstitial";
+    private static final String APP_VERSION = "1.3.39";
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -329,7 +329,7 @@ public class MainActivity extends Activity {
     private static final String TEST_BANNER_AD_UNIT_ID = "ca-app-pub-3940256099942544/9214589741";
     private static final boolean USE_TEST_ADS = false;
     private static final String ADS_LOG_TAG = "ToxicAds";
-    private static final String INTERSTITIAL_AD_UNIT_ID = TEST_INTERSTITIAL_AD_UNIT_ID; // diagnostic: only interstitial uses Google test ID
+    private static final String INTERSTITIAL_AD_UNIT_ID = USE_TEST_ADS ? TEST_INTERSTITIAL_AD_UNIT_ID : REAL_INTERSTITIAL_AD_UNIT_ID;
     private static final String REWARDED_AD_UNIT_ID = USE_TEST_ADS ? TEST_REWARDED_AD_UNIT_ID : REAL_REWARDED_AD_UNIT_ID;
     private static final String START_NATIVE_AD_UNIT_ID = USE_TEST_ADS ? TEST_START_NATIVE_AD_UNIT_ID : REAL_START_NATIVE_AD_UNIT_ID;
     private static final String PREVIOUS_STYLES_BANNER_AD_UNIT_ID = USE_TEST_ADS ? TEST_BANNER_AD_UNIT_ID : REAL_PREVIOUS_STYLES_BANNER_AD_UNIT_ID;
@@ -767,12 +767,34 @@ public class MainActivity extends Activity {
         uiHandler.postDelayed(retry, delay);
     }
 
+    private boolean isProfileBannerContainer(FrameLayout container) {
+        return container != null
+                && (container == previousStylesBannerAdContainer
+                || container == friendsRemovedBannerAdContainer);
+    }
+
+    private void setBannerContainerIdleVisibility(AdView adView, FrameLayout container) {
+        if (container == null) return;
+        if (bannerHasLoadedAds.contains(adView)) {
+            container.setVisibility(View.VISIBLE);
+            return;
+        }
+        // Os banners do perfil ocupam um slot fixo de 68dp. Nunca colapse esse slot
+        // durante retries: GONE -> INVISIBLE fazia todos os cards abaixo pularem
+        // a cada nova tentativa do AdMob (tipicamente 10-20 segundos).
+        if (isProfileBannerContainer(container)
+                && !removeAdsPurchased
+                && !hasConfirmedAdFreeAccess()) {
+            container.setVisibility(View.INVISIBLE);
+        } else {
+            container.setVisibility(View.GONE);
+        }
+    }
+
     private void handleBannerLoadFailure(AdView adView, FrameLayout container) {
         if (!isCurrentBannerAdView(adView)) return;
         setBannerLoadStarted(adView, false);
-        if (container != null) {
-            container.setVisibility(bannerHasLoadedAds.contains(adView) ? View.VISIBLE : View.GONE);
-        }
+        setBannerContainerIdleVisibility(adView, container);
         scheduleBannerAdRetry(adView, container);
     }
 
@@ -985,12 +1007,13 @@ public class MainActivity extends Activity {
 
     private void refreshAttachedProfileBannerAds() {
         if (billingEntitlementCheckPending || hasConfirmedAdFreeAccess()) return;
+        // Não zere *LoadStarted aqui. Enquanto o AdMob ainda está respondendo, isso
+        // criava loadAd() concorrentes em cada render progressivo. O flag só volta
+        // para false em handleBannerLoadFailure(), quando uma nova tentativa é válida.
         if (previousStylesBannerAdContainer != null && previousStylesBannerAdContainer.getParent() != null) {
-            if (!bannerHasLoadedAds.contains(previousStylesBannerAdView)) previousStylesBannerLoadStarted = false;
             requestPreviousStylesBannerLoadIfNeeded();
         }
         if (friendsRemovedBannerAdContainer != null && friendsRemovedBannerAdContainer.getParent() != null) {
-            if (!bannerHasLoadedAds.contains(friendsRemovedBannerAdView)) friendsRemovedBannerLoadStarted = false;
             requestFriendsRemovedBannerLoadIfNeeded();
         }
     }
