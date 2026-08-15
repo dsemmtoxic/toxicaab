@@ -241,4 +241,14 @@
     <string name="supporter_tutorial_title">Valitse esillä oleva profiili</string>
     <string name="supporter_tutorial_body">Profiilisi on tukijakarusellin viimeinen kohde. Valitse tai vaihda esillä oleva profiili napauttamalla sitä.</string>
     <string name="supporter_choose_now">Valitse nyt</string>
+    <!-- Group membership/access metadata -->
+    <string name="group_access">Pääsy</string>
+    <string name="group_access_open">Avoin</string>
+    <string name="group_access_request">Pyyntö</string>
+    <string name="group_access_closed">Suljettu</string>
+    <string name="group_role">Rooli</string>
+    <string name="group_role_member">Jäsen</string>
+    <string name="group_role_admin">Ylläpitäjä</string>
+    <string name="group_role_creator">Luoja</string>
+
 </resources>
