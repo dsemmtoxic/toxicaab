@@ -248,7 +248,9 @@
     <string name="group_access_closed">Gesloten</string>
     <string name="group_role">Rol</string>
     <string name="group_role_member">Lid</string>
-    <string name="group_role_admin">Beheerder</string>
-    <string name="group_role_creator">Oprichter</string>
+    <string name="group_role_admin">Admin</string>
+    <string name="group_role_creator">Eigenaar</string>
 
+    <string name="room_rating">Beoordeling</string>
+    <string name="room_limit">Limiet</string>
 </resources>
