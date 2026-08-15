@@ -241,4 +241,14 @@
     <string name="supporter_tutorial_title">Wähle dein hervorgehobenes Profil</string>
     <string name="supporter_tutorial_body">Dein Profil ist das letzte Element im Sponsorenkarussell. Tippe darauf, um das Profil auszuwählen oder zu ändern.</string>
     <string name="supporter_choose_now">Jetzt auswählen</string>
+    <!-- Group membership/access metadata -->
+    <string name="group_access">Zugang</string>
+    <string name="group_access_open">Offen</string>
+    <string name="group_access_request">Anfrage</string>
+    <string name="group_access_closed">Geschlossen</string>
+    <string name="group_role">Rolle</string>
+    <string name="group_role_member">Mitglied</string>
+    <string name="group_role_admin">Administrator</string>
+    <string name="group_role_creator">Ersteller</string>
+
 </resources>
