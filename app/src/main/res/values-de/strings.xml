@@ -248,7 +248,9 @@
     <string name="group_access_closed">Geschlossen</string>
     <string name="group_role">Rolle</string>
     <string name="group_role_member">Mitglied</string>
-    <string name="group_role_admin">Administrator</string>
-    <string name="group_role_creator">Ersteller</string>
+    <string name="group_role_admin">Admin</string>
+    <string name="group_role_creator">Besitzer</string>
 
+    <string name="room_rating">Bewertung</string>
+    <string name="room_limit">Limit</string>
 </resources>
