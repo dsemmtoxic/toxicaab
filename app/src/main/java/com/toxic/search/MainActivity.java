@@ -61,7 +61,7 @@ public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_BASE = "https://habbodex.com/api/v1/habboinfo";
     private static final String HABBODEX_FURNIDEX_API = "https://habbodex.com/api/v1/furnidex/furni/from-figure-string";
-    private static final String APP_VERSION = "1.3.35";
+    private static final String APP_VERSION = "1.3.36";
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -310,7 +310,7 @@ public class MainActivity extends Activity {
     private int profileOpenActionsSinceAd = 0;
     private boolean pendingProfileInterstitialAction = false;
     private long pendingProfileInterstitialRequestedAt = 0L;
-    private static final long PROFILE_INTERSTITIAL_PENDING_WINDOW_MS = 15L * 1000L;
+    private static final long PROFILE_INTERSTITIAL_PENDING_WINDOW_MS = 120L * 1000L;
     private int interstitialLoadFailureCount = 0;
     private long nextInterstitialLoadAllowedAt = 0L;
     private Runnable interstitialRetryRunnable = null;
@@ -353,8 +353,8 @@ public class MainActivity extends Activity {
     private final Set<AdView> bannerHasLoadedAds = Collections.newSetFromMap(new IdentityHashMap<>());
     private static final long INTERSTITIAL_COOLDOWN_MS = 120L * 1000L;
     private static final int ACTIONS_BETWEEN_INTERSTITIALS = 1;
-    private static final long AD_RETRY_BASE_DELAY_MS = 2L * 60L * 1000L;
-    private static final long AD_RETRY_MAX_DELAY_MS = 30L * 60L * 1000L;
+    private static final long AD_RETRY_BASE_DELAY_MS = 15L * 1000L;
+    private static final long AD_RETRY_MAX_DELAY_MS = 2L * 60L * 1000L;
     private static final int AD_RETRY_MAX_SHIFT = 4;
     private RewardedAd rewardedAd;
     private boolean rewardedLoading = false;
@@ -746,7 +746,11 @@ public class MainActivity extends Activity {
             requestBannerLoadForContainer(container);
         };
         bannerRetryRunnables.put(adView, retry);
-        uiHandler.postDelayed(retry, calculateBannerRetryDelayMs(failureCount));
+        long delay = calculateBannerRetryDelayMs(failureCount);
+        if (adView == previousStylesBannerAdView || adView == friendsRemovedBannerAdView) {
+            delay = Math.min(delay, 12L * 1000L);
+        }
+        uiHandler.postDelayed(retry, delay);
     }
 
     private void handleBannerLoadFailure(AdView adView, FrameLayout container) {
@@ -944,7 +948,31 @@ public class MainActivity extends Activity {
         if (banner == null || resultWrap == null) return;
         detachViewFromParent(banner);
         resultWrap.addView(banner, lp(-1, dp(68), 0, 0, 0, bottomMarginDp));
-        requestBannerLoadForContainer(banner);
+        if (banner instanceof FrameLayout) {
+            FrameLayout slot = (FrameLayout) banner;
+            // Profile banners are often attached before the Play entitlement check finishes.
+            // Always retry shortly after attachment so a slot cannot remain permanently INVISIBLE.
+            slot.post(() -> requestBannerLoadForContainer(slot));
+            slot.postDelayed(() -> {
+                if (!billingEntitlementCheckPending && !hasConfirmedAdFreeAccess() && slot.getParent() != null) {
+                    requestBannerLoadForContainer(slot);
+                }
+            }, 700L);
+        } else {
+            requestBannerLoadForContainer(banner);
+        }
+    }
+
+    private void refreshAttachedProfileBannerAds() {
+        if (billingEntitlementCheckPending || hasConfirmedAdFreeAccess()) return;
+        if (previousStylesBannerAdContainer != null && previousStylesBannerAdContainer.getParent() != null) {
+            if (!bannerHasLoadedAds.contains(previousStylesBannerAdView)) previousStylesBannerLoadStarted = false;
+            requestPreviousStylesBannerLoadIfNeeded();
+        }
+        if (friendsRemovedBannerAdContainer != null && friendsRemovedBannerAdContainer.getParent() != null) {
+            if (!bannerHasLoadedAds.contains(friendsRemovedBannerAdView)) friendsRemovedBannerLoadStarted = false;
+            requestFriendsRemovedBannerLoadIfNeeded();
+        }
     }
 
     private void preloadBannerAds() {
@@ -1282,6 +1310,11 @@ public class MainActivity extends Activity {
                         interstitialLoading = false;
                         interstitialAd = null;
                         registerInterstitialLoadFailure();
+                        // Do not discard an eligible profile-open action just because the first
+                        // inventory request failed. The retry can still satisfy it within 2 minutes.
+                        if (pendingProfileInterstitialAction) {
+                            uiHandler.postDelayed(MainActivity.this::maybeShowPendingProfileInterstitial, 500L);
+                        }
                     }
                 }
         );
@@ -1760,10 +1793,14 @@ public class MainActivity extends Activity {
         if (!hasAdFreeAccess()) {
             preloadBannerAds();
             resumeBannerAds();
+            // Profile slots may have been attached while billingEntitlementCheckPending was true.
+            // Force a fresh load after entitlement is known instead of relying on the initial request.
+            uiHandler.postDelayed(this::refreshAttachedProfileBannerAds, 120L);
+            uiHandler.postDelayed(this::refreshAttachedProfileBannerAds, 900L);
             loadInterstitialAd();
             loadRewardedAd();
             loadStartNativeAdIfNeeded();
-            uiHandler.postDelayed(this::maybeShowPendingProfileInterstitial, 80L);
+            uiHandler.postDelayed(this::maybeShowPendingProfileInterstitial, 120L);
         } else {
             pendingProfileInterstitialAction = false;
             pendingProfileInterstitialRequestedAt = 0L;
@@ -7193,7 +7230,11 @@ public class MainActivity extends Activity {
             View more = c.findViewWithTag("load_more_header_button");
             if (more != null) more.setOnClickListener(v -> loadMoreStyles(profileResult, stylesHsv));
         }
-        addBannerToResultWrap(buildPreviousStylesBannerAd(), 18);
+        // Profile banners are attached only after progressive loading is complete.
+        // Reattaching an AdView while resultWrap is rebuilt can prevent it from ever becoming visible.
+        if (!profileSectionsInProgress) {
+            addBannerToResultWrap(buildPreviousStylesBannerAd(), 18);
+        }
     }
 
     private void showClothesDialog(String figure, String date) {
@@ -8425,7 +8466,10 @@ public class MainActivity extends Activity {
             render[0].run();
         });
         render[0].run();
-        addBannerToResultWrap(buildFriendsRemovedBannerAd(), 18);
+        // Keep this AdView stable: attach it only on the final profile render.
+        if (!profileSectionsInProgress) {
+            addBannerToResultWrap(buildFriendsRemovedBannerAd(), 18);
+        }
     }
 
     private int tabInactiveTextColor() { return lightTheme ? Color.rgb(70,70,70) : Color.argb(150,255,255,255); }
