@@ -61,7 +61,7 @@ public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_BASE = "https://habbodex.com/api/v1/habboinfo";
     private static final String HABBODEX_FURNIDEX_API = "https://habbodex.com/api/v1/furnidex/furni/from-figure-string";
-    private static final String APP_VERSION = "1.3.43";
+    private static final String APP_VERSION = "1.3.44";
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -8804,8 +8804,9 @@ public class MainActivity extends Activity {
                         : (lightTheme ? Color.rgb(220,220,220) : Color.argb(24,255,255,255)),
                 1
         ));
-        row.setLayoutParams(lp(-1, -2, 0, 0, 0, 12));
-        row.setMinimumHeight(dp(122));
+        // Altura fixa: nome/tags ficam no topo e os três metadados permanecem
+        // alinhados no rodapé, independentemente do tamanho da descrição.
+        row.setLayoutParams(lp(-1, dp(188), 0, 0, 0, 12));
 
         ImageView img = new ImageView(this);
         img.setScaleType(ImageView.ScaleType.CENTER_CROP);
@@ -8816,7 +8817,7 @@ public class MainActivity extends Activity {
                 1
         ));
         applyRoundedClip(img, dp(12));
-        row.addView(img, new LinearLayout.LayoutParams(dp(112), dp(88)));
+        row.addView(img, new LinearLayout.LayoutParams(dp(104), dp(104)));
         String image = getRoomImageUrl(room);
         if (!image.isEmpty()) {
             Glide.with(this).load(image).error(R.drawable.quarto).into(img);
@@ -8826,55 +8827,22 @@ public class MainActivity extends Activity {
 
         LinearLayout txt = new LinearLayout(this);
         txt.setOrientation(LinearLayout.VERTICAL);
-        txt.setGravity(Gravity.CENTER_VERTICAL);
-        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, -2, 1);
+        txt.setGravity(Gravity.TOP);
+        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, -1, 1);
         tp.leftMargin = dp(12);
         row.addView(txt, tp);
 
         String roomNameValue = firstText(room, "name", "roomName", "caption", "title");
         String shownName = roomNameValue.isEmpty() ? t(R.string.room) : roomNameValue;
-        int nameSize = shownName.length() > 70 ? 12 : shownName.length() > 44 ? 13 : shownName.length() > 28 ? 14 : 16;
+        int nameSize = shownName.length() > 72 ? 11 : shownName.length() > 48 ? 12
+                : shownName.length() > 30 ? 14 : 16;
         TextView roomName = habboText(shownName, nameSize, true);
-        roomName.setMaxLines(3);
+        roomName.setMaxLines(2);
         roomName.setEllipsize(TextUtils.TruncateAt.END);
         roomName.setLineSpacing(dp(1), 1f);
         txt.addView(roomName, lp(-1, -2, 0, 0, 0, 2));
 
-        String score = emptyDash(firstText(room, "score", "rating"));
-        String date = niceDateOnly(firstText(room, "createdAt", "creationTime", "date"));
-        String maxVisitors = firstText(
-                room,
-                "maximumVisitors", "maxVisitors", "maximum_users", "maxUsers",
-                "usersMax", "capacity", "visitorLimit", "roomLimit"
-        );
-        ArrayList<String> roomMetaParts = new ArrayList<>();
-        if (!score.isEmpty()) roomMetaParts.add("★ " + score);
-        if (!maxVisitors.isEmpty()) roomMetaParts.add("👥 " + formatNumericText(maxVisitors));
-        if (!date.isEmpty()) roomMetaParts.add(date);
-
-        String metaText = TextUtils.join("   ", roomMetaParts);
-        int metaSize = metaText.length() > 55 ? 11 : 12;
-        TextView meta = habboText(metaText, metaSize, false);
-        meta.setTextColor(lightTheme
-                ? Color.rgb(97,97,97)
-                : Color.argb(215,255,255,255));
-        meta.setMaxLines(2);
-        meta.setLineSpacing(dp(1), 1f);
-        txt.addView(meta, lp(-1, -2, 0, 0, 0, 2));
-
-        String desc = firstText(room, "description", "desc");
-        if (!desc.isEmpty()) {
-            int descSize = desc.length() > 150 ? 10 : desc.length() > 90 ? 11 : desc.length() > 55 ? 12 : 13;
-            TextView rd = habboText(desc, descSize, false);
-            rd.setTextColor(lightTheme
-                    ? Color.rgb(82,82,88)
-                    : Color.argb(210,255,255,255));
-            rd.setMaxLines(4);
-            rd.setEllipsize(TextUtils.TruncateAt.END);
-            rd.setLineSpacing(dp(1), 1f);
-            txt.addView(rd, lp(-1, -2, 0, 0, 0, 2));
-        }
-
+        // Tags ficam imediatamente abaixo do nome, como parte do cabeçalho do quarto.
         ArrayList<String> tags = roomTags(room);
         if (!tags.isEmpty()) {
             ArrayList<String> tagParts = new ArrayList<>();
@@ -8884,20 +8852,83 @@ public class MainActivity extends Activity {
             }
             String tagsText = TextUtils.join("  ", tagParts);
             if (!tagsText.isEmpty()) {
-                int tagsSize = tagsText.length() > 95 ? 10 : 11;
+                int tagsSize = tagsText.length() > 100 ? 9 : tagsText.length() > 65 ? 10 : 11;
                 TextView tagsView = text(
                         tagsText,
                         tagsSize,
                         lightTheme ? Color.rgb(92, 56, 128) : Color.rgb(226, 203, 255),
                         true
                 );
-                tagsView.setMaxLines(3);
+                tagsView.setMaxLines(2);
                 tagsView.setEllipsize(TextUtils.TruncateAt.END);
                 tagsView.setLineSpacing(dp(1), 1f);
-                txt.addView(tagsView, lp(-1, -2, 0, 1, 0, 0));
+                txt.addView(tagsView, lp(-1, -2, 0, 0, 0, 3));
             }
         }
+
+        String desc = firstText(room, "description", "desc");
+        if (!desc.isEmpty()) {
+            int descSize = desc.length() > 180 ? 9 : desc.length() > 120 ? 10
+                    : desc.length() > 70 ? 11 : 12;
+            TextView rd = habboText(desc, descSize, false);
+            rd.setTextColor(lightTheme
+                    ? Color.rgb(82,82,88)
+                    : Color.argb(210,255,255,255));
+            rd.setMaxLines(4);
+            rd.setEllipsize(TextUtils.TruncateAt.END);
+            rd.setGravity(Gravity.TOP);
+            rd.setLineSpacing(dp(1), 1f);
+            LinearLayout.LayoutParams rdp = new LinearLayout.LayoutParams(-1, 0, 1f);
+            rdp.bottomMargin = dp(4);
+            txt.addView(rd, rdp);
+        } else {
+            Space flexibleSpace = new Space(this);
+            txt.addView(flexibleSpace, new LinearLayout.LayoutParams(-1, 0, 1f));
+        }
+
+        String score = emptyDash(firstText(room, "score", "rating"));
+        String date = niceDateOnly(firstText(room, "createdAt", "creationTime", "date"));
+        String maxVisitors = firstText(
+                room,
+                "maximumVisitors", "maxVisitors", "maximum_users", "maxUsers",
+                "usersMax", "capacity", "visitorLimit", "roomLimit"
+        );
+        if (!maxVisitors.isEmpty()) maxVisitors = formatNumericText(maxVisitors);
+
+        LinearLayout bottom = new LinearLayout(this);
+        bottom.setOrientation(LinearLayout.HORIZONTAL);
+        bottom.setGravity(Gravity.BOTTOM);
+        txt.addView(bottom, new LinearLayout.LayoutParams(-1, dp(42)));
+        bottom.addView(roomMetaColumn(t(R.string.room_rating), score), new LinearLayout.LayoutParams(0, -1, 1f));
+        bottom.addView(roomMetaColumn(t(R.string.room_limit), maxVisitors), new LinearLayout.LayoutParams(0, -1, 1f));
+        bottom.addView(roomMetaColumn(t(R.string.date), date), new LinearLayout.LayoutParams(0, -1, 1f));
         return row;
+    }
+
+    private LinearLayout roomMetaColumn(String label, String value) {
+        LinearLayout column = new LinearLayout(this);
+        column.setOrientation(LinearLayout.VERTICAL);
+        column.setGravity(Gravity.BOTTOM | Gravity.LEFT);
+        column.setPadding(0, 0, dp(4), 0);
+
+        TextView labelView = text(
+                label,
+                9,
+                lightTheme ? Color.rgb(115,115,120) : Color.argb(165,255,255,255),
+                false
+        );
+        labelView.setSingleLine(true);
+        labelView.setEllipsize(TextUtils.TruncateAt.END);
+        column.addView(labelView, lp(-1, -2, 0, 0, 0, 1));
+
+        String safeValue = value == null ? "" : value.trim();
+        int valueSize = safeValue.length() > 14 ? 10 : safeValue.length() > 9 ? 11 : 12;
+        TextView valueView = habboText(safeValue, valueSize, true);
+        valueView.setTextColor(lightTheme ? Color.rgb(46,46,50) : Color.WHITE);
+        valueView.setSingleLine(true);
+        valueView.setEllipsize(TextUtils.TruncateAt.END);
+        column.addView(valueView, lp(-1, -2, 0, 0, 0, 0));
+        return column;
     }
 
     private ArrayList<String> roomTags(JSONObject room) {
@@ -9144,7 +9175,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    private String groupAccessLabel(JSONObject g) {
+    private int groupAccessKind(JSONObject g) {
         String raw = firstText(
                 g,
                 "accessType", "groupAccess", "joinType", "membershipType",
@@ -9154,84 +9185,156 @@ public class MainActivity extends Activity {
         value = value.replace('-', '_').replace(' ', '_');
         if (value.contains("EXCLUSIVE") || value.contains("REQUEST")
                 || value.contains("APPROVAL") || value.contains("LOCKED")) {
-            return t(R.string.group_access_request);
+            return 2; // solicitação
         }
         if (value.contains("PRIVATE") || value.contains("CLOSED")
                 || value.contains("CLOSE")) {
-            return t(R.string.group_access_closed);
+            return 3; // fechado
         }
         if (value.contains("NORMAL") || value.contains("REGULAR") || value.contains("OPEN")
                 || value.contains("FREE") || value.contains("PUBLIC")) {
-            return t(R.string.group_access_open);
+            return 1; // aberto
         }
+        return 0;
+    }
+
+    private String groupAccessLabel(JSONObject g) {
+        int kind = groupAccessKind(g);
+        if (kind == 1) return t(R.string.group_access_open);
+        if (kind == 2) return t(R.string.group_access_request);
+        if (kind == 3) return t(R.string.group_access_closed);
         return "";
     }
 
-    private String groupUserRoleLabel(JSONObject g) {
-        String rawRole = firstText(
-                g,
-                "memberRole", "membershipRole", "userRole", "role", "rank"
-        ).toUpperCase(Locale.ROOT);
-        boolean creator = optBoolAny(g, false,
-                "isOwner", "owner", "isCreator", "creator", "isFounder", "founder");
+    private int groupAccessTextColor(JSONObject g) {
+        int kind = groupAccessKind(g);
+        if (kind == 1) return lightTheme ? Color.rgb(22, 132, 72) : Color.rgb(78, 218, 128);
+        if (kind == 2) return lightTheme ? Color.rgb(177, 125, 0) : Color.rgb(255, 205, 72);
+        if (kind == 3) return lightTheme ? Color.rgb(196, 48, 48) : Color.rgb(255, 92, 92);
+        return lightTheme ? Color.rgb(90,90,94) : Color.argb(210,255,255,255);
+    }
 
+    private boolean jsonAnyTrue(JSONObject object, String... keys) {
+        if (object == null || keys == null) return false;
+        for (String key : keys) {
+            if (key == null || !object.has(key)) continue;
+            Object raw = object.opt(key);
+            if (raw == null || raw == JSONObject.NULL) continue;
+            if (raw instanceof Boolean && (Boolean) raw) return true;
+            if (raw instanceof Number && ((Number) raw).doubleValue() != 0d) return true;
+            if (raw instanceof String) {
+                String value = ((String) raw).trim().toLowerCase(Locale.ROOT);
+                if ("true".equals(value) || "1".equals(value) || "yes".equals(value)
+                        || "sim".equals(value) || "owner".equals(value)
+                        || "creator".equals(value) || "founder".equals(value)) return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean matchesCurrentProfileIdentity(Object raw, String currentId, String currentName) {
+        if (raw == null || raw == JSONObject.NULL) return false;
+        if (raw instanceof JSONObject) {
+            JSONObject object = (JSONObject) raw;
+            String candidateId = normalizeNickKey(firstText(
+                    object, "uniqueId", "id", "userId", "habboId", "ownerId"
+            ));
+            String candidateName = normalizeNickKey(firstText(
+                    object, "name", "username", "habboName", "ownerName"
+            ));
+            return (!currentId.isEmpty() && !candidateId.isEmpty() && currentId.equals(candidateId))
+                    || (!currentName.isEmpty() && !candidateName.isEmpty() && currentName.equals(candidateName));
+        }
+        if (raw instanceof Boolean || raw instanceof Number) return false;
+        String candidate = normalizeNickKey(String.valueOf(raw));
+        if (candidate.isEmpty()) return false;
+        return (!currentId.isEmpty() && currentId.equals(candidate))
+                || (!currentName.isEmpty() && currentName.equals(candidate));
+    }
+
+    private String groupUserRoleLabel(JSONObject g) {
         String currentId = activeRenderedProfile == null ? ""
                 : normalizeNickKey(activeRenderedProfile.uniqueId);
         String currentName = activeRenderedProfile == null ? ""
                 : normalizeNickKey(activeRenderedProfile.name);
-        String ownerId = normalizeNickKey(firstText(g,
-                "ownerId", "creatorId", "founderId", "groupOwnerId"));
-        String ownerName = normalizeNickKey(firstText(g,
-                "ownerName", "creatorName", "founderName", "groupOwnerName"));
-        JSONObject ownerObject = g == null ? null : g.optJSONObject("owner");
-        if (ownerObject == null && g != null) ownerObject = g.optJSONObject("creator");
-        if (ownerObject != null) {
-            String nestedOwnerId = normalizeNickKey(firstText(
-                    ownerObject, "uniqueId", "id", "userId", "habboId"));
-            String nestedOwnerName = normalizeNickKey(firstText(
-                    ownerObject, "name", "username", "habboName"));
-            if (!currentId.isEmpty() && !nestedOwnerId.isEmpty() && currentId.equals(nestedOwnerId)) creator = true;
-            if (!currentName.isEmpty() && !nestedOwnerName.isEmpty() && currentName.equals(nestedOwnerName)) creator = true;
+
+        JSONObject membership = g == null ? null : g.optJSONObject("membership");
+        if (membership == null && g != null) membership = g.optJSONObject("member");
+        if (membership == null && g != null) membership = g.optJSONObject("userMembership");
+
+        String rawRole = firstText(
+                g,
+                "memberRole", "membershipRole", "userRole", "role", "rank", "membershipStatus"
+        ).toUpperCase(Locale.ROOT);
+        if (membership != null) {
+            String nestedRole = firstText(
+                    membership, "memberRole", "membershipRole", "userRole", "role", "rank", "status"
+            ).toUpperCase(Locale.ROOT);
+            if (!nestedRole.isEmpty()) rawRole = rawRole + " " + nestedRole;
         }
 
-        if (!currentId.isEmpty() && !ownerId.isEmpty() && currentId.equals(ownerId)) creator = true;
-        if (!currentName.isEmpty() && !ownerName.isEmpty() && currentName.equals(ownerName)) creator = true;
-        if (rawRole.contains("OWNER") || rawRole.contains("CREATOR") || rawRole.contains("FOUNDER")) creator = true;
+        // Não usa optBoolAny aqui: ele retorna no primeiro campo existente, mesmo quando
+        // esse primeiro campo é false. Em algumas respostas isso fazia o dono cair como admin.
+        boolean creator = jsonAnyTrue(
+                g,
+                "isOwner", "owner", "isCreator", "creator", "isFounder", "founder",
+                "ownedByUser", "userIsOwner", "isGroupOwner"
+        );
+        creator = creator || jsonAnyTrue(
+                membership,
+                "isOwner", "owner", "isCreator", "creator", "isFounder", "founder"
+        );
+
+        if (rawRole.contains("OWNER") || rawRole.contains("CREATOR")
+                || rawRole.contains("FOUNDER") || rawRole.contains("FUNDADOR")
+                || rawRole.contains("CRIADOR")) creator = true;
+
+        if (g != null) {
+            String ownerId = normalizeNickKey(firstText(
+                    g,
+                    "ownerId", "ownerUniqueId", "ownerUserId", "creatorId", "founderId",
+                    "groupOwnerId", "groupOwnerUniqueId"
+            ));
+            String ownerName = normalizeNickKey(firstText(
+                    g,
+                    "ownerName", "ownerUsername", "creatorName", "founderName",
+                    "groupOwnerName", "groupOwnerUsername"
+            ));
+            if (!currentId.isEmpty() && !ownerId.isEmpty() && currentId.equals(ownerId)) creator = true;
+            if (!currentName.isEmpty() && !ownerName.isEmpty() && currentName.equals(ownerName)) creator = true;
+
+            Object[] ownerCandidates = new Object[]{
+                    g.opt("owner"), g.opt("creator"), g.opt("founder"), g.opt("groupOwner")
+            };
+            for (Object candidate : ownerCandidates) {
+                if (matchesCurrentProfileIdentity(candidate, currentId, currentName)) {
+                    creator = true;
+                    break;
+                }
+            }
+        }
         if (creator) return t(R.string.group_role_creator);
 
-        boolean admin = optBoolAny(g, false,
-                "isAdmin", "admin", "administrator", "isAdministrator", "groupAdmin");
-        if (rawRole.contains("ADMIN") || rawRole.contains("MODERATOR")) admin = true;
+        boolean admin = jsonAnyTrue(
+                g,
+                "isAdmin", "admin", "administrator", "isAdministrator", "groupAdmin",
+                "userIsAdmin", "isGroupAdmin"
+        );
+        admin = admin || jsonAnyTrue(
+                membership,
+                "isAdmin", "admin", "administrator", "isAdministrator", "groupAdmin"
+        );
+        if (rawRole.contains("ADMIN") || rawRole.contains("MODERATOR")
+                || rawRole.contains("STAFF")) admin = true;
         if (admin) return t(R.string.group_role_admin);
         return t(R.string.group_role_member);
-    }
-
-    private TextView groupMetaChip(String label, String value) {
-        String textValue = label + ": " + value;
-        TextView chip = text(
-                textValue,
-                11,
-                lightTheme ? Color.rgb(74, 58, 88) : Color.argb(225,255,255,255),
-                true
-        );
-        chip.setGravity(Gravity.CENTER_VERTICAL);
-        chip.setSingleLine(true);
-        chip.setEllipsize(TextUtils.TruncateAt.END);
-        chip.setPadding(dp(8), dp(5), dp(8), dp(5));
-        chip.setBackground(round(
-                lightTheme ? Color.rgb(242, 238, 248) : Color.argb(34, 139, 92, 246),
-                dp(9),
-                lightTheme ? Color.rgb(220, 211, 232) : Color.argb(55, 190, 145, 255),
-                1
-        ));
-        return chip;
     }
 
     private LinearLayout groupRow(JSONObject g) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(12),dp(12),dp(12),dp(12));
+        row.setPadding(dp(12), dp(10), dp(12), dp(10));
         row.setBackground(round(
                 lightTheme ? Color.rgb(250,250,250) : Color.argb(18,255,255,255),
                 dp(16),
@@ -9239,7 +9342,8 @@ public class MainActivity extends Activity {
                         : (lightTheme ? Color.rgb(220,220,220) : Color.argb(24,255,255,255)),
                 1
         ));
-        row.setLayoutParams(lp(-1, -2, 0, 0, 0, 12));
+        // Tamanho fixo; textos longos reduzem a fonte e usam ellipsis sem alterar o card.
+        row.setLayoutParams(lp(-1, dp(142), 0, 0, 0, 12));
 
         ImageView img = new ImageView(this);
         img.setScaleType(ImageView.ScaleType.FIT_CENTER);
@@ -9252,60 +9356,77 @@ public class MainActivity extends Activity {
 
         LinearLayout txt = new LinearLayout(this);
         txt.setOrientation(LinearLayout.VERTICAL);
-        LinearLayout.LayoutParams tp=new LinearLayout.LayoutParams(0,-2,1);
-        tp.leftMargin=dp(12);
-        row.addView(txt,tp);
+        txt.setGravity(Gravity.TOP);
+        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, -1, 1);
+        tp.leftMargin = dp(12);
+        row.addView(txt, tp);
 
         String groupNameText = firstText(g,"name","groupName");
-        TextView groupName = habboText(
-                groupNameText.isEmpty() ? t(R.string.group_fallback) : groupNameText,
-                17,
-                true
-        );
-        groupName.setMaxLines(1);
+        String shownName = groupNameText.isEmpty() ? t(R.string.group_fallback) : groupNameText;
+        int nameSize = shownName.length() > 58 ? 11 : shownName.length() > 38 ? 12
+                : shownName.length() > 25 ? 14 : 16;
+        TextView groupName = habboText(shownName, nameSize, true);
+        groupName.setMaxLines(2);
         groupName.setEllipsize(TextUtils.TruncateAt.END);
-        txt.addView(groupName);
+        groupName.setLineSpacing(dp(1), 1f);
+        txt.addView(groupName, lp(-1, -2, 0, 0, 0, 2));
 
-        String desc=firstText(g,"description","desc");
+        String desc = firstText(g,"description","desc");
         if(!desc.isEmpty()) {
-            TextView gd = habboText(desc, 14, false);
+            int descSize = desc.length() > 140 ? 9 : desc.length() > 90 ? 10
+                    : desc.length() > 55 ? 11 : 12;
+            TextView gd = habboText(desc, descSize, false);
             gd.setTextColor(lightTheme ? Color.rgb(68,68,72) : Color.argb(220,255,255,255));
-            gd.setMaxLines(2);
+            gd.setMaxLines(3);
             gd.setEllipsize(TextUtils.TruncateAt.END);
-            txt.addView(gd);
+            gd.setGravity(Gravity.TOP);
+            gd.setLineSpacing(dp(1), 1f);
+            txt.addView(gd, new LinearLayout.LayoutParams(-1, 0, 1f));
+        } else {
+            Space flexibleSpace = new Space(this);
+            txt.addView(flexibleSpace, new LinearLayout.LayoutParams(-1, 0, 1f));
         }
 
         String groupDate = niceDate(firstText(g,"createdAt","creationTime","date"));
         if (groupDate != null && !groupDate.trim().isEmpty()) {
             TextView dateView = text(
                     groupDate,
-                    12,
-                    lightTheme ? Color.rgb(105,105,110) : Color.argb(180,255,255,255),
+                    10,
+                    lightTheme ? Color.rgb(105,105,110) : Color.argb(175,255,255,255),
                     false
             );
-            txt.addView(dateView, lp(-1, -2, 0, 3, 0, 0));
+            dateView.setSingleLine(true);
+            dateView.setEllipsize(TextUtils.TruncateAt.END);
+            txt.addView(dateView, lp(-1, dp(15), 0, 1, 0, 1));
         }
 
-        // Informações de acesso e papel do usuário ficam sempre no rodapé do card.
+        // Rodapé fixo: mostra somente os valores, sem os rótulos "Acesso" e "Função".
         LinearLayout meta = new LinearLayout(this);
         meta.setOrientation(LinearLayout.HORIZONTAL);
         meta.setGravity(Gravity.CENTER_VERTICAL);
-        LinearLayout.LayoutParams metaLp = new LinearLayout.LayoutParams(-1, -2);
-        metaLp.topMargin = dp(7);
-        txt.addView(meta, metaLp);
+        txt.addView(meta, new LinearLayout.LayoutParams(-1, dp(22)));
 
         String access = groupAccessLabel(g);
-        if (!access.isEmpty()) {
-            TextView accessChip = groupMetaChip(t(R.string.group_access), access);
-            LinearLayout.LayoutParams ap = new LinearLayout.LayoutParams(0, -2, 1);
-            ap.rightMargin = dp(5);
-            meta.addView(accessChip, ap);
-        }
+        TextView accessValue = text(
+                access,
+                12,
+                groupAccessTextColor(g),
+                true
+        );
+        accessValue.setSingleLine(true);
+        accessValue.setEllipsize(TextUtils.TruncateAt.END);
+        meta.addView(accessValue, new LinearLayout.LayoutParams(0, -1, 1f));
 
-        TextView roleChip = groupMetaChip(t(R.string.group_role), groupUserRoleLabel(g));
-        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(0, -2, 1);
-        if (access.isEmpty()) rp.weight = 1f;
-        meta.addView(roleChip, rp);
+        TextView roleValue = text(
+                groupUserRoleLabel(g),
+                12,
+                lightTheme ? Color.rgb(91, 54, 135) : Color.rgb(226, 203, 255),
+                true
+        );
+        roleValue.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
+        roleValue.setSingleLine(true);
+        roleValue.setEllipsize(TextUtils.TruncateAt.END);
+        meta.addView(roleValue, new LinearLayout.LayoutParams(0, -1, 1f));
         return row;
     }
 
@@ -11962,11 +12083,11 @@ private int loadingProgressFor(String message) {
         ring.setFocusable(false);
         if (Build.VERSION.SDK_INT >= 21) ring.setElevation(dp(28));
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
-                dp(32),
-                dp(32),
+                dp(26),
+                dp(26),
                 Gravity.LEFT | Gravity.CENTER_VERTICAL
         );
-        params.leftMargin = dp(8);
+        params.leftMargin = dp(7);
         host.addView(ring, params);
         floatingProfileProgressViews.add(ring);
         updateFloatingProfileProgressIndicators();
