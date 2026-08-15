@@ -61,7 +61,7 @@ public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_BASE = "https://habbodex.com/api/v1/habboinfo";
     private static final String HABBODEX_FURNIDEX_API = "https://habbodex.com/api/v1/furnidex/furni/from-figure-string";
-    private static final String APP_VERSION = "1.3.42";
+    private static final String APP_VERSION = "1.3.43";
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -11962,8 +11962,8 @@ private int loadingProgressFor(String message) {
         ring.setFocusable(false);
         if (Build.VERSION.SDK_INT >= 21) ring.setElevation(dp(28));
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
-                dp(44),
-                dp(44),
+                dp(32),
+                dp(32),
                 Gravity.LEFT | Gravity.CENTER_VERTICAL
         );
         params.leftMargin = dp(8);
