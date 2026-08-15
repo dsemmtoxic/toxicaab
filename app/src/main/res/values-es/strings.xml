@@ -241,4 +241,14 @@
     <string name="supporter_tutorial_title">Elige tu perfil destacado</string>
     <string name="supporter_tutorial_body">Tu perfil es el último elemento del carrusel de patrocinadores. Tócalo para elegir o cambiar el perfil destacado.</string>
     <string name="supporter_choose_now">Elegir ahora</string>
+    <!-- Group membership/access metadata -->
+    <string name="group_access">Acceso</string>
+    <string name="group_access_open">Abierto</string>
+    <string name="group_access_request">Solicitud</string>
+    <string name="group_access_closed">Cerrado</string>
+    <string name="group_role">Rol</string>
+    <string name="group_role_member">Miembro</string>
+    <string name="group_role_admin">Administrador</string>
+    <string name="group_role_creator">Creador</string>
+
 </resources>
