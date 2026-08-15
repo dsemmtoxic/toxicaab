@@ -250,8 +250,8 @@
     <string name="group_access_closed">Fechado</string>
     <string name="group_role">Função</string>
     <string name="group_role_member">Membro</string>
-    <string name="group_role_admin">Administrador</string>
-    <string name="group_role_creator">Criador</string>
+    <string name="group_role_admin">ADM</string>
+    <string name="group_role_creator">Dono</string>
 
     <string name="room_rating">Nota</string>
     <string name="room_limit">Limite</string>
