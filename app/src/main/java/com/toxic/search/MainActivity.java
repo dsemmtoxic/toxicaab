@@ -61,7 +61,7 @@ public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_BASE = "https://habbodex.com/api/v1/habboinfo";
     private static final String HABBODEX_FURNIDEX_API = "https://habbodex.com/api/v1/furnidex/furni/from-figure-string";
-    private static final String APP_VERSION = "1.3.47";
+    private static final String APP_VERSION = "1.3.48";
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -244,7 +244,7 @@ public class MainActivity extends Activity {
     private long lastProgressiveRenderAtMs = 0L;
     private ProfileResult pendingProgressiveSnapshot = null;
     private int pendingProgressiveToken = 0;
-    private ProfileResult activeRenderedProfile = null;
+    private volatile ProfileResult activeRenderedProfile = null;
     // Fonte viva do perfil atual. Estados de UI que mudam durante um carregamento
     // progressivo também são gravados aqui, evitando que um snapshot posterior
     // reverta a escolha do usuário.
@@ -316,7 +316,7 @@ public class MainActivity extends Activity {
     private int profileOpenActionsSinceAd = 0;
     private boolean pendingProfileInterstitialAction = false;
     private long pendingProfileInterstitialRequestedAt = 0L;
-    private static final long PROFILE_INTERSTITIAL_PENDING_WINDOW_MS = 5L * 60L * 1000L;
+    private static final long PROFILE_INTERSTITIAL_PENDING_WINDOW_MS = 25L * 1000L;
     private int interstitialLoadFailureCount = 0;
     private long nextInterstitialLoadAllowedAt = 0L;
     private Runnable interstitialRetryRunnable = null;
@@ -374,6 +374,9 @@ public class MainActivity extends Activity {
     private int rewardedLoadFailureCount = 0;
     private long nextRewardedLoadAllowedAt = 0L;
     private Runnable rewardedRetryRunnable = null;
+    private boolean pendingRewardedShowRequest = false;
+    private long pendingRewardedShowRequestedAt = 0L;
+    private static final long REWARDED_SHOW_PENDING_WINDOW_MS = 25L * 1000L;
     private TextView rewardAdBtn;
     private TextView rewardAdTimeLabel;
     private ImageView selectedHotelFlag;
@@ -439,6 +442,11 @@ public class MainActivity extends Activity {
                 preloadBannerAds();
                 loadInterstitialAd();
                 loadStartNativeAdIfNeeded();
+            }
+            // Rewarded ads may be used even while temporary ad-free time is active
+            // (the user can accumulate more time), so keep one ready independently.
+            if (!removeAdsPurchased && !supporterActive) {
+                loadRewardedAd();
             }
             updateStartNativeAdVisibility();
             uiHandler.postDelayed(this, 1000L);
@@ -605,10 +613,15 @@ public class MainActivity extends Activity {
             android.util.Log.i(ADS_LOG_TAG, "MobileAds initialized");
             runOnUiThread(() -> {
                 mobileAdsInitialized = true;
-                if (!billingEntitlementCheckPending && !hasConfirmedAdFreeAccess()) {
-                    preloadBannerAds();
-                    loadInterstitialAd();
-                    refreshAttachedProfileBannerAds();
+                if (!billingEntitlementCheckPending) {
+                    if (!hasConfirmedAdFreeAccess()) {
+                        preloadBannerAds();
+                        loadInterstitialAd();
+                        refreshAttachedProfileBannerAds();
+                    }
+                    if (!removeAdsPurchased && !supporterActive) {
+                        loadRewardedAd();
+                    }
                 }
             });
         });
@@ -1346,6 +1359,62 @@ public class MainActivity extends Activity {
                 && System.currentTimeMillis() >= nextRewardedLoadAllowedAt;
     }
 
+    private void clearPendingProfileInterstitial() {
+        pendingProfileInterstitialAction = false;
+        pendingProfileInterstitialRequestedAt = 0L;
+    }
+
+    private boolean hasFreshPendingProfileInterstitial() {
+        if (!pendingProfileInterstitialAction) return false;
+        long age = System.currentTimeMillis() - pendingProfileInterstitialRequestedAt;
+        if (pendingProfileInterstitialRequestedAt <= 0L
+                || age < 0L
+                || age > PROFILE_INTERSTITIAL_PENDING_WINDOW_MS) {
+            clearPendingProfileInterstitial();
+            return false;
+        }
+        return true;
+    }
+
+    private void maybeShowPendingProfileInterstitial() {
+        if (!hasFreshPendingProfileInterstitial()) return;
+        if (hasConfirmedAdFreeAccess()) {
+            clearPendingProfileInterstitial();
+            return;
+        }
+        if (billingEntitlementCheckPending
+                || accessGateReason != AccessGateReason.NONE
+                || !appInForeground
+                || isFinishing()
+                || interstitialShowing) {
+            return;
+        }
+
+        long now = System.currentTimeMillis();
+        boolean cooldownOk = lastInterstitialShownAt <= 0L
+                || now - lastInterstitialShownAt >= INTERSTITIAL_COOLDOWN_MS;
+        if (!cooldownOk || profileOpenActionsSinceAd < ACTIONS_BETWEEN_INTERSTITIALS) {
+            clearPendingProfileInterstitial();
+            return;
+        }
+
+        if (interstitialAd == null) {
+            loadInterstitialAd();
+            return;
+        }
+
+        try {
+            interstitialShowing = true;
+            android.util.Log.i(ADS_LOG_TAG, "Interstitial pending show requested: " + INTERSTITIAL_AD_UNIT_ID);
+            interstitialAd.show(this);
+        } catch (Exception showError) {
+            android.util.Log.w(ADS_LOG_TAG, "Interstitial pending show exception: " + showError.getMessage());
+            interstitialShowing = false;
+            interstitialAd = null;
+            registerInterstitialLoadFailure();
+        }
+    }
+
     private void loadInterstitialAd() {
         // 1.3.41: return to the proven 1.3.10 lifecycle. Keep exactly one interstitial
         // cached whenever ads are allowed; the 2-minute rule controls SHOWING, not loading.
@@ -1421,9 +1490,13 @@ public class MainActivity extends Activity {
                                 // Count the cooldown only after Google confirms the ad is actually visible.
                                 lastInterstitialShownAt = System.currentTimeMillis();
                                 profileOpenActionsSinceAd = 0;
+                                clearPendingProfileInterstitial();
                                 interstitialAd = null;
                             }
                         });
+                        // If a profile-opening action happened while the ad was still loading,
+                        // consume the freshly loaded ad while that action is still recent.
+                        uiHandler.post(MainActivity.this::maybeShowPendingProfileInterstitial);
                     }
 
                     @Override
@@ -1442,11 +1515,12 @@ public class MainActivity extends Activity {
     }
 
     private void maybeShowProfileInterstitial() {
-        // Gating/show behavior follows 1.3.10: every full-profile open is an eligible
-        // action, and the already-cached interstitial is consumed only when cooldown allows.
+        // Every full-profile open is eligible. If the ad is not ready yet, remember
+        // this action briefly and show as soon as the current load finishes.
         profileOpenActionsSinceAd++;
 
         if (hasConfirmedAdFreeAccess()) {
+            clearPendingProfileInterstitial();
             cancelInterstitialAdRetry();
             interstitialAd = null;
             return;
@@ -1463,43 +1537,74 @@ public class MainActivity extends Activity {
         boolean actionCountOk = profileOpenActionsSinceAd >= ACTIONS_BETWEEN_INTERSTITIALS;
 
         if (!cooldownOk || !actionCountOk) return;
+
+        pendingProfileInterstitialAction = true;
+        pendingProfileInterstitialRequestedAt = now;
+        maybeShowPendingProfileInterstitial();
+    }
+
+    private void clearPendingRewardedShow() {
+        pendingRewardedShowRequest = false;
+        pendingRewardedShowRequestedAt = 0L;
+    }
+
+    private boolean hasFreshPendingRewardedShow() {
+        if (!pendingRewardedShowRequest) return false;
+        long age = System.currentTimeMillis() - pendingRewardedShowRequestedAt;
+        if (pendingRewardedShowRequestedAt <= 0L
+                || age < 0L
+                || age > REWARDED_SHOW_PENDING_WINDOW_MS) {
+            clearPendingRewardedShow();
+            return false;
+        }
+        return true;
+    }
+
+    private void maybeShowPendingRewardedAd() {
+        if (!hasFreshPendingRewardedShow()) return;
+        if (removeAdsPurchased || supporterActive) {
+            clearPendingRewardedShow();
+            return;
+        }
         if (billingEntitlementCheckPending
                 || accessGateReason != AccessGateReason.NONE
                 || !appInForeground
-                || isFinishing()
-                || interstitialShowing) {
+                || isFinishing()) return;
+        if (rewardedAd == null) {
+            loadRewardedAd();
             return;
         }
-
-        if (interstitialAd != null) {
-            try {
-                interstitialShowing = true;
-                android.util.Log.i(ADS_LOG_TAG, "Interstitial show requested: " + INTERSTITIAL_AD_UNIT_ID);
-                // Cooldown/action counters are updated only in onAdShowedFullScreenContent().
-                interstitialAd.show(this);
-            } catch (Exception showError) {
-                android.util.Log.w(ADS_LOG_TAG, "Interstitial show exception: " + showError.getMessage());
-                interstitialShowing = false;
-                interstitialAd = null;
-                registerInterstitialLoadFailure();
-            }
-        } else {
-            loadInterstitialAd();
+        RewardedAd ready = rewardedAd;
+        clearPendingRewardedShow();
+        android.util.Log.i(ADS_LOG_TAG, "Rewarded show requested: " + REWARDED_AD_UNIT_ID);
+        try {
+            ready.show(this, (RewardItem rewardItem) -> handleRewardedAdEarned());
+        } catch (Exception showError) {
+            android.util.Log.w(ADS_LOG_TAG, "Rewarded show exception: " + showError.getMessage());
+            rewardedAd = null;
+            registerRewardedLoadFailure();
+            toast(t(R.string.cannot_show_video));
         }
     }
 
     private void loadRewardedAd() {
         if (removeAdsPurchased || supporterActive || billingEntitlementCheckPending) {
             cancelRewardedAdRetry();
+            if (removeAdsPurchased || supporterActive) clearPendingRewardedShow();
             return;
         }
-        if (rewardedLoading || rewardedAd != null) return;
+        if (!mobileAdsInitialized) return;
+        if (rewardedLoading || rewardedAd != null) {
+            if (rewardedAd != null) uiHandler.post(this::maybeShowPendingRewardedAd);
+            return;
+        }
         if (!canLoadRewardedAdNow()) {
             scheduleRewardedAdRetry();
             return;
         }
 
         rewardedLoading = true;
+        android.util.Log.i(ADS_LOG_TAG, "Rewarded request: " + REWARDED_AD_UNIT_ID);
         AdRequest adRequest = new AdRequest.Builder().build();
 
         RewardedAd.load(
@@ -1509,18 +1614,25 @@ public class MainActivity extends Activity {
                 new RewardedAdLoadCallback() {
                     @Override
                     public void onAdLoaded(RewardedAd ad) {
+                        android.util.Log.i(ADS_LOG_TAG, "Rewarded loaded: " + REWARDED_AD_UNIT_ID);
                         rewardedLoading = false;
                         rewardedAd = ad;
                         resetRewardedBackoff();
                         rewardedAd.setFullScreenContentCallback(new FullScreenContentCallback() {
                             @Override
                             public void onAdDismissedFullScreenContent() {
+                                android.util.Log.i(ADS_LOG_TAG, "Rewarded dismissed: " + REWARDED_AD_UNIT_ID);
                                 rewardedAd = null;
-                                loadRewardedAd();
+                                uiHandler.postDelayed(MainActivity.this::loadRewardedAd, 350L);
                             }
 
                             @Override
                             public void onAdFailedToShowFullScreenContent(AdError adError) {
+                                android.util.Log.w(ADS_LOG_TAG,
+                                        "Rewarded show failed: " + REWARDED_AD_UNIT_ID
+                                                + " code=" + (adError == null ? -1 : adError.getCode())
+                                                + " domain=" + (adError == null ? "" : adError.getDomain())
+                                                + " message=" + (adError == null ? "" : adError.getMessage()));
                                 rewardedAd = null;
                                 registerRewardedLoadFailure();
                                 toast(t(R.string.cannot_show_video));
@@ -1528,13 +1640,20 @@ public class MainActivity extends Activity {
 
                             @Override
                             public void onAdShowedFullScreenContent() {
+                                android.util.Log.i(ADS_LOG_TAG, "Rewarded shown: " + REWARDED_AD_UNIT_ID);
                                 rewardedAd = null;
                             }
                         });
+                        uiHandler.post(MainActivity.this::maybeShowPendingRewardedAd);
                     }
 
                     @Override
                     public void onAdFailedToLoad(LoadAdError loadAdError) {
+                        android.util.Log.w(ADS_LOG_TAG,
+                                "Rewarded failed: " + REWARDED_AD_UNIT_ID
+                                        + " code=" + (loadAdError == null ? -1 : loadAdError.getCode())
+                                        + " domain=" + (loadAdError == null ? "" : loadAdError.getDomain())
+                                        + " message=" + (loadAdError == null ? "" : loadAdError.getMessage()));
                         rewardedLoading = false;
                         rewardedAd = null;
                         registerRewardedLoadFailure();
@@ -1542,7 +1661,6 @@ public class MainActivity extends Activity {
                 }
         );
     }
-
 
     private void logBillingResult(String operation, BillingResult billingResult) {
         if (billingResult == null) {
@@ -1900,8 +2018,7 @@ public class MainActivity extends Activity {
             loadRewardedAd();
             loadStartNativeAdIfNeeded();
         } else {
-            pendingProfileInterstitialAction = false;
-            pendingProfileInterstitialRequestedAt = 0L;
+            clearPendingProfileInterstitial();
         }
     }
 
@@ -1909,8 +2026,8 @@ public class MainActivity extends Activity {
         boolean changed = supporterActive != active;
         supporterActive = active;
         if (active) {
-            pendingProfileInterstitialAction = false;
-            pendingProfileInterstitialRequestedAt = 0L;
+            clearPendingProfileInterstitial();
+            clearPendingRewardedShow();
             cancelInterstitialAdRetry();
             cancelRewardedAdRetry();
             destroyAllBannerAds();
@@ -2296,12 +2413,16 @@ public class MainActivity extends Activity {
         }
 
         if (rewardedAd == null) {
+            pendingRewardedShowRequest = true;
+            pendingRewardedShowRequestedAt = System.currentTimeMillis();
             toast(t(R.string.video_loading));
             loadRewardedAd();
             return;
         }
 
-        rewardedAd.show(this, (RewardItem rewardItem) -> handleRewardedAdEarned());
+        pendingRewardedShowRequest = true;
+        pendingRewardedShowRequestedAt = System.currentTimeMillis();
+        maybeShowPendingRewardedAd();
     }
 
     private void handleRewardedAdEarned() {
@@ -2458,8 +2579,10 @@ public class MainActivity extends Activity {
                 // returning from a full-screen interstitial, whose dismiss callback may happen
                 // before Activity.onResume().
                 loadInterstitialAd();
+                uiHandler.post(this::maybeShowPendingProfileInterstitial);
             }
             loadRewardedAd();
+            uiHandler.post(this::maybeShowPendingRewardedAd);
         }
         checkFavoriteOnlineNotifications();
     }
@@ -2868,9 +2991,16 @@ public class MainActivity extends Activity {
 
     private void dismissAccessGate() {
         accessGateReason = AccessGateReason.NONE;
-        if (!billingEntitlementCheckPending && !hasConfirmedAdFreeAccess() && appInForeground) {
-            loadInterstitialAd();
-                    }
+        if (!billingEntitlementCheckPending && appInForeground) {
+            if (!hasConfirmedAdFreeAccess()) {
+                loadInterstitialAd();
+                uiHandler.postDelayed(this::maybeShowPendingProfileInterstitial, 120L);
+            }
+            if (!removeAdsPurchased && !supporterActive) {
+                loadRewardedAd();
+                uiHandler.postDelayed(this::maybeShowPendingRewardedAd, 120L);
+            }
+        }
         Dialog dialog = accessGateDialog;
         accessGateDialog = null;
         if (dialog != null) {
@@ -4526,6 +4656,17 @@ public class MainActivity extends Activity {
         return token == activeSearchToken;
     }
 
+    private int boundProfileToken(ProfileResult profile) {
+        if (profile != null && profile.searchToken > 0) return profile.searchToken;
+        return activeSearchToken;
+    }
+
+    private boolean isCurrentProfileResult(ProfileResult profile, int token) {
+        if (profile == null || !isActiveToken(token) || activeRenderedProfile == null) return false;
+        if (!sameProfile(activeRenderedProfile, profile)) return false;
+        return normalizeHotelKey(activeRenderedProfile.hotelKey).equals(normalizeHotelKey(profile.hotelKey));
+    }
+
     private void awaitMinimumProfileLoading(long loadingStartedAt) {
         long remaining = PROFILE_MIN_LOADING_MS
                 - (SystemClock.elapsedRealtime() - loadingStartedAt);
@@ -4792,6 +4933,7 @@ public class MainActivity extends Activity {
 
     private ProfileResult loadProfileByUniqueId(String uniqueId, String fallbackName, boolean includeSections, int token) throws Exception {
         ProfileResult r = new ProfileResult();
+        r.searchToken = token;
         r.searchedNick = fallbackName == null || fallbackName.trim().isEmpty() ? uniqueId : fallbackName.trim();
         r.uniqueId = uniqueId == null ? "" : uniqueId.trim();
         r.hotelKey = currentHotelKey;
@@ -4853,6 +4995,7 @@ public class MainActivity extends Activity {
 
     private ProfileResult loadProfile(String nick, boolean includeSections, int token) throws Exception {
         ProfileResult r = new ProfileResult();
+        r.searchToken = token;
         r.searchedNick = nick;
         r.hotelKey = currentHotelKey;
 
@@ -6797,6 +6940,8 @@ public class MainActivity extends Activity {
 
     private void loadMorePhotos(ProfileResult r, HorizontalScrollView photosHsv) {
         if (r == null || r.photosLoading || !r.photosHasMore || r.uniqueId == null || r.uniqueId.isEmpty()) return;
+        final int token = boundProfileToken(r);
+        if (!isCurrentProfileResult(r, token)) return;
         if (r.allPhotosSource != null && !r.allPhotosSource.isEmpty()) {
             photosScrollX = photosHsv == null ? 0 : photosHsv.getScrollX();
             int end = Math.min(r.photos.size() + PAGE_CHUNK, r.allPhotosSource.size());
@@ -6808,7 +6953,6 @@ public class MainActivity extends Activity {
             renderProfile(r);
             return;
         }
-        final int token = activeSearchToken;
         final int page = r.photosNextPage <= 0 ? 2 : r.photosNextPage;
         r.photosLoading = true;
         photosScrollX = photosHsv == null ? 0 : photosHsv.getScrollX();
@@ -6816,14 +6960,14 @@ public class MainActivity extends Activity {
         executor.execute(() -> {
             try {
                 PageResult next = fetchPageChunk(r.uniqueId, "photos", "photos", page, PAGE_CHUNK, PAGE_CHUNK);
-                if (!isActiveToken(token)) return;
+                if (!isCurrentProfileResult(r, token)) return;
                 applyPhotosPage(r, next, false);
                 try { enrichPhotoRoomInfo(r); } catch(Exception ignored) {}
             } catch (Exception ignored) {
             } finally {
                 r.photosLoading = false;
                 runOnUiThread(() -> {
-                    if (!isActiveToken(token)) return;
+                    if (!isCurrentProfileResult(r, token)) return;
                     renderProfile(r);
                 });
             }
@@ -6833,6 +6977,8 @@ public class MainActivity extends Activity {
     private void loadMoreStyles(ProfileResult r, HorizontalScrollView stylesHsv) {
         if (r == null || r.stylesLoading || !r.stylesHasMore
                 || r.uniqueId == null || r.uniqueId.isEmpty()) return;
+        final int token = boundProfileToken(r);
+        if (!isCurrentProfileResult(r, token)) return;
 
         stylesScrollX = stylesHsv == null ? 0 : stylesHsv.getScrollX();
 
@@ -6853,7 +6999,6 @@ public class MainActivity extends Activity {
         // Quando os 100 itens já baixados foram consumidos, busca a próxima
         // página remota de 100 e volta a liberar em blocos de PAGE_CHUNK.
         if (r.stylesRemotePaged) {
-            final int token = activeSearchToken;
             final int remotePage = r.stylesRemoteNextPage <= 1
                     ? 2
                     : r.stylesRemoteNextPage;
@@ -6868,7 +7013,7 @@ public class MainActivity extends Activity {
                             remotePage,
                             100
                     );
-                    if (!isActiveToken(token) || !next.success) return;
+                    if (!isCurrentProfileResult(r, token) || !next.success) return;
                     synchronized (r) {
                         r.allStylesSource = mergeLists(r.allStylesSource, next.items);
                         if (next.total > 0) {
@@ -6897,7 +7042,7 @@ public class MainActivity extends Activity {
                 } finally {
                     r.stylesLoading = false;
                     runOnUiThread(() -> {
-                        if (!isActiveToken(token)) return;
+                        if (!isCurrentProfileResult(r, token)) return;
                         renderProfile(r);
                     });
                 }
@@ -6937,6 +7082,8 @@ public class MainActivity extends Activity {
     }
 
     private void renderProfile(ProfileResult r) {
+        // Never allow a delayed callback from an older search to take the screen back.
+        if (r != null && r.searchToken > 0 && r.searchToken != activeSearchToken) return;
         loadingSkeletonProgressBar = null;
         profilePrimaryProgressAnchor = null;
         String renderedHotel = r == null ? "" : normalizeHotelKey(r.hotelKey);
@@ -8541,9 +8688,14 @@ public class MainActivity extends Activity {
     }
 
     private void loadMoreBadges(ProfileResult r) {
+        loadMoreBadges(r, null);
+    }
+
+    private void loadMoreBadges(ProfileResult r, Runnable sectionRefresh) {
         if (r == null || r.badgesLoading || !r.badgesHasMore
                 || r.uniqueId == null || r.uniqueId.trim().isEmpty()) return;
-        final int token = activeSearchToken;
+        final int token = boundProfileToken(r);
+        if (!isCurrentProfileResult(r, token)) return;
         final int nextPage = r.badgesNextPage <= 1 ? 2 : r.badgesNextPage;
         r.badgesLoading = true;
         executor.execute(() -> {
@@ -8551,7 +8703,7 @@ public class MainActivity extends Activity {
                 PageResult next = fetchCriticalBadgesPage(
                         r.uniqueId, nextPage, 100, false
                 );
-                if (!isActiveToken(token) || next == null || !next.success) return;
+                if (!isCurrentProfileResult(r, token) || next == null || !next.success) return;
                 synchronized (r) {
                     applyBadgesPage(r, next, false);
                     reconcileProfileSources(r);
@@ -8560,11 +8712,17 @@ public class MainActivity extends Activity {
             } finally {
                 r.badgesLoading = false;
                 runOnUiThread(() -> {
-                    if (!isActiveToken(token)) return;
-                    final int scrollY = mainScroll == null ? 0 : mainScroll.getScrollY();
-                    renderProfile(r);
-                    if (mainScroll != null && scrollY > 0) {
-                        mainScroll.post(() -> mainScroll.scrollTo(0, scrollY));
+                    if (!isCurrentProfileResult(r, token)) return;
+                    // Automatic pagination only refreshes the badge section. Rebuilding
+                    // the whole profile here made rooms/styles/mottos visibly blink.
+                    if (sectionRefresh != null) {
+                        sectionRefresh.run();
+                    } else {
+                        final int scrollY = mainScroll == null ? 0 : mainScroll.getScrollY();
+                        renderProfile(r);
+                        if (mainScroll != null && scrollY > 0) {
+                            mainScroll.post(() -> mainScroll.scrollTo(0, scrollY));
+                        }
                     }
                 });
             }
@@ -8574,7 +8732,8 @@ public class MainActivity extends Activity {
     private void loadMoreFriends(ProfileResult r) {
         if (r == null || r.friendsLoading || !r.friendsHasMore
                 || r.uniqueId == null || r.uniqueId.trim().isEmpty()) return;
-        final int token = activeSearchToken;
+        final int token = boundProfileToken(r);
+        if (!isCurrentProfileResult(r, token)) return;
         final int nextPage = r.friendsNextPage <= 1 ? 2 : r.friendsNextPage;
         r.friendsLoading = true;
         executor.execute(() -> {
@@ -8585,7 +8744,7 @@ public class MainActivity extends Activity {
                         100,
                         false
                 );
-                if (!isActiveToken(token)
+                if (!isCurrentProfileResult(r, token)
                         || next == null
                         || !next.success
                         || next.items == null
@@ -8618,7 +8777,7 @@ public class MainActivity extends Activity {
             } finally {
                 r.friendsLoading = false;
                 runOnUiThread(() -> {
-                    if (!isActiveToken(token)) return;
+                    if (!isCurrentProfileResult(r, token)) return;
                     renderProfile(r);
                 });
             }
@@ -8628,7 +8787,8 @@ public class MainActivity extends Activity {
     private void loadMoreRemovedFriends(ProfileResult r) {
         if (r == null || r.removedFriendsLoading || !r.removedFriendsHasMore
                 || r.uniqueId == null || r.uniqueId.trim().isEmpty()) return;
-        final int token = activeSearchToken;
+        final int token = boundProfileToken(r);
+        if (!isCurrentProfileResult(r, token)) return;
         final int nextPage = r.removedFriendsNextPage <= 1 ? 2 : r.removedFriendsNextPage;
         r.removedFriendsLoading = true;
         executor.execute(() -> {
@@ -8654,7 +8814,7 @@ public class MainActivity extends Activity {
             } finally {
                 r.removedFriendsLoading = false;
                 runOnUiThread(() -> {
-                    if (!isActiveToken(token)) return;
+                    if (!isCurrentProfileResult(r, token)) return;
                     renderProfile(r);
                 });
             }
@@ -9183,11 +9343,18 @@ public class MainActivity extends Activity {
                 r.hideAchievementBadges = hideAchievementBadges[0];
                 if (r.badgesHasMore
                         && page[0] >= Math.max(1, (int)Math.ceil(currentData.size() / 24.0))) {
-                    loadMoreBadges(r);
+                    loadMoreBadges(r, render[0]);
                 }
             });
-            if (r.badgesHasMore && currentData.size() <= 24 && !r.badgesLoading) {
-                uiHandler.post(() -> loadMoreBadges(r));
+            if (!profileSectionsInProgress
+                    && r.badgesHasMore
+                    && currentData.size() <= 24
+                    && !r.badgesLoading) {
+                final int badgeProfileToken = boundProfileToken(r);
+                uiHandler.post(() -> {
+                    if (!isCurrentProfileResult(r, badgeProfileToken)) return;
+                    loadMoreBadges(r, render[0]);
+                });
             }
             if (r.badgesLoading) {
                 content.addView(centerNote(t(R.string.loading_history)));
@@ -15289,6 +15456,7 @@ private int loadingProgressFor(String message) {
     private ProfileResult copyProfileResult(ProfileResult src) {
         ProfileResult c = new ProfileResult();
         if (src == null) return c;
+        c.searchToken = src.searchToken;
         c.searchedNick = src.searchedNick; c.uniqueId = src.uniqueId; c.name = src.name; c.motto = src.motto; c.figure = src.figure; c.memberSince = src.memberSince; c.lastAccess = src.lastAccess; c.level = src.level; c.starGems = src.starGems; c.hotelKey = src.hotelKey;
         c.online = src.online; c.privateProfile = src.privateProfile; c.banned = src.banned;
         c.habboPublic = src.habboPublic; c.dex = src.dex; c.suggest = src.suggest; c.dexProfile = src.dexProfile; c.officialProfile = src.officialProfile; c.officialBadgeLookup = src.officialBadgeLookup;
@@ -15316,6 +15484,8 @@ private int loadingProgressFor(String message) {
             inlineProgressPct = 0;
             inlineProgressMessage = "";
             ProfileResult previous = profileHistory.removeLast();
+            previous.searchToken = activeSearchToken;
+            activeProfileSource = previous;
             String previousHotel = normalizeHotelKey(previous.hotelKey);
             if (!previousHotel.isEmpty()) {
                 currentHotelKey = previousHotel;
@@ -16583,6 +16753,7 @@ private int loadingProgressFor(String message) {
     }
 
     private static class ProfileResult {
+        int searchToken = 0;
         String searchedNick = "", uniqueId = "", name = "", motto = "", figure = "", memberSince = "", lastAccess = "", level = "", starGems = "", totalBadges = "", hotelKey = "br";
         boolean online = false, privateProfile = false, banned = false;
         JSONObject habboPublic, dex, suggest, dexProfile, officialProfile;
