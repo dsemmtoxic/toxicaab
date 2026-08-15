@@ -253,4 +253,6 @@
     <string name="group_role_admin">Administrador</string>
     <string name="group_role_creator">Criador</string>
 
+    <string name="room_rating">Nota</string>
+    <string name="room_limit">Limite</string>
 </resources>
