@@ -61,7 +61,7 @@ public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_BASE = "https://habbodex.com/api/v1/habboinfo";
     private static final String HABBODEX_FURNIDEX_API = "https://habbodex.com/api/v1/furnidex/furni/from-figure-string";
-    private static final String APP_VERSION = "1.3.41";
+    private static final String APP_VERSION = "1.3.42";
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -209,6 +209,9 @@ public class MainActivity extends Activity {
     private TextView statusText;
     private ProgressBar progress;
     private FrameLayout loadingSkeletonProgressBar;
+    // Barra principal usada para decidir quando o progresso flutuante precisa aparecer.
+    private View profilePrimaryProgressAnchor;
+    private final ArrayList<CircularPullProgressView> floatingProfileProgressViews = new ArrayList<>();
     private LinearLayout suggestionsBox;
     private ScrollView suggestionsScroll;
     private int suggestionRequestId = 0;
@@ -302,6 +305,7 @@ public class MainActivity extends Activity {
     private boolean pullDragging = false;
     private final ArrayList<ProfileHistoryItem> openedProfilesHistory = new ArrayList<>();
     private final ArrayList<ProfileHistoryItem> favoriteProfiles = new ArrayList<>();
+    private Dialog activeFavoriteProfilesDialog;
     private String currentHotelKey = "br";
 
     private InterstitialAd interstitialAd;
@@ -2874,14 +2878,17 @@ public class MainActivity extends Activity {
     }
 
     private void buildUi() {
+        pruneFloatingProfileProgressViews(true);
         mainTutorialSettingsTarget = null;
         mainTutorialSearchTarget = null;
         mainTutorialVisualsTarget = null;
         screen = new PullDispatchFrameLayout(this);
         ((PullDispatchFrameLayout) screen).setPullTouchListener(this::handleMainPullToRefreshDispatch);
         screen.setBackground(makeBg());
+        attachFloatingProfileProgressIndicator(screen, true);
         ScrollView scroll = new ScrollView(this);
         mainScroll = scroll;
+        scroll.getViewTreeObserver().addOnScrollChangedListener(this::updateFloatingProfileProgressIndicators);
         scroll.setFillViewport(true);
         scroll.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
         scroll.setOnTouchListener((v, event) -> {
@@ -4607,7 +4614,57 @@ public class MainActivity extends Activity {
     }
 
     private void openSponsorProfile(String name, String uniqueId, String figure, String hotelKey) {
-        openProfileReference(name, uniqueId, figure, hotelKey);
+        openProfileReferenceOnMainScreen(name, uniqueId, figure, hotelKey);
+    }
+
+    /**
+     * Abre uma referência externa (patrocinador/favorito/miniperfil) sempre na tela
+     * principal e no idioma do hotel de destino. A tela antiga não é preservada,
+     * porque renderizar o perfil anterior durante a reconstrução faria renderProfile()
+     * restaurar o hotel/idioma antigo.
+     */
+    private void openProfileReferenceOnMainScreen(String name, String uniqueId, String figure, String hotelKey) {
+        String hotel = normalizeHotelKey(hotelKey);
+        if (hotel.isEmpty()) hotel = defaultHotelForDeviceLocale();
+        if (blockRepeatedProfileOpen(name, uniqueId, hotel)) return;
+        if (!claimProfileSearchSlot()) return;
+
+        activeSearchToken++;
+        activeSearchNick = "";
+        searchInProgress = false;
+        profileSectionsInProgress = false;
+        inlineProgressPct = 0;
+        inlineProgressMessage = "";
+        currentLoadedNick = "";
+        activeRenderedProfile = null;
+        activeProfileSource = null;
+        currentProfilePrivate = false;
+        profilePrimaryProgressAnchor = null;
+
+        currentHotelKey = hotel;
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PREF_HOTEL, currentHotelKey).apply();
+        translationContext = null;
+        translationContextHotel = "";
+
+        // Recria todos os textos estáticos (Buscando, Patrocinadores, botões,
+        // navegação, etc.) já no Locale correspondente ao hotel escolhido.
+        buildUi();
+        refreshSponsors();
+        if (mainScroll != null) {
+            mainScroll.post(() -> mainScroll.scrollTo(0, 0));
+        }
+
+        updateSelectedHotelHeaderFlag();
+        String id = uniqueId == null ? "" : uniqueId.trim();
+        loadingProfileUniqueIdHint = id;
+        loadingProfileFigureHint = figure == null ? "" : figure.trim();
+        loadingProfileHotelHint = normalizeHotelKey(currentHotelKey);
+        String display = name == null ? "" : name.trim();
+        if (display.isEmpty()) display = id;
+        setSearchTextProgrammatically(display);
+        clearSearchFocus();
+        if (!id.isEmpty()) searchByUniqueId(id, display, true);
+        else search(true);
     }
 
     private void updateSelectedHotelHeaderFlag() {
@@ -4908,6 +4965,7 @@ public class MainActivity extends Activity {
             inlineProgressMessage = t(R.string.loading_details);
         }
         updateLoadingSkeletonProgress(token, 8);
+        uiHandler.post(this::updateFloatingProfileProgressIndicators);
 
         // O perfil principal já foi liberado. Daqui em diante cada seção é
         // independente: uma rota lenta do histórico não segura as demais.
@@ -5257,6 +5315,7 @@ public class MainActivity extends Activity {
             updated = inlineProgressPct;
         }
         updateLoadingSkeletonProgress(token, updated);
+        uiHandler.post(this::updateFloatingProfileProgressIndicators);
     }
 
     private void finishProfileSectionsGroup(
@@ -5277,6 +5336,7 @@ public class MainActivity extends Activity {
                 inlineProgressPct = 0;
                 inlineProgressMessage = "";
                 updateLoadingSkeletonProgress(token, 100);
+                uiHandler.post(this::updateFloatingProfileProgressIndicators);
                 return;
             }
             // Não redesenha o perfil inteiro duas vezes para exibir 100% e logo
@@ -5285,6 +5345,7 @@ public class MainActivity extends Activity {
             inlineProgressPct = 0;
             inlineProgressMessage = "";
         }
+        uiHandler.post(this::updateFloatingProfileProgressIndicators);
         publishProgressiveProfile(source, token, firstRenderReleaseAt);
         runOnUiThread(() -> uiHandler.postDelayed(() -> {
             if (isActiveToken(token) && !searchInProgress && !profileSectionsInProgress) {
@@ -6772,6 +6833,7 @@ public class MainActivity extends Activity {
 
     private void renderProfile(ProfileResult r) {
         loadingSkeletonProgressBar = null;
+        profilePrimaryProgressAnchor = null;
         String renderedHotel = r == null ? "" : normalizeHotelKey(r.hotelKey);
         if (!renderedHotel.isEmpty() && !renderedHotel.equals(currentHotelKey)) {
             currentHotelKey = renderedHotel;
@@ -6795,8 +6857,12 @@ public class MainActivity extends Activity {
         if (profileSectionsInProgress
                 && inlineProgressMessage != null
                 && !inlineProgressMessage.trim().isEmpty()) {
-            resultWrap.addView(loadingProgressCard(inlineProgressMessage, inlineProgressPct), lp(-1, -2, 0, 0, 0, 12));
+            LinearLayout progressCard = loadingProgressCard(inlineProgressMessage, inlineProgressPct);
+            profilePrimaryProgressAnchor = progressCard;
+            resultWrap.addView(progressCard, lp(-1, -2, 0, 0, 0, 12));
+            progressCard.post(this::updateFloatingProfileProgressIndicators);
         }
+        updateFloatingProfileProgressIndicators();
 
         LinearLayout profile = card(dp(26));
         applyProfilePrivateBorder(profile, dp(26));
@@ -9078,14 +9144,168 @@ public class MainActivity extends Activity {
         }
     }
 
+    private String groupAccessLabel(JSONObject g) {
+        String raw = firstText(
+                g,
+                "accessType", "groupAccess", "joinType", "membershipType",
+                "type", "groupType", "status"
+        );
+        String value = raw == null ? "" : raw.trim().toUpperCase(Locale.ROOT);
+        value = value.replace('-', '_').replace(' ', '_');
+        if (value.contains("EXCLUSIVE") || value.contains("REQUEST")
+                || value.contains("APPROVAL") || value.contains("LOCKED")) {
+            return t(R.string.group_access_request);
+        }
+        if (value.contains("PRIVATE") || value.contains("CLOSED")
+                || value.contains("CLOSE")) {
+            return t(R.string.group_access_closed);
+        }
+        if (value.contains("NORMAL") || value.contains("REGULAR") || value.contains("OPEN")
+                || value.contains("FREE") || value.contains("PUBLIC")) {
+            return t(R.string.group_access_open);
+        }
+        return "";
+    }
+
+    private String groupUserRoleLabel(JSONObject g) {
+        String rawRole = firstText(
+                g,
+                "memberRole", "membershipRole", "userRole", "role", "rank"
+        ).toUpperCase(Locale.ROOT);
+        boolean creator = optBoolAny(g, false,
+                "isOwner", "owner", "isCreator", "creator", "isFounder", "founder");
+
+        String currentId = activeRenderedProfile == null ? ""
+                : normalizeNickKey(activeRenderedProfile.uniqueId);
+        String currentName = activeRenderedProfile == null ? ""
+                : normalizeNickKey(activeRenderedProfile.name);
+        String ownerId = normalizeNickKey(firstText(g,
+                "ownerId", "creatorId", "founderId", "groupOwnerId"));
+        String ownerName = normalizeNickKey(firstText(g,
+                "ownerName", "creatorName", "founderName", "groupOwnerName"));
+        JSONObject ownerObject = g == null ? null : g.optJSONObject("owner");
+        if (ownerObject == null && g != null) ownerObject = g.optJSONObject("creator");
+        if (ownerObject != null) {
+            String nestedOwnerId = normalizeNickKey(firstText(
+                    ownerObject, "uniqueId", "id", "userId", "habboId"));
+            String nestedOwnerName = normalizeNickKey(firstText(
+                    ownerObject, "name", "username", "habboName"));
+            if (!currentId.isEmpty() && !nestedOwnerId.isEmpty() && currentId.equals(nestedOwnerId)) creator = true;
+            if (!currentName.isEmpty() && !nestedOwnerName.isEmpty() && currentName.equals(nestedOwnerName)) creator = true;
+        }
+
+        if (!currentId.isEmpty() && !ownerId.isEmpty() && currentId.equals(ownerId)) creator = true;
+        if (!currentName.isEmpty() && !ownerName.isEmpty() && currentName.equals(ownerName)) creator = true;
+        if (rawRole.contains("OWNER") || rawRole.contains("CREATOR") || rawRole.contains("FOUNDER")) creator = true;
+        if (creator) return t(R.string.group_role_creator);
+
+        boolean admin = optBoolAny(g, false,
+                "isAdmin", "admin", "administrator", "isAdministrator", "groupAdmin");
+        if (rawRole.contains("ADMIN") || rawRole.contains("MODERATOR")) admin = true;
+        if (admin) return t(R.string.group_role_admin);
+        return t(R.string.group_role_member);
+    }
+
+    private TextView groupMetaChip(String label, String value) {
+        String textValue = label + ": " + value;
+        TextView chip = text(
+                textValue,
+                11,
+                lightTheme ? Color.rgb(74, 58, 88) : Color.argb(225,255,255,255),
+                true
+        );
+        chip.setGravity(Gravity.CENTER_VERTICAL);
+        chip.setSingleLine(true);
+        chip.setEllipsize(TextUtils.TruncateAt.END);
+        chip.setPadding(dp(8), dp(5), dp(8), dp(5));
+        chip.setBackground(round(
+                lightTheme ? Color.rgb(242, 238, 248) : Color.argb(34, 139, 92, 246),
+                dp(9),
+                lightTheme ? Color.rgb(220, 211, 232) : Color.argb(55, 190, 145, 255),
+                1
+        ));
+        return chip;
+    }
+
     private LinearLayout groupRow(JSONObject g) {
-        LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.HORIZONTAL); row.setGravity(Gravity.CENTER_VERTICAL); row.setPadding(dp(12),dp(12),dp(12),dp(12)); row.setBackground(round(lightTheme ? Color.rgb(250,250,250) : Color.argb(18,255,255,255), dp(16), currentProfilePrivate ? Color.argb(75, 255, 64, 64) : (lightTheme ? Color.rgb(220,220,220) : Color.argb(24,255,255,255)), 1)); row.setLayoutParams(lp(-1, -2, 0, 0, 0, 12));
-        ImageView img = new ImageView(this); img.setScaleType(ImageView.ScaleType.FIT_CENTER); row.addView(img, new LinearLayout.LayoutParams(dp(58), dp(58)));
-        String badge = firstText(g,"badgeCode","code"); String badgeUrl = normalizeUrl(firstText(g, "badgeUrl", "imageUrl", "url")); if(!badgeUrl.isEmpty()) loadImage(img, badgeUrl); else if(!badge.isEmpty()) loadImage(img,habboImagingUrl("/habbo-imaging/badge/"+enc(badge)+".gif")); else img.setImageDrawable(new PlaceholderDrawable("groups"));
-        LinearLayout txt = new LinearLayout(this); txt.setOrientation(LinearLayout.VERTICAL); LinearLayout.LayoutParams tp=new LinearLayout.LayoutParams(0,-2,1); tp.leftMargin=dp(12); row.addView(txt,tp);
-        TextView groupName = habboText(firstText(g,"name","groupName").isEmpty() ? t(R.string.group_fallback) : firstText(g,"name","groupName"), 17, true); groupName.setMaxLines(1); groupName.setEllipsize(TextUtils.TruncateAt.END); txt.addView(groupName);
-        String desc=firstText(g,"description","desc"); if(!desc.isEmpty()) { TextView gd = habboText(desc, 14, false); gd.setTextColor(Color.argb(220,255,255,255)); gd.setMaxLines(2); gd.setEllipsize(TextUtils.TruncateAt.END); txt.addView(gd); }
-        txt.addView(text(niceDate(firstText(g,"createdAt","creationTime","date")), 13, Color.argb(190,255,255,255), false));
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(12),dp(12),dp(12),dp(12));
+        row.setBackground(round(
+                lightTheme ? Color.rgb(250,250,250) : Color.argb(18,255,255,255),
+                dp(16),
+                currentProfilePrivate ? Color.argb(75, 255, 64, 64)
+                        : (lightTheme ? Color.rgb(220,220,220) : Color.argb(24,255,255,255)),
+                1
+        ));
+        row.setLayoutParams(lp(-1, -2, 0, 0, 0, 12));
+
+        ImageView img = new ImageView(this);
+        img.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        row.addView(img, new LinearLayout.LayoutParams(dp(58), dp(58)));
+        String badge = firstText(g,"badgeCode","code");
+        String badgeUrl = normalizeUrl(firstText(g, "badgeUrl", "imageUrl", "url"));
+        if(!badgeUrl.isEmpty()) loadImage(img, badgeUrl);
+        else if(!badge.isEmpty()) loadImage(img,habboImagingUrl("/habbo-imaging/badge/"+enc(badge)+".gif"));
+        else img.setImageDrawable(new PlaceholderDrawable("groups"));
+
+        LinearLayout txt = new LinearLayout(this);
+        txt.setOrientation(LinearLayout.VERTICAL);
+        LinearLayout.LayoutParams tp=new LinearLayout.LayoutParams(0,-2,1);
+        tp.leftMargin=dp(12);
+        row.addView(txt,tp);
+
+        String groupNameText = firstText(g,"name","groupName");
+        TextView groupName = habboText(
+                groupNameText.isEmpty() ? t(R.string.group_fallback) : groupNameText,
+                17,
+                true
+        );
+        groupName.setMaxLines(1);
+        groupName.setEllipsize(TextUtils.TruncateAt.END);
+        txt.addView(groupName);
+
+        String desc=firstText(g,"description","desc");
+        if(!desc.isEmpty()) {
+            TextView gd = habboText(desc, 14, false);
+            gd.setTextColor(lightTheme ? Color.rgb(68,68,72) : Color.argb(220,255,255,255));
+            gd.setMaxLines(2);
+            gd.setEllipsize(TextUtils.TruncateAt.END);
+            txt.addView(gd);
+        }
+
+        String groupDate = niceDate(firstText(g,"createdAt","creationTime","date"));
+        if (groupDate != null && !groupDate.trim().isEmpty()) {
+            TextView dateView = text(
+                    groupDate,
+                    12,
+                    lightTheme ? Color.rgb(105,105,110) : Color.argb(180,255,255,255),
+                    false
+            );
+            txt.addView(dateView, lp(-1, -2, 0, 3, 0, 0));
+        }
+
+        // Informações de acesso e papel do usuário ficam sempre no rodapé do card.
+        LinearLayout meta = new LinearLayout(this);
+        meta.setOrientation(LinearLayout.HORIZONTAL);
+        meta.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams metaLp = new LinearLayout.LayoutParams(-1, -2);
+        metaLp.topMargin = dp(7);
+        txt.addView(meta, metaLp);
+
+        String access = groupAccessLabel(g);
+        if (!access.isEmpty()) {
+            TextView accessChip = groupMetaChip(t(R.string.group_access), access);
+            LinearLayout.LayoutParams ap = new LinearLayout.LayoutParams(0, -2, 1);
+            ap.rightMargin = dp(5);
+            meta.addView(accessChip, ap);
+        }
+
+        TextView roleChip = groupMetaChip(t(R.string.group_role), groupUserRoleLabel(g));
+        LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(0, -2, 1);
+        if (access.isEmpty()) rp.weight = 1f;
+        meta.addView(roleChip, rp);
         return row;
     }
 
@@ -9370,6 +9590,8 @@ public class MainActivity extends Activity {
     }
 
     private void showError(String msg) {
+        profilePrimaryProgressAnchor = null;
+        updateFloatingProfileProgressIndicators();
         startScreenVisible = false;
         updateStartNativeAdVisibility();
         resultWrap.removeAllViews();
@@ -9385,12 +9607,21 @@ public class MainActivity extends Activity {
         statusText.setVisibility(clean.isEmpty() ? View.GONE : View.VISIBLE);
     }
     private void setLoading(boolean loading, String message) {
-        if (loading) { suppressSuggestions = true; suggestionRequestId++; setSuggestionsVisible(false); }
+        if (loading) {
+            suppressSuggestions = true;
+            suggestionRequestId++;
+            setSuggestionsVisible(false);
+            if (inlineProgressPct <= 0) {
+                inlineProgressPct = Math.max(8, loadingProgressFor(message));
+            }
+        }
         searchBtn.setEnabled(!loading);
         searchBtn.setText(loading ? t(R.string.searching_profile) : t(R.string.search_button));
         progress.setVisibility(View.GONE);
         setStatusMessage(loading ? "" : message);
         if (loading) showLoadingSkeleton(message == null ? t(R.string.searching_profile) : message);
+        if (!loading && !profileSectionsInProgress) profilePrimaryProgressAnchor = null;
+        updateFloatingProfileProgressIndicators();
     }
 
     private void showInlineLoading(String message) {
@@ -9522,7 +9753,9 @@ private int loadingProgressFor(String message) {
         loadingSkeletonProgressBar = (FrameLayout) inlineProgressBar(
                 Math.max(0, Math.min(100, inlineProgressPct))
         );
+        profilePrimaryProgressAnchor = loadingSkeletonProgressBar;
         c.addView(loadingSkeletonProgressBar, lp(-1, dp(9), 0, 0, 0, 16));
+        loadingSkeletonProgressBar.post(this::updateFloatingProfileProgressIndicators);
 
         FrameLayout avatar = new FrameLayout(this);
         avatar.setBackground(round(lightTheme ? Color.rgb(250,250,250) : Color.rgb(15, 8, 25), dp(20), lightTheme ? Color.rgb(220,220,220) : Color.argb(24,255,255,255), 1));
@@ -11720,6 +11953,69 @@ private int loadingProgressFor(String message) {
     }
 
 
+    private void attachFloatingProfileProgressIndicator(FrameLayout host, boolean mainScreenIndicator) {
+        if (host == null) return;
+        CircularPullProgressView ring = new CircularPullProgressView(this);
+        ring.setTag(Boolean.valueOf(mainScreenIndicator));
+        ring.setVisibility(View.GONE);
+        ring.setClickable(false);
+        ring.setFocusable(false);
+        if (Build.VERSION.SDK_INT >= 21) ring.setElevation(dp(28));
+        FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                dp(44),
+                dp(44),
+                Gravity.LEFT | Gravity.CENTER_VERTICAL
+        );
+        params.leftMargin = dp(8);
+        host.addView(ring, params);
+        floatingProfileProgressViews.add(ring);
+        updateFloatingProfileProgressIndicators();
+    }
+
+    private void pruneFloatingProfileProgressViews(boolean removeMainOnly) {
+        for (int i = floatingProfileProgressViews.size() - 1; i >= 0; i--) {
+            CircularPullProgressView view = floatingProfileProgressViews.get(i);
+            if (view == null) {
+                floatingProfileProgressViews.remove(i);
+                continue;
+            }
+            boolean main = Boolean.TRUE.equals(view.getTag());
+            if (removeMainOnly && main) {
+                floatingProfileProgressViews.remove(i);
+            } else if (!removeMainOnly && view.getParent() == null) {
+                floatingProfileProgressViews.remove(i);
+            }
+        }
+    }
+
+    private boolean isPrimaryProfileProgressVisible() {
+        View anchor = profilePrimaryProgressAnchor;
+        if (anchor == null || mainScroll == null || !anchor.isShown()) return false;
+        Rect visible = new Rect();
+        if (!anchor.getGlobalVisibleRect(visible)) return false;
+        int required = Math.max(dp(4), (int)(anchor.getHeight() * 0.35f));
+        return visible.height() >= required && visible.width() > 0;
+    }
+
+    private void updateFloatingProfileProgressIndicators() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            uiHandler.post(this::updateFloatingProfileProgressIndicators);
+            return;
+        }
+        pruneFloatingProfileProgressViews(false);
+        boolean loading = searchInProgress || profileSectionsInProgress;
+        float pct = Math.max(0.01f, Math.min(0.99f, inlineProgressPct / 100f));
+        boolean primaryVisible = isPrimaryProfileProgressVisible();
+        for (CircularPullProgressView ring : new ArrayList<>(floatingProfileProgressViews)) {
+            if (ring == null || ring.getParent() == null) continue;
+            ring.setProgressPct(pct);
+            boolean mainIndicator = Boolean.TRUE.equals(ring.getTag());
+            boolean show = loading && (!mainIndicator || !primaryVisible);
+            ring.setVisibility(show ? View.VISIBLE : View.GONE);
+            if (show) ring.bringToFront();
+        }
+    }
+
     private int bottomNavIconColor(boolean selected) {
         if (selected) return lightTheme ? Color.rgb(18,18,18) : Color.WHITE;
         return lightTheme ? Color.rgb(120,120,128) : Color.argb(155,255,255,255);
@@ -11737,6 +12033,7 @@ private int loadingProgressFor(String message) {
         if (host == null) return null;
 
         applySafeAreaInsets(activeDialog == null ? getWindow() : activeDialog.getWindow(), host);
+        if (activeDialog != null) attachFloatingProfileProgressIndicator(host, false);
 
         FrameLayout navWrap = new FrameLayout(this);
         navWrap.setBackground(bottomNavBackground());
@@ -11983,78 +12280,37 @@ private int loadingProgressFor(String message) {
     }
 
     private View visualFigureDataLoadingView() {
+        // Loader alinhado aos demais do app: sem card, halo ou fundo próprio.
         FrameLayout outer = new FrameLayout(this);
-        outer.setPadding(dp(18), dp(18), dp(18), dp(18));
         outer.setBackgroundColor(Color.TRANSPARENT);
 
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
-        card.setGravity(Gravity.CENTER);
-        card.setPadding(dp(22), dp(24), dp(22), dp(24));
-        card.setMinimumHeight(dp(300));
+        LinearLayout center = new LinearLayout(this);
+        center.setOrientation(LinearLayout.VERTICAL);
+        center.setGravity(Gravity.CENTER);
+        center.setPadding(dp(16), dp(18), dp(16), dp(18));
+        center.setBackgroundColor(Color.TRANSPARENT);
 
-        GradientDrawable bg = new GradientDrawable(
-                GradientDrawable.Orientation.TL_BR,
-                lightTheme
-                        ? new int[]{Color.rgb(255, 255, 255), Color.rgb(247, 241, 255), Color.rgb(238, 228, 255)}
-                        : new int[]{Color.rgb(25, 13, 40), Color.rgb(42, 20, 67), Color.rgb(20, 12, 34)}
-        );
-        bg.setCornerRadius(dp(24));
-        bg.setStroke(dp(1), lightTheme ? Color.rgb(224, 204, 247) : Color.argb(95, 190, 115, 255));
-        card.setBackground(bg);
-        if (Build.VERSION.SDK_INT >= 21) card.setElevation(dp(8));
-
-        FrameLayout spinnerWrap = new FrameLayout(this);
-        GradientDrawable halo = new GradientDrawable();
-        halo.setShape(GradientDrawable.OVAL);
-        halo.setColor(lightTheme ? Color.rgb(248, 242, 255) : Color.argb(48, 160, 62, 255));
-        halo.setStroke(dp(1), lightTheme ? Color.rgb(224, 204, 247) : Color.argb(80, 255, 255, 255));
-        spinnerWrap.setBackground(halo);
-        if (Build.VERSION.SDK_INT >= 21) spinnerWrap.setElevation(dp(3));
-
-        ProgressBar spinner = new ProgressBar(this);
+        ProgressBar spinner = new ProgressBar(this, null, android.R.attr.progressBarStyleSmall);
         spinner.setIndeterminate(true);
         if (Build.VERSION.SDK_INT >= 21) {
-            spinner.setIndeterminateTintList(ColorStateList.valueOf(Color.rgb(139, 52, 217)));
+            spinner.setIndeterminateTintList(ColorStateList.valueOf(purple));
         }
-        FrameLayout.LayoutParams spLp = new FrameLayout.LayoutParams(dp(42), dp(42), Gravity.CENTER);
-        spinnerWrap.addView(spinner, spLp);
-        LinearLayout.LayoutParams haloLp = new LinearLayout.LayoutParams(dp(72), dp(72));
-        card.addView(spinnerWrap, haloLp);
+        center.addView(spinner, new LinearLayout.LayoutParams(dp(34), dp(34)));
 
-        TextView title = text(t(R.string.loading_visuals), 16, lightTheme ? Color.rgb(40, 23, 55) : Color.WHITE, true);
+        TextView title = text(
+                t(R.string.loading_visuals),
+                14,
+                lightTheme ? Color.rgb(58, 43, 70) : Color.argb(230, 255, 255, 255),
+                true
+        );
         title.setGravity(Gravity.CENTER);
         title.setIncludeFontPadding(false);
-        LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(-1, -2);
-        titleLp.topMargin = dp(16);
-        card.addView(title, titleLp);
+        LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(-2, -2);
+        titleLp.topMargin = dp(10);
+        center.addView(title, titleLp);
 
-        TextView sub = text(t(R.string.preparing_clothes_colors), 12, lightTheme ? Color.rgb(110, 86, 130) : Color.argb(180, 255, 255, 255), false);
-        sub.setGravity(Gravity.CENTER);
-        sub.setIncludeFontPadding(false);
-        LinearLayout.LayoutParams subLp = new LinearLayout.LayoutParams(-1, -2);
-        subLp.topMargin = dp(7);
-        card.addView(sub, subLp);
-
-        LinearLayout dots = new LinearLayout(this);
-        dots.setOrientation(LinearLayout.HORIZONTAL);
-        dots.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams dotsLp = new LinearLayout.LayoutParams(-1, dp(8));
-        dotsLp.topMargin = dp(16);
-        for (int i = 0; i < 3; i++) {
-            View dot = new View(this);
-            GradientDrawable dotBg = new GradientDrawable();
-            dotBg.setShape(GradientDrawable.OVAL);
-            dotBg.setColor(i == 1 ? Color.rgb(139, 52, 217) : Color.argb(lightTheme ? 90 : 130, 139, 52, 217));
-            dot.setBackground(dotBg);
-            LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(dp(7), dp(7));
-            dlp.leftMargin = dp(3);
-            dlp.rightMargin = dp(3);
-            dots.addView(dot, dlp);
-        }
-        card.addView(dots, dotsLp);
-
-        outer.addView(card, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
+        FrameLayout.LayoutParams centerLp = new FrameLayout.LayoutParams(-2, -2, Gravity.CENTER);
+        outer.addView(center, centerLp);
         return outer;
     }
 
@@ -15430,6 +15686,10 @@ private int loadingProgressFor(String message) {
 
     private void showFavoriteProfilesDialog() {
         final Dialog dialog = new Dialog(this);
+        activeFavoriteProfilesDialog = dialog;
+        dialog.setOnDismissListener(ignored -> {
+            if (activeFavoriteProfilesDialog == dialog) activeFavoriteProfilesDialog = null;
+        });
         PullDispatchFrameLayout full = new PullDispatchFrameLayout(this);
         full.setBackground(makeBg());
 
@@ -15689,16 +15949,7 @@ private int loadingProgressFor(String message) {
     private void openProfileListItem(ProfileHistoryItem item, Dialog dialog) {
         if (item == null) return;
         if (dialog != null) dialog.dismiss();
-        currentHotelKey = normalizeHotelKey(item.hotelKey);
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PREF_HOTEL, currentHotelKey).apply();
-        currentLoadedNick = "";
-        activeSearchToken++;
-        searchInProgress = false;
-        profileSectionsInProgress = false;
-        inlineProgressPct = 0;
-        inlineProgressMessage = "";
-        rebuildUiPreservingProfile();
-        openProfileReference(item.nick, item.uniqueId, item.figure, currentHotelKey);
+        openProfileReferenceOnMainScreen(item.nick, item.uniqueId, item.figure, item.hotelKey);
     }
 
     private LinearLayout profileListRowBase(ProfileHistoryItem item) {
@@ -16007,17 +16258,18 @@ private int loadingProgressFor(String message) {
     }
 
     private void openMiniProfileFull(String nick, String hotelKey, String uniqueId, String figure) {
-        currentHotelKey = normalizeHotelKey(hotelKey);
-        if (currentHotelKey.isEmpty()) currentHotelKey = defaultHotelForDeviceLocale();
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PREF_HOTEL, currentHotelKey).apply();
-        currentLoadedNick = "";
-        activeSearchToken++;
-        searchInProgress = false;
-        profileSectionsInProgress = false;
-        inlineProgressPct = 0;
-        inlineProgressMessage = "";
-        rebuildUiPreservingProfile();
-        openProfileReference(nick == null ? "" : nick.trim(), uniqueId, figure, currentHotelKey);
+        Dialog favorites = activeFavoriteProfilesDialog;
+        if (favorites != null) {
+            try { if (favorites.isShowing()) favorites.dismiss(); } catch(Exception ignored) {}
+            if (activeFavoriteProfilesDialog == favorites) activeFavoriteProfilesDialog = null;
+        }
+        openProfileReferenceOnMainScreen(
+                nick == null ? "" : nick.trim(),
+                uniqueId,
+                figure,
+                hotelKey
+        );
+        if (mainScroll != null) mainScroll.post(() -> mainScroll.scrollTo(0, 0));
     }
 
     private MiniProfilePreview fetchMiniProfilePreview(String nick, String hotelKey, String fallbackFigure, String uniqueId) {
