@@ -61,7 +61,7 @@ public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_BASE = "https://habbodex.com/api/v1/habboinfo";
     private static final String HABBODEX_FURNIDEX_API = "https://habbodex.com/api/v1/furnidex/furni/from-figure-string";
-    private static final String APP_VERSION = "1.3.34";
+    private static final String APP_VERSION = "1.3.35";
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -308,6 +308,9 @@ public class MainActivity extends Activity {
     private boolean interstitialLoading = false;
     private long lastInterstitialShownAt = 0L;
     private int profileOpenActionsSinceAd = 0;
+    private boolean pendingProfileInterstitialAction = false;
+    private long pendingProfileInterstitialRequestedAt = 0L;
+    private static final long PROFILE_INTERSTITIAL_PENDING_WINDOW_MS = 15L * 1000L;
     private int interstitialLoadFailureCount = 0;
     private long nextInterstitialLoadAllowedAt = 0L;
     private Runnable interstitialRetryRunnable = null;
@@ -831,24 +834,28 @@ public class MainActivity extends Activity {
     }
 
     private void requestPreviousStylesBannerLoadIfNeeded() {
+        if (billingEntitlementCheckPending || hasConfirmedAdFreeAccess()) return;
         if (previousStylesBannerLoadStarted || previousStylesBannerAdView == null || previousStylesBannerAdContainer == null) return;
         previousStylesBannerLoadStarted = true;
         loadBannerAfterAttach(previousStylesBannerAdView, previousStylesBannerAdContainer);
     }
 
     private void requestFriendsRemovedBannerLoadIfNeeded() {
+        if (billingEntitlementCheckPending || hasConfirmedAdFreeAccess()) return;
         if (friendsRemovedBannerLoadStarted || friendsRemovedBannerAdView == null || friendsRemovedBannerAdContainer == null) return;
         friendsRemovedBannerLoadStarted = true;
         loadBannerAfterAttach(friendsRemovedBannerAdView, friendsRemovedBannerAdContainer);
     }
 
     private void requestVisualColorsBannerLoadIfNeeded() {
+        if (billingEntitlementCheckPending || hasConfirmedAdFreeAccess()) return;
         if (visualColorsBannerLoadStarted || visualColorsBannerAdView == null || visualColorsBannerAdContainer == null) return;
         visualColorsBannerLoadStarted = true;
         loadBannerAfterAttach(visualColorsBannerAdView, visualColorsBannerAdContainer);
     }
 
     private void requestVisualNickSearchBannerLoadIfNeeded() {
+        if (billingEntitlementCheckPending || hasConfirmedAdFreeAccess()) return;
         if (visualNickSearchBannerLoadStarted || visualNickSearchBannerAdView == null || visualNickSearchBannerAdContainer == null) return;
         visualNickSearchBannerLoadStarted = true;
         loadBannerAfterAttach(visualNickSearchBannerAdView, visualNickSearchBannerAdContainer);
@@ -862,7 +869,9 @@ public class MainActivity extends Activity {
     }
 
     private void ensurePreviousStylesBannerAd() {
-        if (removeAdsPurchased || hasAdFreeAccess()) return;
+        // During the short billing check we may already render a very fast profile.
+        // Prepare the invisible slot now; loading/display waits for entitlement confirmation.
+        if (hasConfirmedAdFreeAccess()) return;
         if (previousStylesBannerAdContainer == null || previousStylesBannerAdView == null) {
             previousStylesBannerAdContainer = newBannerContainer();
             previousStylesBannerAdView = newBannerAdView(PREVIOUS_STYLES_BANNER_AD_UNIT_ID, previousStylesBannerAdContainer);
@@ -871,7 +880,9 @@ public class MainActivity extends Activity {
     }
 
     private void ensureFriendsRemovedBannerAd() {
-        if (removeAdsPurchased || hasAdFreeAccess()) return;
+        // During the short billing check we may already render a very fast profile.
+        // Prepare the invisible slot now; loading/display waits for entitlement confirmation.
+        if (hasConfirmedAdFreeAccess()) return;
         if (friendsRemovedBannerAdContainer == null || friendsRemovedBannerAdView == null) {
             friendsRemovedBannerAdContainer = newBannerContainer();
             friendsRemovedBannerAdView = newBannerAdView(FRIENDS_REMOVED_BANNER_AD_UNIT_ID, friendsRemovedBannerAdContainer);
@@ -880,7 +891,9 @@ public class MainActivity extends Activity {
     }
 
     private void ensureVisualColorsBannerAd() {
-        if (removeAdsPurchased || hasAdFreeAccess()) return;
+        // During the short billing check we may already render a very fast profile.
+        // Prepare the invisible slot now; loading/display waits for entitlement confirmation.
+        if (hasConfirmedAdFreeAccess()) return;
         if (visualColorsBannerAdContainer == null || visualColorsBannerAdView == null) {
             visualColorsBannerAdContainer = newBannerContainer();
             visualColorsBannerAdView = newBannerAdView(VISUAL_COLORS_BANNER_AD_UNIT_ID, visualColorsBannerAdContainer);
@@ -889,7 +902,9 @@ public class MainActivity extends Activity {
     }
 
     private void ensureVisualNickSearchBannerAd() {
-        if (removeAdsPurchased || hasAdFreeAccess()) return;
+        // During the short billing check we may already render a very fast profile.
+        // Prepare the invisible slot now; loading/display waits for entitlement confirmation.
+        if (hasConfirmedAdFreeAccess()) return;
         if (visualNickSearchBannerAdContainer == null || visualNickSearchBannerAdView == null) {
             visualNickSearchBannerAdContainer = newBannerContainer();
             visualNickSearchBannerAdView = newBannerAdView(VISUAL_NICK_SEARCH_BANNER_AD_UNIT_ID, visualNickSearchBannerAdContainer);
@@ -1259,6 +1274,7 @@ public class MainActivity extends Activity {
                                 interstitialAd = null;
                             }
                         });
+                        maybeShowPendingProfileInterstitial();
                     }
 
                     @Override
@@ -1271,6 +1287,37 @@ public class MainActivity extends Activity {
         );
     }
 
+    private void maybeShowPendingProfileInterstitial() {
+        if (!pendingProfileInterstitialAction) return;
+
+        long now = System.currentTimeMillis();
+        if (pendingProfileInterstitialRequestedAt <= 0L
+                || now - pendingProfileInterstitialRequestedAt > PROFILE_INTERSTITIAL_PENDING_WINDOW_MS) {
+            pendingProfileInterstitialAction = false;
+            pendingProfileInterstitialRequestedAt = 0L;
+            return;
+        }
+        if (accessGateReason != AccessGateReason.NONE
+                || billingEntitlementCheckPending
+                || hasConfirmedAdFreeAccess()
+                || !appInForeground
+                || isFinishing()) {
+            return;
+        }
+        if (now - lastInterstitialShownAt < INTERSTITIAL_COOLDOWN_MS) {
+            pendingProfileInterstitialAction = false;
+            pendingProfileInterstitialRequestedAt = 0L;
+            return;
+        }
+        if (interstitialAd == null) return;
+
+        pendingProfileInterstitialAction = false;
+        pendingProfileInterstitialRequestedAt = 0L;
+        profileOpenActionsSinceAd = 0;
+        lastInterstitialShownAt = now;
+        interstitialAd.show(this);
+    }
+
     private void maybeShowProfileInterstitial() {
         if (accessGateReason != AccessGateReason.NONE) return;
         profileOpenActionsSinceAd++;
@@ -1279,16 +1326,31 @@ public class MainActivity extends Activity {
         boolean cooldownOk = now - lastInterstitialShownAt >= INTERSTITIAL_COOLDOWN_MS;
         boolean actionCountOk = profileOpenActionsSinceAd >= ACTIONS_BETWEEN_INTERSTITIALS;
 
-        if (hasAdFreeAccess()) {
+        if (hasConfirmedAdFreeAccess()) {
+            pendingProfileInterstitialAction = false;
+            pendingProfileInterstitialRequestedAt = 0L;
             cancelInterstitialAdRetry();
             return;
         }
+        if (!cooldownOk || !actionCountOk) return;
 
-        if (interstitialAd != null && cooldownOk && actionCountOk && !isFinishing()) {
+        // A profile can now open before Google Play finishes entitlement verification.
+        // Remember the eligible profile action and show only after we know ads are allowed.
+        if (billingEntitlementCheckPending) {
+            pendingProfileInterstitialAction = true;
+            pendingProfileInterstitialRequestedAt = now;
+            return;
+        }
+
+        if (interstitialAd != null && !isFinishing()) {
+            pendingProfileInterstitialAction = false;
+            pendingProfileInterstitialRequestedAt = 0L;
             profileOpenActionsSinceAd = 0;
             lastInterstitialShownAt = now;
             interstitialAd.show(this);
-        } else if (interstitialAd == null) {
+        } else {
+            pendingProfileInterstitialAction = true;
+            pendingProfileInterstitialRequestedAt = now;
             loadInterstitialAd();
         }
     }
@@ -1697,9 +1759,14 @@ public class MainActivity extends Activity {
         setSupporterActive(supporterOwned);
         if (!hasAdFreeAccess()) {
             preloadBannerAds();
+            resumeBannerAds();
             loadInterstitialAd();
             loadRewardedAd();
             loadStartNativeAdIfNeeded();
+            uiHandler.postDelayed(this::maybeShowPendingProfileInterstitial, 80L);
+        } else {
+            pendingProfileInterstitialAction = false;
+            pendingProfileInterstitialRequestedAt = 0L;
         }
     }
 
@@ -1707,6 +1774,8 @@ public class MainActivity extends Activity {
         boolean changed = supporterActive != active;
         supporterActive = active;
         if (active) {
+            pendingProfileInterstitialAction = false;
+            pendingProfileInterstitialRequestedAt = 0L;
             cancelInterstitialAdRetry();
             cancelRewardedAdRetry();
             destroyAllBannerAds();
@@ -2121,17 +2190,23 @@ public class MainActivity extends Activity {
         long updatedRemaining = Math.min(MAX_AD_FREE_MS, Math.max(0L, remaining) + millis);
         adFreeUntilMs = now + updatedRemaining;
         saveAdFreeUntil();
+        pendingProfileInterstitialAction = false;
+        pendingProfileInterstitialRequestedAt = 0L;
         cancelInterstitialAdRetry();
         destroyAllBannerAds();
         updateRewardButtonText();
         toast(t(R.string.adfree_granted));
     }
 
-    private boolean hasAdFreeAccess() {
+    private boolean hasConfirmedAdFreeAccess() {
         return removeAdsPurchased
                 || supporterActive
-                || billingEntitlementCheckPending
                 || getAdFreeRemainingMs() > 0L;
+    }
+
+    private boolean hasAdFreeAccess() {
+        return hasConfirmedAdFreeAccess()
+                || billingEntitlementCheckPending;
     }
 
     private long getAdFreeRemainingMs() {
@@ -3802,6 +3877,9 @@ public class MainActivity extends Activity {
 
     private void maybeShowProfileFeaturesTutorial() {
         if (screen == null || mainScroll == null) return;
+        // The four-part profile tutorial starts only after the initial profile
+        // synchronization has fully finished, never on the first fast render.
+        if (searchInProgress || profileSectionsInProgress) return;
         SharedPreferences sp = getSharedPreferences(PREFS, MODE_PRIVATE);
         boolean needsAvatarTutorial = sp.getInt(PREF_PROFILE_FEATURES_TUTORIAL_VERSION, 0) < CURRENT_PROFILE_FEATURES_TUTORIAL_VERSION;
         boolean needsFriendTutorial = sp.getInt(PREF_FRIEND_CARD_TUTORIAL_VERSION, 0) < CURRENT_PROFILE_FEATURES_TUTORIAL_VERSION;
@@ -5066,6 +5144,11 @@ public class MainActivity extends Activity {
             inlineProgressMessage = "";
         }
         publishProgressiveProfile(source, token, firstRenderReleaseAt);
+        runOnUiThread(() -> uiHandler.postDelayed(() -> {
+            if (isActiveToken(token) && !searchInProgress && !profileSectionsInProgress) {
+                maybeShowProfileFeaturesTutorial();
+            }
+        }, 520L));
     }
 
     private <T> T awaitFutureValue(Future<T> future) {
@@ -11542,7 +11625,6 @@ private int loadingProgressFor(String message) {
 
         View visualsNavItem = bottomNavItem("visuals", selectedTab == 1, () -> {
             if (selectedTab == 1) return;
-            maybeShowProfileInterstitial();
             showVisualEditorDialog();
             if (activeDialog != null) uiHandler.postDelayed(() -> {
                 try { activeDialog.dismiss(); } catch (Exception ignored) {}
@@ -11925,6 +12007,13 @@ private int loadingProgressFor(String message) {
         dialog.setContentView(full);
         applySafeAreaInsets(dialog.getWindow(), full);
 
+        // Top wardrobe banner. Keep it above the nick/search controls.
+        View visualNickBanner = buildVisualNickSearchBannerAd();
+        if (visualNickBanner != null) {
+            wrap.addView(visualNickBanner, lp(-1, dp(68), 0, 0, 0, 10));
+            requestVisualNickSearchBannerLoadIfNeeded();
+        }
+
         LinearLayout nickRow = new LinearLayout(this);
         nickRow.setOrientation(LinearLayout.HORIZONTAL);
         nickRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -11944,11 +12033,6 @@ private int loadingProgressFor(String message) {
         loadLp.leftMargin = dp(8);
         nickRow.addView(loadNick, loadLp);
         wrap.addView(nickRow, lp(-1, dp(46), 0, 0, 0, 8));
-        View visualNickBanner = buildVisualNickSearchBannerAd();
-        if (visualNickBanner != null) {
-            wrap.addView(visualNickBanner, lp(-1, dp(68), 0, 0, 0, 10));
-            requestVisualNickSearchBannerLoadIfNeeded();
-        }
 
         nickInput.setOnKeyListener((v, keyCode, event) -> {
             if (keyCode == KeyEvent.KEYCODE_ENTER && event.getAction() == KeyEvent.ACTION_UP) {
