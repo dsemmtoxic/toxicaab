@@ -241,4 +241,14 @@
     <string name="supporter_tutorial_title">Kies je uitgelichte profiel</string>
     <string name="supporter_tutorial_body">Je profiel is het laatste item in de sponsorcarrousel. Tik erop om het uitgelichte profiel te kiezen of te wijzigen.</string>
     <string name="supporter_choose_now">Nu kiezen</string>
+    <!-- Group membership/access metadata -->
+    <string name="group_access">Toegang</string>
+    <string name="group_access_open">Open</string>
+    <string name="group_access_request">Aanvraag</string>
+    <string name="group_access_closed">Gesloten</string>
+    <string name="group_role">Rol</string>
+    <string name="group_role_member">Lid</string>
+    <string name="group_role_admin">Beheerder</string>
+    <string name="group_role_creator">Oprichter</string>
+
 </resources>
