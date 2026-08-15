@@ -241,4 +241,14 @@
     <string name="supporter_tutorial_title">Scegli il profilo in evidenza</string>
     <string name="supporter_tutorial_body">Il tuo profilo è l’ultimo elemento del carosello sponsor. Toccalo per scegliere o cambiare il profilo in evidenza.</string>
     <string name="supporter_choose_now">Scegli ora</string>
+    <!-- Group membership/access metadata -->
+    <string name="group_access">Accesso</string>
+    <string name="group_access_open">Aperto</string>
+    <string name="group_access_request">Richiesta</string>
+    <string name="group_access_closed">Chiuso</string>
+    <string name="group_role">Ruolo</string>
+    <string name="group_role_member">Membro</string>
+    <string name="group_role_admin">Amministratore</string>
+    <string name="group_role_creator">Creatore</string>
+
 </resources>
