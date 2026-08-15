@@ -61,7 +61,7 @@ public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_BASE = "https://habbodex.com/api/v1/habboinfo";
     private static final String HABBODEX_FURNIDEX_API = "https://habbodex.com/api/v1/furnidex/furni/from-figure-string";
-    private static final String APP_VERSION = "1.3.40";
+    private static final String APP_VERSION = "1.3.41";
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -602,9 +602,8 @@ public class MainActivity extends Activity {
                 mobileAdsInitialized = true;
                 if (!billingEntitlementCheckPending && !hasConfirmedAdFreeAccess()) {
                     preloadBannerAds();
-                    scheduleInterstitialWarmPreload(250L);
+                    loadInterstitialAd();
                     refreshAttachedProfileBannerAds();
-                    maybeShowPendingProfileInterstitial();
                 }
             });
         });
@@ -1312,7 +1311,7 @@ public class MainActivity extends Activity {
     }
 
     private void scheduleInterstitialAdRetry() {
-        if (removeAdsPurchased || hasAdFreeAccess() || !appInForeground || interstitialRetryRunnable != null) return;
+        if (removeAdsPurchased || hasConfirmedAdFreeAccess() || !appInForeground || interstitialRetryRunnable != null) return;
         long delay = Math.max(0L, nextInterstitialLoadAllowedAt - System.currentTimeMillis());
         interstitialRetryRunnable = () -> {
             interstitialRetryRunnable = null;
@@ -1332,7 +1331,7 @@ public class MainActivity extends Activity {
     }
 
     private boolean canLoadInterstitialAdNow() {
-        return !removeAdsPurchased && !hasAdFreeAccess() && System.currentTimeMillis() >= nextInterstitialLoadAllowedAt;
+        return !removeAdsPurchased && !hasConfirmedAdFreeAccess() && System.currentTimeMillis() >= nextInterstitialLoadAllowedAt;
     }
 
     private boolean canLoadRewardedAdNow() {
@@ -1343,20 +1342,18 @@ public class MainActivity extends Activity {
     }
 
     private void loadInterstitialAd() {
+        // 1.3.41: return to the proven 1.3.10 lifecycle. Keep exactly one interstitial
+        // cached whenever ads are allowed; the 2-minute rule controls SHOWING, not loading.
         if (removeAdsPurchased || hasConfirmedAdFreeAccess()) {
             cancelInterstitialAdRetry();
-            cancelInterstitialWarmPreload();
-            interstitialNeedsWarmPreload = false;
             interstitialAd = null;
             interstitialLoading = false;
             interstitialShowing = false;
             return;
         }
 
-        // Full-screen ads are loaded only after Mobile Ads initialization has completed.
-        // Banner AdViews tolerate an early attach better, but InterstitialAd.load() should not race init.
         if (!mobileAdsInitialized) {
-            if (interstitialRetryRunnable == null && appInForeground) {
+            if (interstitialRetryRunnable == null) {
                 interstitialRetryRunnable = () -> {
                     interstitialRetryRunnable = null;
                     loadInterstitialAd();
@@ -1366,7 +1363,7 @@ public class MainActivity extends Activity {
             return;
         }
 
-        if (interstitialShowing || interstitialLoading || interstitialAd != null) return;
+        if (interstitialLoading || interstitialAd != null || interstitialShowing) return;
         if (!canLoadInterstitialAdNow()) {
             scheduleInterstitialAdRetry();
             return;
@@ -1386,20 +1383,18 @@ public class MainActivity extends Activity {
                         android.util.Log.i(ADS_LOG_TAG, "Interstitial loaded: " + INTERSTITIAL_AD_UNIT_ID);
                         interstitialLoading = false;
                         interstitialAd = ad;
-                        interstitialNeedsWarmPreload = false;
-                        cancelInterstitialWarmPreload();
                         resetInterstitialBackoff();
+
                         interstitialAd.setFullScreenContentCallback(new FullScreenContentCallback() {
                             @Override
                             public void onAdDismissedFullScreenContent() {
                                 android.util.Log.i(ADS_LOG_TAG, "Interstitial dismissed: " + INTERSTITIAL_AD_UNIT_ID);
                                 interstitialShowing = false;
                                 interstitialAd = null;
-                                interstitialNeedsWarmPreload = true;
-                                // A successful show must not inherit an old no-fill/backoff window.
-                                // Preload the NEXT ad only after our Activity is resumed again.
                                 resetInterstitialBackoff();
-                                scheduleInterstitialWarmPreload(INTERSTITIAL_WARM_PRELOAD_DELAY_MS);
+                                // Same behavior that was reliable in 1.3.10: immediately prepare
+                                // the next ad. A second onResume() call below is an extra safety net.
+                                uiHandler.postDelayed(MainActivity.this::loadInterstitialAd, 300L);
                             }
 
                             @Override
@@ -1411,28 +1406,19 @@ public class MainActivity extends Activity {
                                                 + " message=" + (adError == null ? "" : adError.getMessage()));
                                 interstitialShowing = false;
                                 interstitialAd = null;
-                                interstitialNeedsWarmPreload = true;
-                                // Crucial: do NOT start the 2-minute cooldown and do NOT discard
-                                // the profile-open action when show() itself failed.
+                                // A failed show does not start the cooldown.
                                 registerInterstitialLoadFailure();
-                                if (pendingProfileInterstitialAction) {
-                                    uiHandler.postDelayed(MainActivity.this::maybeShowPendingProfileInterstitial, 500L);
-                                }
                             }
 
                             @Override
                             public void onAdShowedFullScreenContent() {
                                 android.util.Log.i(ADS_LOG_TAG, "Interstitial shown: " + INTERSTITIAL_AD_UNIT_ID);
-                                // Only a real impression/show starts the two-minute cooldown.
+                                // Count the cooldown only after Google confirms the ad is actually visible.
                                 lastInterstitialShownAt = System.currentTimeMillis();
-                                interstitialNeedsWarmPreload = true;
-                                pendingProfileInterstitialAction = false;
-                                pendingProfileInterstitialRequestedAt = 0L;
                                 profileOpenActionsSinceAd = 0;
                                 interstitialAd = null;
                             }
                         });
-                        maybeShowPendingProfileInterstitial();
                     }
 
                     @Override
@@ -1444,109 +1430,58 @@ public class MainActivity extends Activity {
                                         + " message=" + (loadAdError == null ? "" : loadAdError.getMessage()));
                         interstitialLoading = false;
                         interstitialAd = null;
-                        interstitialNeedsWarmPreload = true;
                         registerInterstitialLoadFailure();
-                        if (pendingProfileInterstitialAction) {
-                            uiHandler.postDelayed(MainActivity.this::maybeShowPendingProfileInterstitial, 500L);
-                        }
                     }
                 }
         );
     }
 
-    private void schedulePendingInterstitialAt(long whenMs) {
-        long delay = Math.max(0L, whenMs - System.currentTimeMillis());
-        uiHandler.postDelayed(() -> {
-            if (!pendingProfileInterstitialAction) return;
-            maybeShowPendingProfileInterstitial();
-        }, delay + 50L);
-    }
+    private void maybeShowProfileInterstitial() {
+        // Gating/show behavior follows 1.3.10: every full-profile open is an eligible
+        // action, and the already-cached interstitial is consumed only when cooldown allows.
+        profileOpenActionsSinceAd++;
 
-    private void maybeShowPendingProfileInterstitial() {
-        if (!pendingProfileInterstitialAction || interstitialShowing) return;
+        if (hasConfirmedAdFreeAccess()) {
+            cancelInterstitialAdRetry();
+            interstitialAd = null;
+            return;
+        }
+
+        // Keep the next ad warm even during the 2-minute interval.
+        if (interstitialAd == null && !interstitialLoading && !interstitialShowing) {
+            loadInterstitialAd();
+        }
 
         long now = System.currentTimeMillis();
-        if (pendingProfileInterstitialRequestedAt <= 0L
-                || now - pendingProfileInterstitialRequestedAt > PROFILE_INTERSTITIAL_PENDING_WINDOW_MS) {
-            pendingProfileInterstitialAction = false;
-            pendingProfileInterstitialRequestedAt = 0L;
-            return;
-        }
-        if (hasConfirmedAdFreeAccess()) {
-            pendingProfileInterstitialAction = false;
-            pendingProfileInterstitialRequestedAt = 0L;
-            cancelInterstitialAdRetry();
-            return;
-        }
+        boolean cooldownOk = lastInterstitialShownAt <= 0L
+                || now - lastInterstitialShownAt >= INTERSTITIAL_COOLDOWN_MS;
+        boolean actionCountOk = profileOpenActionsSinceAd >= ACTIONS_BETWEEN_INTERSTITIALS;
+
+        if (!cooldownOk || !actionCountOk) return;
         if (billingEntitlementCheckPending
                 || accessGateReason != AccessGateReason.NONE
                 || !appInForeground
-                || isFinishing()) {
+                || isFinishing()
+                || interstitialShowing) {
             return;
         }
 
-        long cooldownRemaining = INTERSTITIAL_COOLDOWN_MS - (now - lastInterstitialShownAt);
-        if (lastInterstitialShownAt > 0L && cooldownRemaining > 0L) {
-            // Keep the eligible action pending instead of throwing it away.
-            schedulePendingInterstitialAt(now + cooldownRemaining);
-            return;
-        }
-
-        if (interstitialAd == null) {
+        if (interstitialAd != null) {
+            try {
+                interstitialShowing = true;
+                android.util.Log.i(ADS_LOG_TAG, "Interstitial show requested: " + INTERSTITIAL_AD_UNIT_ID);
+                // Cooldown/action counters are updated only in onAdShowedFullScreenContent().
+                interstitialAd.show(this);
+            } catch (Exception showError) {
+                android.util.Log.w(ADS_LOG_TAG, "Interstitial show exception: " + showError.getMessage());
+                interstitialShowing = false;
+                interstitialAd = null;
+                registerInterstitialLoadFailure();
+            }
+        } else {
             loadInterstitialAd();
-            return;
-        }
-
-        try {
-            interstitialShowing = true;
-            android.util.Log.i(ADS_LOG_TAG, "Interstitial show requested: " + INTERSTITIAL_AD_UNIT_ID);
-            // Do not clear pending state or start cooldown here. Those happen only in
-            // onAdShowedFullScreenContent(), after Google confirms the ad is actually visible.
-            interstitialAd.show(this);
-        } catch (Exception showError) {
-            android.util.Log.w(ADS_LOG_TAG, "Interstitial show exception: " + showError.getMessage());
-            interstitialShowing = false;
-            interstitialAd = null;
-            interstitialNeedsWarmPreload = true;
-            registerInterstitialLoadFailure();
         }
     }
-
-    private void maybeShowProfileInterstitial() {
-        profileOpenActionsSinceAd++;
-
-        long now = System.currentTimeMillis();
-        boolean actionCountOk = profileOpenActionsSinceAd >= ACTIONS_BETWEEN_INTERSTITIALS;
-
-        if (hasConfirmedAdFreeAccess()) {
-            pendingProfileInterstitialAction = false;
-            pendingProfileInterstitialRequestedAt = 0L;
-            cancelInterstitialAdRetry();
-            return;
-        }
-        if (!actionCountOk) return;
-        if (lastInterstitialShownAt > 0L
-                && now - lastInterstitialShownAt < INTERSTITIAL_COOLDOWN_MS) {
-            return;
-        }
-
-        // The action becomes pending only when the 2-minute interval is already satisfied.
-        // SDK initialization, entitlement checks and ad loading may finish afterwards without
-        // losing this eligible profile-open trigger.
-        pendingProfileInterstitialAction = true;
-        pendingProfileInterstitialRequestedAt = now;
-
-        if (!mobileAdsInitialized) {
-            loadInterstitialAd();
-            return;
-        }
-
-        if (interstitialAd == null && !interstitialLoading) {
-            scheduleInterstitialWarmPreload(0L);
-        }
-        maybeShowPendingProfileInterstitial();
-    }
-
 
     private void loadRewardedAd() {
         if (removeAdsPurchased || supporterActive || billingEntitlementCheckPending) {
@@ -1959,7 +1894,6 @@ public class MainActivity extends Activity {
             loadInterstitialAd();
             loadRewardedAd();
             loadStartNativeAdIfNeeded();
-            uiHandler.postDelayed(this::maybeShowPendingProfileInterstitial, 120L);
         } else {
             pendingProfileInterstitialAction = false;
             pendingProfileInterstitialRequestedAt = 0L;
@@ -2518,7 +2452,7 @@ public class MainActivity extends Activity {
                 // Always repair the warm-cache on resume. This is especially important after
                 // returning from a full-screen interstitial, whose dismiss callback may happen
                 // before Activity.onResume().
-                scheduleInterstitialWarmPreload(250L);
+                loadInterstitialAd();
             }
             loadRewardedAd();
         }
@@ -2930,9 +2864,8 @@ public class MainActivity extends Activity {
     private void dismissAccessGate() {
         accessGateReason = AccessGateReason.NONE;
         if (!billingEntitlementCheckPending && !hasConfirmedAdFreeAccess() && appInForeground) {
-            scheduleInterstitialWarmPreload(120L);
-            uiHandler.postDelayed(this::maybeShowPendingProfileInterstitial, 180L);
-        }
+            loadInterstitialAd();
+                    }
         Dialog dialog = accessGateDialog;
         accessGateDialog = null;
         if (dialog != null) {
