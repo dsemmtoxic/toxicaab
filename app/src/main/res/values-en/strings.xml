@@ -241,4 +241,14 @@
     <string name="supporter_tutorial_title">Choose your featured profile</string>
     <string name="supporter_tutorial_body">Your profile is the last item in the sponsor carousel. Tap it to choose or change the featured profile.</string>
     <string name="supporter_choose_now">Choose now</string>
+    <!-- Group membership/access metadata -->
+    <string name="group_access">Access</string>
+    <string name="group_access_open">Open</string>
+    <string name="group_access_request">Request</string>
+    <string name="group_access_closed">Closed</string>
+    <string name="group_role">Role</string>
+    <string name="group_role_member">Member</string>
+    <string name="group_role_admin">Administrator</string>
+    <string name="group_role_creator">Creator</string>
+
 </resources>
