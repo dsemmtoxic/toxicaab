@@ -61,7 +61,7 @@ public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_BASE = "https://habbodex.com/api/v1/habboinfo";
     private static final String HABBODEX_FURNIDEX_API = "https://habbodex.com/api/v1/furnidex/furni/from-figure-string";
-    private static final String APP_VERSION = "1.3.44";
+    private static final String APP_VERSION = "1.3.47";
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -338,6 +338,7 @@ public class MainActivity extends Activity {
     private static final String TEST_BANNER_AD_UNIT_ID = "ca-app-pub-3940256099942544/9214589741";
     private static final boolean USE_TEST_ADS = false;
     private static final String ADS_LOG_TAG = "ToxicAds";
+    private static final String HABBODEX_GROUP_OWNER_KEY = "__habbodex_group_owner";
     private static final String INTERSTITIAL_AD_UNIT_ID = USE_TEST_ADS ? TEST_INTERSTITIAL_AD_UNIT_ID : REAL_INTERSTITIAL_AD_UNIT_ID;
     private static final String REWARDED_AD_UNIT_ID = USE_TEST_ADS ? TEST_REWARDED_AD_UNIT_ID : REAL_REWARDED_AD_UNIT_ID;
     private static final String START_NATIVE_AD_UNIT_ID = USE_TEST_ADS ? TEST_START_NATIVE_AD_UNIT_ID : REAL_START_NATIVE_AD_UNIT_ID;
@@ -4969,10 +4970,11 @@ public class MainActivity extends Activity {
 
         // O perfil principal já foi liberado. Daqui em diante cada seção é
         // independente: uma rota lenta do histórico não segura as demais.
-        // +1 tarefa para emblemas paginados do HabboDex. A seção entra em modo
-        // paginado antes do perfil oficial responder, impedindo que milhares de
-        // emblemas oficiais sejam materializados de uma só vez na interface.
-        final int taskCount = restrictedProfile ? 7 : 8;
+        // Em perfis públicos há uma tarefa adicional para os grupos do HabboDex,
+        // pois a rota dedicada fornece o campo `owner`. Emblemas continuam
+        // paginados antes do perfil oficial responder para evitar materializar
+        // milhares de itens na interface.
+        final int taskCount = restrictedProfile ? 7 : 9;
         final AtomicInteger pendingGroups = new AtomicInteger(taskCount);
         synchronized (r) {
             r.badgesPagedMode = true;
@@ -5223,7 +5225,34 @@ public class MainActivity extends Activity {
                 }
             });
 
-            // 8) Fotos oficiais são totalmente independentes do histórico.
+            // 8) Grupos do HabboDex: a rota dedicada contém o campo `owner`.
+            // Somente esse valor é usado para distinguir Criador de Administrador.
+            // A lista oficial continua apenas como fonte dos demais metadados.
+            profileSectionsExecutor.execute(() -> {
+                try {
+                    sleepCriticalRetry(1);
+                    PageResult dexGroups = fetchHabbodexPages(
+                            uniqueId,
+                            "groups",
+                            "groups",
+                            25
+                    );
+                    if (!isActiveToken(token)) return;
+                    if (dexGroups != null && dexGroups.success) {
+                        markHabbodexGroupOwnership(dexGroups.items);
+                        synchronized (r) {
+                            putComplementSectionLocked(r, "groups", dexGroups.items);
+                            reconcileProfileSources(r);
+                        }
+                        setProfileSectionsProgress(token, 92, t(R.string.loading_details));
+                        publishProgressiveProfile(r, token, firstRenderReleaseAt);
+                    }
+                } finally {
+                    finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups);
+                }
+            });
+
+            // 9) Fotos oficiais são totalmente independentes do histórico.
             profileSectionsExecutor.execute(() -> {
                 try {
                     ProfileSectionPayload photos;
@@ -5272,6 +5301,7 @@ public class MainActivity extends Activity {
                         ArrayList<JSONObject> rooms = extractDirectHistoryItems(privateDetails, "rooms");
                         ArrayList<JSONObject> groups = extractDirectHistoryItems(privateDetails, "groups");
                         ArrayList<JSONObject> photos = extractDirectHistoryItems(privateDetails, "photos");
+                        markHabbodexGroupOwnership(groups);
                         putComplementSectionLocked(r, "rooms", rooms);
                         putComplementSectionLocked(r, "groups", groups);
                         putComplementSectionLocked(r, "photos", photos);
@@ -6062,7 +6092,7 @@ public class MainActivity extends Activity {
                         ? mergeListsEnrichingPrimary(r.friends, officialFriends, false)
                         : mergeListsEnrichingPrimary(officialFriends, complementFriends, true);
                 r.rooms = mergeListsEnrichingPrimary(officialRooms, complementRooms, true);
-                r.groups = mergeListsEnrichingPrimary(officialGroups, complementGroups, true);
+                r.groups = mergeGroupsEnrichingHabbodex(officialGroups, complementGroups, true);
                 r.selectedBadges = mergeListsEnrichingPrimary(officialSelected, complementSelected, true);
                 r.badgesWithAchievements = r.badgesPagedMode
                         ? mergeListsEnrichingPrimary(r.badgesWithAchievements, officialBadges, false)
@@ -6077,7 +6107,7 @@ public class MainActivity extends Activity {
                         ? mergeListsEnrichingPrimary(officialRooms, complementRooms, false)
                         : new ArrayList<>(complementRooms);
                 r.groups = official.has("groups")
-                        ? mergeListsEnrichingPrimary(officialGroups, complementGroups, false)
+                        ? mergeGroupsEnrichingHabbodex(officialGroups, complementGroups, false)
                         : new ArrayList<>(complementGroups);
                 r.selectedBadges = hasOfficialSelected
                         ? mergeListsEnrichingPrimary(officialSelected, complementSelected, false)
@@ -6099,7 +6129,7 @@ public class MainActivity extends Activity {
                 r.friends = mergeListsEnrichingPrimary(r.friends, complementFriends, true);
             }
             r.rooms = mergeListsEnrichingPrimary(r.rooms, complementRooms, true);
-            r.groups = mergeListsEnrichingPrimary(r.groups, complementGroups, true);
+            r.groups = mergeGroupsEnrichingHabbodex(r.groups, complementGroups, true);
             r.selectedBadges = mergeListsEnrichingPrimary(r.selectedBadges, complementSelected, true);
             // Emblemas paginados já carregados pelo HabboDex permanecem soberanos.
         }
@@ -6283,6 +6313,81 @@ public class MainActivity extends Activity {
             }
         }
         return out;
+    }
+
+    /**
+     * Para grupos, a relação de propriedade vem exclusivamente do HabboDex.
+     * A lista oficial pode continuar fornecendo os demais metadados do grupo,
+     * mas nunca é consultada para decidir se o perfil é Criador.
+     */
+    private void markHabbodexGroupOwnership(ArrayList<JSONObject> groups) {
+        if (groups == null) return;
+        for (JSONObject group : groups) {
+            if (group == null || !group.has("owner")) continue;
+            try {
+                group.put(HABBODEX_GROUP_OWNER_KEY, jsonAnyTrue(group, "owner"));
+            } catch(Exception ignored) {}
+        }
+    }
+
+    private ArrayList<JSONObject> mergeGroupsEnrichingHabbodex(
+            ArrayList<JSONObject> primary,
+            ArrayList<JSONObject> habbodexGroups,
+            boolean appendMissing
+    ) {
+        ArrayList<JSONObject> out = new ArrayList<>();
+        HashMap<String, JSONObject> byKey = new HashMap<>();
+        if (primary != null) {
+            for (JSONObject item : primary) {
+                if (item == null) continue;
+                out.add(item);
+                for (String key : matchingGroupKeys(item)) byKey.put(key, item);
+            }
+        }
+        if (habbodexGroups != null) {
+            for (JSONObject dexItem : habbodexGroups) {
+                if (dexItem == null) continue;
+                ArrayList<String> keys = matchingGroupKeys(dexItem);
+                JSONObject target = null;
+                for (String key : keys) {
+                    target = byKey.get(key);
+                    if (target != null) break;
+                }
+                if (target != null) {
+                    fillMissingJsonFields(target, dexItem);
+                    // O marcador interno só é criado a partir de uma resposta do
+                    // HabboDex; assim a função nunca infere Criador da API oficial.
+                    if (dexItem.has(HABBODEX_GROUP_OWNER_KEY)) {
+                        try {
+                            target.put(
+                                    HABBODEX_GROUP_OWNER_KEY,
+                                    dexItem.optBoolean(HABBODEX_GROUP_OWNER_KEY, false)
+                            );
+                        } catch(Exception ignored) {}
+                    }
+                    for (String key : matchingGroupKeys(target)) byKey.put(key, target);
+                } else if (appendMissing) {
+                    out.add(dexItem);
+                    for (String key : keys) byKey.put(key, dexItem);
+                }
+            }
+        }
+        return out;
+    }
+
+    private ArrayList<String> matchingGroupKeys(JSONObject item) {
+        ArrayList<String> keys = new ArrayList<>();
+        if (item == null) return keys;
+        String groupId = firstText(
+                item, "groupId", "group_id", "id", "uniqueId", "groupUniqueId"
+        ).trim().toLowerCase(Locale.ROOT);
+        String badge = normalizeNickKey(firstText(item, "badgeCode", "code"));
+        String name = normalizeNickKey(firstText(item, "name", "groupName"));
+        if (!groupId.isEmpty()) keys.add("group-id:" + groupId);
+        if (!badge.isEmpty()) keys.add("group-badge:" + badge);
+        if (!name.isEmpty()) keys.add("group-name:" + name);
+        if (keys.isEmpty()) keys.add(stableItemKey(item));
+        return keys;
     }
 
     private ArrayList<String> matchingItemKeys(JSONObject item) {
@@ -8804,9 +8909,9 @@ public class MainActivity extends Activity {
                         : (lightTheme ? Color.rgb(220,220,220) : Color.argb(24,255,255,255)),
                 1
         ));
-        // Altura fixa: nome/tags ficam no topo e os três metadados permanecem
-        // alinhados no rodapé, independentemente do tamanho da descrição.
-        row.setLayoutParams(lp(-1, dp(188), 0, 0, 0, 12));
+        // Card compacto: a área útil tem exatamente a mesma altura da miniatura.
+        // O título encosta no topo da imagem e Nota/Limite/Data ficam presos à base dela.
+        row.setLayoutParams(lp(-1, dp(124), 0, 0, 0, 12));
 
         ImageView img = new ImageView(this);
         img.setScaleType(ImageView.ScaleType.CENTER_CROP);
@@ -8828,58 +8933,59 @@ public class MainActivity extends Activity {
         LinearLayout txt = new LinearLayout(this);
         txt.setOrientation(LinearLayout.VERTICAL);
         txt.setGravity(Gravity.TOP);
-        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, -1, 1);
+        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, dp(104), 1);
         tp.leftMargin = dp(12);
         row.addView(txt, tp);
 
         String roomNameValue = firstText(room, "name", "roomName", "caption", "title");
         String shownName = roomNameValue.isEmpty() ? t(R.string.room) : roomNameValue;
-        int nameSize = shownName.length() > 72 ? 11 : shownName.length() > 48 ? 12
-                : shownName.length() > 30 ? 14 : 16;
+        int nameSize = shownName.length() > 62 ? 10 : shownName.length() > 42 ? 11
+                : shownName.length() > 28 ? 12 : 14;
         TextView roomName = habboText(shownName, nameSize, true);
-        roomName.setMaxLines(2);
+        roomName.setIncludeFontPadding(false);
+        roomName.setSingleLine(true);
         roomName.setEllipsize(TextUtils.TruncateAt.END);
-        roomName.setLineSpacing(dp(1), 1f);
-        txt.addView(roomName, lp(-1, -2, 0, 0, 0, 2));
+        txt.addView(roomName, lp(-1, dp(18), 0, 0, 0, 1));
 
-        // Tags ficam imediatamente abaixo do nome, como parte do cabeçalho do quarto.
+        // Tags permanecem diretamente abaixo do nome, sem aumentar a altura do card.
         ArrayList<String> tags = roomTags(room);
+        String tagsText = "";
         if (!tags.isEmpty()) {
             ArrayList<String> tagParts = new ArrayList<>();
             for (String tag : tags) {
                 if (tag == null || tag.trim().isEmpty()) continue;
                 tagParts.add("#" + tag.trim());
             }
-            String tagsText = TextUtils.join("  ", tagParts);
-            if (!tagsText.isEmpty()) {
-                int tagsSize = tagsText.length() > 100 ? 9 : tagsText.length() > 65 ? 10 : 11;
-                TextView tagsView = text(
-                        tagsText,
-                        tagsSize,
-                        lightTheme ? Color.rgb(92, 56, 128) : Color.rgb(226, 203, 255),
-                        true
-                );
-                tagsView.setMaxLines(2);
-                tagsView.setEllipsize(TextUtils.TruncateAt.END);
-                tagsView.setLineSpacing(dp(1), 1f);
-                txt.addView(tagsView, lp(-1, -2, 0, 0, 0, 3));
-            }
+            tagsText = TextUtils.join("  ", tagParts);
+        }
+        if (!tagsText.isEmpty()) {
+            int tagsSize = tagsText.length() > 72 ? 8 : tagsText.length() > 44 ? 9 : 10;
+            TextView tagsView = text(
+                    tagsText,
+                    tagsSize,
+                    lightTheme ? Color.rgb(92, 56, 128) : Color.rgb(226, 203, 255),
+                    true
+            );
+            tagsView.setIncludeFontPadding(false);
+            tagsView.setSingleLine(true);
+            tagsView.setEllipsize(TextUtils.TruncateAt.END);
+            txt.addView(tagsView, lp(-1, dp(14), 0, 0, 0, 1));
         }
 
         String desc = firstText(room, "description", "desc");
         if (!desc.isEmpty()) {
-            int descSize = desc.length() > 180 ? 9 : desc.length() > 120 ? 10
-                    : desc.length() > 70 ? 11 : 12;
+            int descSize = desc.length() > 150 ? 8 : desc.length() > 90 ? 9 : 10;
             TextView rd = habboText(desc, descSize, false);
+            rd.setIncludeFontPadding(false);
             rd.setTextColor(lightTheme
                     ? Color.rgb(82,82,88)
                     : Color.argb(210,255,255,255));
-            rd.setMaxLines(4);
+            rd.setMaxLines(2);
             rd.setEllipsize(TextUtils.TruncateAt.END);
             rd.setGravity(Gravity.TOP);
-            rd.setLineSpacing(dp(1), 1f);
+            rd.setLineSpacing(0, 0.96f);
             LinearLayout.LayoutParams rdp = new LinearLayout.LayoutParams(-1, 0, 1f);
-            rdp.bottomMargin = dp(4);
+            rdp.bottomMargin = dp(2);
             txt.addView(rd, rdp);
         } else {
             Space flexibleSpace = new Space(this);
@@ -8898,7 +9004,8 @@ public class MainActivity extends Activity {
         LinearLayout bottom = new LinearLayout(this);
         bottom.setOrientation(LinearLayout.HORIZONTAL);
         bottom.setGravity(Gravity.BOTTOM);
-        txt.addView(bottom, new LinearLayout.LayoutParams(-1, dp(42)));
+        // 30dp: o rodapé termina exatamente junto à base da miniatura.
+        txt.addView(bottom, new LinearLayout.LayoutParams(-1, dp(30)));
         bottom.addView(roomMetaColumn(t(R.string.room_rating), score), new LinearLayout.LayoutParams(0, -1, 1f));
         bottom.addView(roomMetaColumn(t(R.string.room_limit), maxVisitors), new LinearLayout.LayoutParams(0, -1, 1f));
         bottom.addView(roomMetaColumn(t(R.string.date), date), new LinearLayout.LayoutParams(0, -1, 1f));
@@ -8909,25 +9016,27 @@ public class MainActivity extends Activity {
         LinearLayout column = new LinearLayout(this);
         column.setOrientation(LinearLayout.VERTICAL);
         column.setGravity(Gravity.BOTTOM | Gravity.LEFT);
-        column.setPadding(0, 0, dp(4), 0);
+        column.setPadding(0, 0, dp(3), 0);
 
         TextView labelView = text(
                 label,
-                9,
+                8,
                 lightTheme ? Color.rgb(115,115,120) : Color.argb(165,255,255,255),
                 false
         );
+        labelView.setIncludeFontPadding(false);
         labelView.setSingleLine(true);
         labelView.setEllipsize(TextUtils.TruncateAt.END);
-        column.addView(labelView, lp(-1, -2, 0, 0, 0, 1));
+        column.addView(labelView, lp(-1, dp(12), 0, 0, 0, 0));
 
         String safeValue = value == null ? "" : value.trim();
-        int valueSize = safeValue.length() > 14 ? 10 : safeValue.length() > 9 ? 11 : 12;
+        int valueSize = safeValue.length() > 14 ? 8 : safeValue.length() > 9 ? 9 : 10;
         TextView valueView = habboText(safeValue, valueSize, true);
+        valueView.setIncludeFontPadding(false);
         valueView.setTextColor(lightTheme ? Color.rgb(46,46,50) : Color.WHITE);
         valueView.setSingleLine(true);
         valueView.setEllipsize(TextUtils.TruncateAt.END);
-        column.addView(valueView, lp(-1, -2, 0, 0, 0, 0));
+        column.addView(valueView, lp(-1, dp(15), 0, 0, 0, 0));
         return column;
     }
 
@@ -9232,35 +9341,16 @@ public class MainActivity extends Activity {
         return false;
     }
 
-    private boolean matchesCurrentProfileIdentity(Object raw, String currentId, String currentName) {
-        if (raw == null || raw == JSONObject.NULL) return false;
-        if (raw instanceof JSONObject) {
-            JSONObject object = (JSONObject) raw;
-            String candidateId = normalizeNickKey(firstText(
-                    object, "uniqueId", "id", "userId", "habboId", "ownerId"
-            ));
-            String candidateName = normalizeNickKey(firstText(
-                    object, "name", "username", "habboName", "ownerName"
-            ));
-            return (!currentId.isEmpty() && !candidateId.isEmpty() && currentId.equals(candidateId))
-                    || (!currentName.isEmpty() && !candidateName.isEmpty() && currentName.equals(candidateName));
-        }
-        if (raw instanceof Boolean || raw instanceof Number) return false;
-        String candidate = normalizeNickKey(String.valueOf(raw));
-        if (candidate.isEmpty()) return false;
-        return (!currentId.isEmpty() && currentId.equals(candidate))
-                || (!currentName.isEmpty() && currentName.equals(candidate));
-    }
-
     private String groupUserRoleLabel(JSONObject g) {
-        String currentId = activeRenderedProfile == null ? ""
-                : normalizeNickKey(activeRenderedProfile.uniqueId);
-        String currentName = activeRenderedProfile == null ? ""
-                : normalizeNickKey(activeRenderedProfile.name);
-
         JSONObject membership = g == null ? null : g.optJSONObject("membership");
         if (membership == null && g != null) membership = g.optJSONObject("member");
         if (membership == null && g != null) membership = g.optJSONObject("userMembership");
+
+        // Regra autoritativa: somente a rota /groups do HabboDex fornece owner.
+        // Nenhum campo da API oficial é usado para inferir Criador.
+        if (g != null && g.optBoolean(HABBODEX_GROUP_OWNER_KEY, false)) {
+            return t(R.string.group_role_creator);
+        }
 
         String rawRole = firstText(
                 g,
@@ -9272,48 +9362,6 @@ public class MainActivity extends Activity {
             ).toUpperCase(Locale.ROOT);
             if (!nestedRole.isEmpty()) rawRole = rawRole + " " + nestedRole;
         }
-
-        // Não usa optBoolAny aqui: ele retorna no primeiro campo existente, mesmo quando
-        // esse primeiro campo é false. Em algumas respostas isso fazia o dono cair como admin.
-        boolean creator = jsonAnyTrue(
-                g,
-                "isOwner", "owner", "isCreator", "creator", "isFounder", "founder",
-                "ownedByUser", "userIsOwner", "isGroupOwner"
-        );
-        creator = creator || jsonAnyTrue(
-                membership,
-                "isOwner", "owner", "isCreator", "creator", "isFounder", "founder"
-        );
-
-        if (rawRole.contains("OWNER") || rawRole.contains("CREATOR")
-                || rawRole.contains("FOUNDER") || rawRole.contains("FUNDADOR")
-                || rawRole.contains("CRIADOR")) creator = true;
-
-        if (g != null) {
-            String ownerId = normalizeNickKey(firstText(
-                    g,
-                    "ownerId", "ownerUniqueId", "ownerUserId", "creatorId", "founderId",
-                    "groupOwnerId", "groupOwnerUniqueId"
-            ));
-            String ownerName = normalizeNickKey(firstText(
-                    g,
-                    "ownerName", "ownerUsername", "creatorName", "founderName",
-                    "groupOwnerName", "groupOwnerUsername"
-            ));
-            if (!currentId.isEmpty() && !ownerId.isEmpty() && currentId.equals(ownerId)) creator = true;
-            if (!currentName.isEmpty() && !ownerName.isEmpty() && currentName.equals(ownerName)) creator = true;
-
-            Object[] ownerCandidates = new Object[]{
-                    g.opt("owner"), g.opt("creator"), g.opt("founder"), g.opt("groupOwner")
-            };
-            for (Object candidate : ownerCandidates) {
-                if (matchesCurrentProfileIdentity(candidate, currentId, currentName)) {
-                    creator = true;
-                    break;
-                }
-            }
-        }
-        if (creator) return t(R.string.group_role_creator);
 
         boolean admin = jsonAnyTrue(
                 g,
@@ -9334,7 +9382,7 @@ public class MainActivity extends Activity {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(12), dp(10), dp(12), dp(10));
+        row.setPadding(dp(10), dp(9), dp(10), dp(9));
         row.setBackground(round(
                 lightTheme ? Color.rgb(250,250,250) : Color.argb(18,255,255,255),
                 dp(16),
@@ -9342,8 +9390,8 @@ public class MainActivity extends Activity {
                         : (lightTheme ? Color.rgb(220,220,220) : Color.argb(24,255,255,255)),
                 1
         ));
-        // Tamanho fixo; textos longos reduzem a fonte e usam ellipsis sem alterar o card.
-        row.setLayoutParams(lp(-1, dp(142), 0, 0, 0, 12));
+        // O conteúdo tem a mesma altura do emblema; nenhum texto faz o card crescer.
+        row.setLayoutParams(lp(-1, dp(76), 0, 0, 0, 10));
 
         ImageView img = new ImageView(this);
         img.setScaleType(ImageView.ScaleType.FIT_CENTER);
@@ -9357,72 +9405,65 @@ public class MainActivity extends Activity {
         LinearLayout txt = new LinearLayout(this);
         txt.setOrientation(LinearLayout.VERTICAL);
         txt.setGravity(Gravity.TOP);
-        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, -1, 1);
-        tp.leftMargin = dp(12);
+        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, dp(58), 1);
+        tp.leftMargin = dp(10);
         row.addView(txt, tp);
 
         String groupNameText = firstText(g,"name","groupName");
         String shownName = groupNameText.isEmpty() ? t(R.string.group_fallback) : groupNameText;
-        int nameSize = shownName.length() > 58 ? 11 : shownName.length() > 38 ? 12
-                : shownName.length() > 25 ? 14 : 16;
+        int nameSize = shownName.length() > 52 ? 10 : shownName.length() > 34 ? 11
+                : shownName.length() > 22 ? 12 : 14;
         TextView groupName = habboText(shownName, nameSize, true);
-        groupName.setMaxLines(2);
+        groupName.setIncludeFontPadding(false);
+        groupName.setSingleLine(true);
         groupName.setEllipsize(TextUtils.TruncateAt.END);
-        groupName.setLineSpacing(dp(1), 1f);
-        txt.addView(groupName, lp(-1, -2, 0, 0, 0, 2));
+        txt.addView(groupName, lp(-1, dp(17), 0, 0, 0, 1));
 
         String desc = firstText(g,"description","desc");
         if(!desc.isEmpty()) {
-            int descSize = desc.length() > 140 ? 9 : desc.length() > 90 ? 10
-                    : desc.length() > 55 ? 11 : 12;
+            int descSize = desc.length() > 110 ? 8 : desc.length() > 62 ? 9 : 10;
             TextView gd = habboText(desc, descSize, false);
+            gd.setIncludeFontPadding(false);
             gd.setTextColor(lightTheme ? Color.rgb(68,68,72) : Color.argb(220,255,255,255));
-            gd.setMaxLines(3);
+            gd.setMaxLines(2);
             gd.setEllipsize(TextUtils.TruncateAt.END);
             gd.setGravity(Gravity.TOP);
-            gd.setLineSpacing(dp(1), 1f);
+            gd.setLineSpacing(0, 0.94f);
             txt.addView(gd, new LinearLayout.LayoutParams(-1, 0, 1f));
         } else {
             Space flexibleSpace = new Space(this);
             txt.addView(flexibleSpace, new LinearLayout.LayoutParams(-1, 0, 1f));
         }
 
-        String groupDate = niceDate(firstText(g,"createdAt","creationTime","date"));
-        if (groupDate != null && !groupDate.trim().isEmpty()) {
-            TextView dateView = text(
-                    groupDate,
-                    10,
-                    lightTheme ? Color.rgb(105,105,110) : Color.argb(175,255,255,255),
-                    false
-            );
-            dateView.setSingleLine(true);
-            dateView.setEllipsize(TextUtils.TruncateAt.END);
-            txt.addView(dateView, lp(-1, dp(15), 0, 1, 0, 1));
-        }
-
-        // Rodapé fixo: mostra somente os valores, sem os rótulos "Acesso" e "Função".
+        // Rodapé compacto e alinhado à base do emblema: acesso e função lado a lado.
         LinearLayout meta = new LinearLayout(this);
         meta.setOrientation(LinearLayout.HORIZONTAL);
         meta.setGravity(Gravity.CENTER_VERTICAL);
-        txt.addView(meta, new LinearLayout.LayoutParams(-1, dp(22)));
+        txt.addView(meta, new LinearLayout.LayoutParams(-1, dp(18)));
 
         String access = groupAccessLabel(g);
+        int accessSize = access.length() > 10 ? 9 : 10;
         TextView accessValue = text(
                 access,
-                12,
+                accessSize,
                 groupAccessTextColor(g),
                 true
         );
+        accessValue.setIncludeFontPadding(false);
+        accessValue.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
         accessValue.setSingleLine(true);
         accessValue.setEllipsize(TextUtils.TruncateAt.END);
         meta.addView(accessValue, new LinearLayout.LayoutParams(0, -1, 1f));
 
+        String role = groupUserRoleLabel(g);
+        int roleSize = role.length() > 9 ? 9 : 10;
         TextView roleValue = text(
-                groupUserRoleLabel(g),
-                12,
+                role,
+                roleSize,
                 lightTheme ? Color.rgb(91, 54, 135) : Color.rgb(226, 203, 255),
                 true
         );
+        roleValue.setIncludeFontPadding(false);
         roleValue.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
         roleValue.setSingleLine(true);
         roleValue.setEllipsize(TextUtils.TruncateAt.END);
