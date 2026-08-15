@@ -61,7 +61,7 @@ public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_BASE = "https://habbodex.com/api/v1/habboinfo";
     private static final String HABBODEX_FURNIDEX_API = "https://habbodex.com/api/v1/furnidex/furni/from-figure-string";
-    private static final String APP_VERSION = "1.3.36";
+    private static final String APP_VERSION = "1.3.37";
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -324,8 +324,9 @@ public class MainActivity extends Activity {
     private static final String REAL_FRIENDS_REMOVED_BANNER_AD_UNIT_ID = "ca-app-pub-8079226281001828/5249048126";
     private static final String REAL_VISUAL_COLORS_BANNER_AD_UNIT_ID = "ca-app-pub-8079226281001828/6444755891";
     private static final String REAL_VISUAL_NICK_SEARCH_BANNER_AD_UNIT_ID = "ca-app-pub-8079226281001828/9823552100";
-    private static final String TEST_BANNER_AD_UNIT_ID = "ca-app-pub-3940256099942544/6300978111";
+    private static final String TEST_BANNER_AD_UNIT_ID = "ca-app-pub-3940256099942544/9214589741";
     private static final boolean USE_TEST_ADS = false;
+    private static final String ADS_LOG_TAG = "ToxicAds";
     private static final String INTERSTITIAL_AD_UNIT_ID = USE_TEST_ADS ? TEST_INTERSTITIAL_AD_UNIT_ID : REAL_INTERSTITIAL_AD_UNIT_ID;
     private static final String REWARDED_AD_UNIT_ID = USE_TEST_ADS ? TEST_REWARDED_AD_UNIT_ID : REAL_REWARDED_AD_UNIT_ID;
     private static final String START_NATIVE_AD_UNIT_ID = USE_TEST_ADS ? TEST_START_NATIVE_AD_UNIT_ID : REAL_START_NATIVE_AD_UNIT_ID;
@@ -588,7 +589,16 @@ public class MainActivity extends Activity {
                 getSharedPreferences(PREFS, MODE_PRIVATE).getInt(PREF_REWARDED_ADS_WATCHED, 0)
         ));
         removeAdsPurchased = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_REMOVE_ADS_PURCHASED, false);
-        MobileAds.initialize(this, initializationStatus -> {});
+        MobileAds.initialize(this, initializationStatus -> {
+            android.util.Log.i(ADS_LOG_TAG, "MobileAds initialized");
+            runOnUiThread(() -> {
+                if (!billingEntitlementCheckPending && !hasConfirmedAdFreeAccess()) {
+                    preloadBannerAds();
+                    loadInterstitialAd();
+                    refreshAttachedProfileBannerAds();
+                }
+            });
+        });
         buildUi();
         startAccessGateMonitoring();
         initBillingClient();
@@ -785,6 +795,7 @@ public class MainActivity extends Activity {
         adView.setAdListener(new AdListener() {
             @Override
             public void onAdLoaded() {
+                android.util.Log.i(ADS_LOG_TAG, "Banner loaded: " + adView.getAdUnitId());
                 cancelBannerAdRetry(adView);
                 bannerLoadFailureCounts.remove(adView);
                 bannerHasLoadedAds.add(adView);
@@ -795,6 +806,11 @@ public class MainActivity extends Activity {
 
             @Override
             public void onAdFailedToLoad(LoadAdError loadAdError) {
+                android.util.Log.w(ADS_LOG_TAG,
+                        "Banner failed: " + adView.getAdUnitId()
+                                + " code=" + (loadAdError == null ? -1 : loadAdError.getCode())
+                                + " domain=" + (loadAdError == null ? "" : loadAdError.getDomain())
+                                + " message=" + (loadAdError == null ? "" : loadAdError.getMessage()));
                 handleBannerLoadFailure(adView, container);
             }
 
@@ -1281,6 +1297,7 @@ public class MainActivity extends Activity {
                 new InterstitialAdLoadCallback() {
                     @Override
                     public void onAdLoaded(InterstitialAd ad) {
+                        android.util.Log.i(ADS_LOG_TAG, "Interstitial loaded: " + INTERSTITIAL_AD_UNIT_ID);
                         interstitialLoading = false;
                         interstitialAd = ad;
                         resetInterstitialBackoff();
@@ -1299,6 +1316,7 @@ public class MainActivity extends Activity {
 
                             @Override
                             public void onAdShowedFullScreenContent() {
+                                android.util.Log.i(ADS_LOG_TAG, "Interstitial shown: " + INTERSTITIAL_AD_UNIT_ID);
                                 interstitialAd = null;
                             }
                         });
@@ -1307,6 +1325,11 @@ public class MainActivity extends Activity {
 
                     @Override
                     public void onAdFailedToLoad(LoadAdError loadAdError) {
+                        android.util.Log.w(ADS_LOG_TAG,
+                                "Interstitial failed: " + INTERSTITIAL_AD_UNIT_ID
+                                        + " code=" + (loadAdError == null ? -1 : loadAdError.getCode())
+                                        + " domain=" + (loadAdError == null ? "" : loadAdError.getDomain())
+                                        + " message=" + (loadAdError == null ? "" : loadAdError.getMessage()));
                         interstitialLoading = false;
                         interstitialAd = null;
                         registerInterstitialLoadFailure();
@@ -1352,7 +1375,6 @@ public class MainActivity extends Activity {
     }
 
     private void maybeShowProfileInterstitial() {
-        if (accessGateReason != AccessGateReason.NONE) return;
         profileOpenActionsSinceAd++;
 
         long now = System.currentTimeMillis();
@@ -1367,23 +1389,21 @@ public class MainActivity extends Activity {
         }
         if (!cooldownOk || !actionCountOk) return;
 
-        // A profile can now open before Google Play finishes entitlement verification.
-        // Remember the eligible profile action and show only after we know ads are allowed.
-        if (billingEntitlementCheckPending) {
-            pendingProfileInterstitialAction = true;
-            pendingProfileInterstitialRequestedAt = now;
+        // Never lose a profile-open action just because billing/access checks or an ad load
+        // are still in progress. Keep it pending and satisfy it as soon as showing is safe.
+        pendingProfileInterstitialAction = true;
+        pendingProfileInterstitialRequestedAt = now;
+
+        if (billingEntitlementCheckPending
+                || accessGateReason != AccessGateReason.NONE
+                || !appInForeground
+                || isFinishing()) {
             return;
         }
 
-        if (interstitialAd != null && !isFinishing()) {
-            pendingProfileInterstitialAction = false;
-            pendingProfileInterstitialRequestedAt = 0L;
-            profileOpenActionsSinceAd = 0;
-            lastInterstitialShownAt = now;
-            interstitialAd.show(this);
+        if (interstitialAd != null) {
+            maybeShowPendingProfileInterstitial();
         } else {
-            pendingProfileInterstitialAction = true;
-            pendingProfileInterstitialRequestedAt = now;
             loadInterstitialAd();
         }
     }
@@ -2762,6 +2782,10 @@ public class MainActivity extends Activity {
 
     private void dismissAccessGate() {
         accessGateReason = AccessGateReason.NONE;
+        if (!billingEntitlementCheckPending && !hasConfirmedAdFreeAccess() && appInForeground) {
+            loadInterstitialAd();
+            uiHandler.postDelayed(this::maybeShowPendingProfileInterstitial, 120L);
+        }
         Dialog dialog = accessGateDialog;
         accessGateDialog = null;
         if (dialog != null) {
@@ -4451,6 +4475,7 @@ public class MainActivity extends Activity {
         }
         setLoading(false, "");
         renderProfile(snapshot);
+        uiHandler.postDelayed(this::refreshAttachedProfileBannerAds, 160L);
         setStatusMessage("");
         String loadedReference = preferUniqueId && !snapshot.uniqueId.isEmpty()
                 ? snapshot.uniqueId
@@ -5749,6 +5774,7 @@ public class MainActivity extends Activity {
                     )) return;
             final int scrollY = mainScroll == null ? 0 : mainScroll.getScrollY();
             renderProfile(pending);
+            uiHandler.postDelayed(this::refreshAttachedProfileBannerAds, 160L);
             if (mainScroll != null && scrollY > 0) {
                 mainScroll.post(() -> mainScroll.scrollTo(0, scrollY));
             }
@@ -7230,11 +7256,9 @@ public class MainActivity extends Activity {
             View more = c.findViewWithTag("load_more_header_button");
             if (more != null) more.setOnClickListener(v -> loadMoreStyles(profileResult, stylesHsv));
         }
-        // Profile banners are attached only after progressive loading is complete.
-        // Reattaching an AdView while resultWrap is rebuilt can prevent it from ever becoming visible.
-        if (!profileSectionsInProgress) {
-            addBannerToResultWrap(buildPreviousStylesBannerAd(), 18);
-        }
+        // Keep the slot in the profile hierarchy during progressive renders. Loading is
+        // automatically deferred while entitlement is being verified.
+        addBannerToResultWrap(buildPreviousStylesBannerAd(), 18);
     }
 
     private void showClothesDialog(String figure, String date) {
@@ -8466,10 +8490,8 @@ public class MainActivity extends Activity {
             render[0].run();
         });
         render[0].run();
-        // Keep this AdView stable: attach it only on the final profile render.
-        if (!profileSectionsInProgress) {
-            addBannerToResultWrap(buildFriendsRemovedBannerAd(), 18);
-        }
+        // Keep the slot present during progressive renders; it will load as soon as ads are allowed.
+        addBannerToResultWrap(buildFriendsRemovedBannerAd(), 18);
     }
 
     private int tabInactiveTextColor() { return lightTheme ? Color.rgb(70,70,70) : Color.argb(150,255,255,255); }
