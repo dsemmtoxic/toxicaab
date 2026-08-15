@@ -248,7 +248,9 @@
     <string name="group_access_closed">Suljettu</string>
     <string name="group_role">Rooli</string>
     <string name="group_role_member">Jäsen</string>
-    <string name="group_role_admin">Ylläpitäjä</string>
-    <string name="group_role_creator">Luoja</string>
+    <string name="group_role_admin">Ylläp.</string>
+    <string name="group_role_creator">Omistaja</string>
 
+    <string name="room_rating">Arvosana</string>
+    <string name="room_limit">Raja</string>
 </resources>
