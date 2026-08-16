@@ -61,7 +61,7 @@ public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_BASE = "https://habbodex.com/api/v1/habboinfo";
     private static final String HABBODEX_FURNIDEX_API = "https://habbodex.com/api/v1/furnidex/furni/from-figure-string";
-    private static final String APP_VERSION = "1.3.48";
+    private static final String APP_VERSION = "1.3.50";
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -316,10 +316,20 @@ public class MainActivity extends Activity {
     private int profileOpenActionsSinceAd = 0;
     private boolean pendingProfileInterstitialAction = false;
     private long pendingProfileInterstitialRequestedAt = 0L;
-    private static final long PROFILE_INTERSTITIAL_PENDING_WINDOW_MS = 25L * 1000L;
+    private static final long PROFILE_INTERSTITIAL_PENDING_WINDOW_MS = 40L * 1000L;
     private int interstitialLoadFailureCount = 0;
     private long nextInterstitialLoadAllowedAt = 0L;
+    private long interstitialLoadStartedAt = 0L;
+    private long interstitialLoadedAt = 0L;
+    private long interstitialShowStartedAt = 0L;
+    private int interstitialRequestGeneration = 0;
     private Runnable interstitialRetryRunnable = null;
+    private Runnable interstitialHealthRunnable = null;
+    private static final long INTERSTITIAL_LOAD_STUCK_MS = 25L * 1000L;
+    private static final long INTERSTITIAL_SHOW_STUCK_MS = 12L * 1000L;
+    private static final long INTERSTITIAL_CACHE_MAX_AGE_MS = 45L * 60L * 1000L;
+    private static final long INTERSTITIAL_HEALTH_INTERVAL_MS = 15L * 1000L;
+    private static final long INTERSTITIAL_RETRY_MAX_DELAY_MS = 30L * 1000L;
     // Keep the next full-screen ad warm. onAdDismissed can run while the Activity is
     // still transitioning back to RESUMED, so the next load is deferred until foreground.
     private Runnable interstitialWarmPreloadRunnable = null;
@@ -352,6 +362,9 @@ public class MainActivity extends Activity {
     private AdView friendsRemovedBannerAdView;
     private FrameLayout friendsRemovedBannerAdContainer;
     private boolean friendsRemovedBannerLoadStarted = false;
+    private FrameLayout selectedBadgesLiveHost = null;
+    private int selectedBadgesLiveToken = 0;
+    private volatile int selectedBadgeDateLookupRunningToken = 0;
     private AdView visualColorsBannerAdView;
     private FrameLayout visualColorsBannerAdContainer;
     private boolean visualColorsBannerLoadStarted = false;
@@ -699,6 +712,89 @@ public class MainActivity extends Activity {
         return Math.min(delay, AD_RETRY_MAX_DELAY_MS);
     }
 
+    private long calculateInterstitialRetryDelayMs(int failureCount) {
+        // Interstitials must stay warm. A long 1-2 minute backoff can make several
+        // profile-opening transitions pass without any ready ad. Keep retries bounded.
+        return Math.min(calculateAdRetryDelayMs(failureCount), INTERSTITIAL_RETRY_MAX_DELAY_MS);
+    }
+
+    private void cancelInterstitialHealthCheck() {
+        if (interstitialHealthRunnable != null) {
+            uiHandler.removeCallbacks(interstitialHealthRunnable);
+            interstitialHealthRunnable = null;
+        }
+    }
+
+    private void scheduleInterstitialHealthCheck() {
+        cancelInterstitialHealthCheck();
+        if (!appInForeground || removeAdsPurchased || hasConfirmedAdFreeAccess()) return;
+        interstitialHealthRunnable = () -> {
+            interstitialHealthRunnable = null;
+            ensureInterstitialHealthy("periodic");
+            if (appInForeground && !removeAdsPurchased && !hasConfirmedAdFreeAccess()) {
+                scheduleInterstitialHealthCheck();
+            }
+        };
+        uiHandler.postDelayed(interstitialHealthRunnable, INTERSTITIAL_HEALTH_INTERVAL_MS);
+    }
+
+    private void ensureInterstitialHealthy(String reason) {
+        if (removeAdsPurchased || hasConfirmedAdFreeAccess()) {
+            cancelInterstitialAdRetry();
+            interstitialAd = null;
+            interstitialLoading = false;
+            interstitialLoadStartedAt = 0L;
+            interstitialLoadedAt = 0L;
+            return;
+        }
+        if (!mobileAdsInitialized) return;
+
+        long now = System.currentTimeMillis();
+        // Repair a rare lifecycle state where control returned to this Activity but the
+        // fullscreen dismiss/failure callback never cleared interstitialShowing.
+        if (interstitialShowing) {
+            if (appInForeground && interstitialShowStartedAt > 0L
+                    && now - interstitialShowStartedAt >= INTERSTITIAL_SHOW_STUCK_MS) {
+                android.util.Log.w(ADS_LOG_TAG,
+                        "Interstitial show watchdog reset (" + reason + ") after "
+                                + (now - interstitialShowStartedAt) + "ms");
+                interstitialShowing = false;
+                interstitialShowStartedAt = 0L;
+                interstitialAd = null;
+                interstitialLoadedAt = 0L;
+                nextInterstitialLoadAllowedAt = 0L;
+                cancelInterstitialAdRetry();
+            } else {
+                return;
+            }
+        }
+        if (interstitialLoading && interstitialLoadStartedAt > 0L
+                && now - interstitialLoadStartedAt >= INTERSTITIAL_LOAD_STUCK_MS) {
+            android.util.Log.w(ADS_LOG_TAG,
+                    "Interstitial watchdog reset (" + reason + ") after "
+                            + (now - interstitialLoadStartedAt) + "ms");
+            // Invalidate callbacks from the request that never completed.
+            interstitialRequestGeneration++;
+            interstitialLoading = false;
+            interstitialLoadStartedAt = 0L;
+            nextInterstitialLoadAllowedAt = 0L;
+            cancelInterstitialAdRetry();
+        }
+
+        if (interstitialAd != null && interstitialLoadedAt > 0L
+                && now - interstitialLoadedAt >= INTERSTITIAL_CACHE_MAX_AGE_MS) {
+            android.util.Log.i(ADS_LOG_TAG, "Interstitial cached ad expired; refreshing (" + reason + ")");
+            interstitialAd = null;
+            interstitialLoadedAt = 0L;
+            nextInterstitialLoadAllowedAt = 0L;
+            cancelInterstitialAdRetry();
+        }
+
+        if (interstitialAd == null && !interstitialLoading && !interstitialShowing) {
+            loadInterstitialAd();
+        }
+    }
+
     private void cancelInterstitialAdRetry() {
         if (interstitialRetryRunnable != null) {
             uiHandler.removeCallbacks(interstitialRetryRunnable);
@@ -797,6 +893,12 @@ public class MainActivity extends Activity {
 
     private void scheduleBannerAdRetry(final AdView adView, final FrameLayout container) {
         if (adView == null || container == null || !isCurrentBannerAdView(adView)) return;
+        // Once this AdView has loaded successfully, AdMob owns refresh scheduling.
+        // A manual load after an automatic-refresh failure made the visible slot flash.
+        if (bannerHasLoadedAds.contains(adView)) {
+            cancelBannerAdRetry(adView);
+            return;
+        }
         cancelBannerAdRetry(adView);
         int failureCount = bannerLoadFailureCounts.containsKey(adView)
                 ? bannerLoadFailureCounts.get(adView) + 1
@@ -849,6 +951,14 @@ public class MainActivity extends Activity {
 
     private void handleBannerLoadFailure(AdView adView, FrameLayout container) {
         if (!isCurrentBannerAdView(adView)) return;
+        if (bannerHasLoadedAds.contains(adView)) {
+            // Later automatic refresh failures must not blank an already-established slot.
+            // Keep it stable and let the SDK decide its next refresh.
+            setBannerLoadStarted(adView, true);
+            if (container != null && !hasAdFreeAccess()) container.setVisibility(View.VISIBLE);
+            cancelBannerAdRetry(adView);
+            return;
+        }
         setBannerLoadStarted(adView, false);
         setBannerContainerIdleVisibility(adView, container);
         scheduleBannerAdRetry(adView, container);
@@ -881,6 +991,7 @@ public class MainActivity extends Activity {
                 cancelBannerAdRetry(adView);
                 bannerLoadFailureCounts.remove(adView);
                 bannerHasLoadedAds.add(adView);
+                setBannerLoadStarted(adView, true);
                 if (container != null && !hasAdFreeAccess()) {
                     container.setVisibility(View.VISIBLE);
                 }
@@ -912,7 +1023,8 @@ public class MainActivity extends Activity {
 
     private void loadBannerAfterAttach(final AdView adView, final FrameLayout container) {
         if (adView == null || container == null || removeAdsPurchased || hasAdFreeAccess()) return;
-        container.setVisibility(View.INVISIBLE);
+        if (bannerHasLoadedAds.contains(adView)) container.setVisibility(View.VISIBLE);
+        else container.setVisibility(View.INVISIBLE);
         container.post(() -> {
             try {
                 if (removeAdsPurchased || hasAdFreeAccess()) {
@@ -1318,7 +1430,7 @@ public class MainActivity extends Activity {
 
     private void registerInterstitialLoadFailure() {
         interstitialLoadFailureCount++;
-        nextInterstitialLoadAllowedAt = System.currentTimeMillis() + calculateAdRetryDelayMs(interstitialLoadFailureCount);
+        nextInterstitialLoadAllowedAt = System.currentTimeMillis() + calculateInterstitialRetryDelayMs(interstitialLoadFailureCount);
         scheduleInterstitialAdRetry();
     }
 
@@ -1349,7 +1461,12 @@ public class MainActivity extends Activity {
     }
 
     private boolean canLoadInterstitialAdNow() {
-        return !removeAdsPurchased && !hasConfirmedAdFreeAccess() && System.currentTimeMillis() >= nextInterstitialLoadAllowedAt;
+        return !removeAdsPurchased
+                && !hasConfirmedAdFreeAccess()
+                && !billingEntitlementCheckPending
+                && appInForeground
+                && accessGateReason == AccessGateReason.NONE
+                && System.currentTimeMillis() >= nextInterstitialLoadAllowedAt;
     }
 
     private boolean canLoadRewardedAdNow() {
@@ -1405,24 +1522,30 @@ public class MainActivity extends Activity {
 
         try {
             interstitialShowing = true;
+            interstitialShowStartedAt = System.currentTimeMillis();
             android.util.Log.i(ADS_LOG_TAG, "Interstitial pending show requested: " + INTERSTITIAL_AD_UNIT_ID);
             interstitialAd.show(this);
         } catch (Exception showError) {
             android.util.Log.w(ADS_LOG_TAG, "Interstitial pending show exception: " + showError.getMessage());
             interstitialShowing = false;
+            interstitialShowStartedAt = 0L;
             interstitialAd = null;
             registerInterstitialLoadFailure();
         }
     }
 
     private void loadInterstitialAd() {
-        // 1.3.41: return to the proven 1.3.10 lifecycle. Keep exactly one interstitial
-        // cached whenever ads are allowed; the 2-minute rule controls SHOWING, not loading.
+        // Keep exactly one interstitial cached whenever ads are allowed. The 2-minute
+        // rule controls SHOWING only; loading/recovery runs independently.
         if (removeAdsPurchased || hasConfirmedAdFreeAccess()) {
             cancelInterstitialAdRetry();
+            if (interstitialLoading) interstitialRequestGeneration++;
             interstitialAd = null;
             interstitialLoading = false;
+            interstitialLoadStartedAt = 0L;
+            interstitialLoadedAt = 0L;
             interstitialShowing = false;
+            interstitialShowStartedAt = 0L;
             return;
         }
 
@@ -1437,14 +1560,38 @@ public class MainActivity extends Activity {
             return;
         }
 
-        if (interstitialLoading || interstitialAd != null || interstitialShowing) return;
+        long now = System.currentTimeMillis();
+        // A callback can occasionally be lost while Activities/network state transition.
+        // Do not let a stale boolean disable interstitials for the rest of the session.
+        if (interstitialLoading && interstitialLoadStartedAt > 0L
+                && now - interstitialLoadStartedAt >= INTERSTITIAL_LOAD_STUCK_MS) {
+            android.util.Log.w(ADS_LOG_TAG, "Interstitial load timed out; forcing a fresh request");
+            interstitialRequestGeneration++;
+            interstitialLoading = false;
+            interstitialLoadStartedAt = 0L;
+            nextInterstitialLoadAllowedAt = 0L;
+            cancelInterstitialAdRetry();
+        }
+
+        if (interstitialAd != null) {
+            if (interstitialLoadedAt > 0L && now - interstitialLoadedAt >= INTERSTITIAL_CACHE_MAX_AGE_MS) {
+                android.util.Log.i(ADS_LOG_TAG, "Interstitial cache age exceeded; discarding stale ad");
+                interstitialAd = null;
+                interstitialLoadedAt = 0L;
+            } else {
+                return;
+            }
+        }
+        if (interstitialLoading || interstitialShowing) return;
         if (!canLoadInterstitialAdNow()) {
             scheduleInterstitialAdRetry();
             return;
         }
 
         interstitialLoading = true;
-        android.util.Log.i(ADS_LOG_TAG, "Interstitial request: " + INTERSTITIAL_AD_UNIT_ID);
+        interstitialLoadStartedAt = now;
+        final int requestGeneration = ++interstitialRequestGeneration;
+        android.util.Log.i(ADS_LOG_TAG, "Interstitial request #" + requestGeneration + ": " + INTERSTITIAL_AD_UNIT_ID);
         AdRequest adRequest = new AdRequest.Builder().build();
 
         InterstitialAd.load(
@@ -1454,8 +1601,14 @@ public class MainActivity extends Activity {
                 new InterstitialAdLoadCallback() {
                     @Override
                     public void onAdLoaded(InterstitialAd ad) {
-                        android.util.Log.i(ADS_LOG_TAG, "Interstitial loaded: " + INTERSTITIAL_AD_UNIT_ID);
+                        if (requestGeneration != interstitialRequestGeneration) {
+                            android.util.Log.i(ADS_LOG_TAG, "Ignoring stale interstitial load callback #" + requestGeneration);
+                            return;
+                        }
+                        android.util.Log.i(ADS_LOG_TAG, "Interstitial loaded #" + requestGeneration + ": " + INTERSTITIAL_AD_UNIT_ID);
                         interstitialLoading = false;
+                        interstitialLoadStartedAt = 0L;
+                        interstitialLoadedAt = System.currentTimeMillis();
                         interstitialAd = ad;
                         resetInterstitialBackoff();
 
@@ -1464,11 +1617,13 @@ public class MainActivity extends Activity {
                             public void onAdDismissedFullScreenContent() {
                                 android.util.Log.i(ADS_LOG_TAG, "Interstitial dismissed: " + INTERSTITIAL_AD_UNIT_ID);
                                 interstitialShowing = false;
+                                interstitialShowStartedAt = 0L;
                                 interstitialAd = null;
+                                interstitialLoadedAt = 0L;
                                 resetInterstitialBackoff();
-                                // Same behavior that was reliable in 1.3.10: immediately prepare
-                                // the next ad. A second onResume() call below is an extra safety net.
-                                uiHandler.postDelayed(MainActivity.this::loadInterstitialAd, 300L);
+                                // Prepare the next instance immediately; onResume/health-check are
+                                // additional safety nets if the Activity is still transitioning.
+                                uiHandler.postDelayed(() -> ensureInterstitialHealthy("dismissed"), 450L);
                             }
 
                             @Override
@@ -1479,35 +1634,45 @@ public class MainActivity extends Activity {
                                                 + " domain=" + (adError == null ? "" : adError.getDomain())
                                                 + " message=" + (adError == null ? "" : adError.getMessage()));
                                 interstitialShowing = false;
+                                interstitialShowStartedAt = 0L;
                                 interstitialAd = null;
-                                // A failed show does not start the cooldown.
-                                registerInterstitialLoadFailure();
+                                interstitialLoadedAt = 0L;
+                                // A failed show does not start the cooldown. Reload quickly.
+                                nextInterstitialLoadAllowedAt = 0L;
+                                cancelInterstitialAdRetry();
+                                uiHandler.postDelayed(() -> ensureInterstitialHealthy("show-failed"), 750L);
                             }
 
                             @Override
                             public void onAdShowedFullScreenContent() {
                                 android.util.Log.i(ADS_LOG_TAG, "Interstitial shown: " + INTERSTITIAL_AD_UNIT_ID);
-                                // Count the cooldown only after Google confirms the ad is actually visible.
                                 lastInterstitialShownAt = System.currentTimeMillis();
+                                interstitialShowStartedAt = lastInterstitialShownAt;
                                 profileOpenActionsSinceAd = 0;
                                 clearPendingProfileInterstitial();
                                 interstitialAd = null;
+                                interstitialLoadedAt = 0L;
                             }
                         });
-                        // If a profile-opening action happened while the ad was still loading,
-                        // consume the freshly loaded ad while that action is still recent.
+                        // Consume a recent profile-opening transition if it was waiting for this load.
                         uiHandler.post(MainActivity.this::maybeShowPendingProfileInterstitial);
                     }
 
                     @Override
                     public void onAdFailedToLoad(LoadAdError loadAdError) {
+                        if (requestGeneration != interstitialRequestGeneration) {
+                            android.util.Log.i(ADS_LOG_TAG, "Ignoring stale interstitial failure callback #" + requestGeneration);
+                            return;
+                        }
                         android.util.Log.w(ADS_LOG_TAG,
-                                "Interstitial failed: " + INTERSTITIAL_AD_UNIT_ID
+                                "Interstitial failed #" + requestGeneration + ": " + INTERSTITIAL_AD_UNIT_ID
                                         + " code=" + (loadAdError == null ? -1 : loadAdError.getCode())
                                         + " domain=" + (loadAdError == null ? "" : loadAdError.getDomain())
                                         + " message=" + (loadAdError == null ? "" : loadAdError.getMessage()));
                         interstitialLoading = false;
+                        interstitialLoadStartedAt = 0L;
                         interstitialAd = null;
+                        interstitialLoadedAt = 0L;
                         registerInterstitialLoadFailure();
                     }
                 }
@@ -1518,6 +1683,7 @@ public class MainActivity extends Activity {
         // Every full-profile open is eligible. If the ad is not ready yet, remember
         // this action briefly and show as soon as the current load finishes.
         profileOpenActionsSinceAd++;
+        ensureInterstitialHealthy("profile-open");
 
         if (hasConfirmedAdFreeAccess()) {
             clearPendingProfileInterstitial();
@@ -2015,6 +2181,7 @@ public class MainActivity extends Activity {
             uiHandler.postDelayed(this::refreshAttachedProfileBannerAds, 120L);
             uiHandler.postDelayed(this::refreshAttachedProfileBannerAds, 900L);
             loadInterstitialAd();
+            uiHandler.post(this::maybeShowPendingProfileInterstitial);
             loadRewardedAd();
             loadStartNativeAdIfNeeded();
         } else {
@@ -2034,7 +2201,11 @@ public class MainActivity extends Activity {
             interstitialAd = null;
             rewardedAd = null;
             interstitialLoading = false;
+            interstitialLoadStartedAt = 0L;
+            interstitialLoadedAt = 0L;
             interstitialShowing = false;
+            interstitialShowStartedAt = 0L;
+            cancelInterstitialHealthCheck();
             rewardedLoading = false;
         } else if (changed && !billingEntitlementCheckPending && !hasAdFreeAccess()) {
             preloadBannerAds();
@@ -2177,7 +2348,11 @@ public class MainActivity extends Activity {
             interstitialAd = null;
             rewardedAd = null;
             interstitialLoading = false;
+            interstitialLoadStartedAt = 0L;
+            interstitialLoadedAt = 0L;
             interstitialShowing = false;
+            interstitialShowStartedAt = 0L;
+            cancelInterstitialHealthCheck();
             rewardedLoading = false;
         }
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(PREF_REMOVE_ADS_PURCHASED, purchased).apply();
@@ -2584,6 +2759,12 @@ public class MainActivity extends Activity {
             loadRewardedAd();
             uiHandler.post(this::maybeShowPendingRewardedAd);
         }
+        ensureInterstitialHealthy("resume");
+        uiHandler.postDelayed(() -> {
+            ensureInterstitialHealthy("resume-delayed");
+            maybeShowPendingProfileInterstitial();
+        }, 1500L);
+        scheduleInterstitialHealthCheck();
         checkFavoriteOnlineNotifications();
     }
 
@@ -2596,6 +2777,7 @@ public class MainActivity extends Activity {
         uiHandler.removeCallbacks(adFreeTicker);
         cancelInterstitialAdRetry();
         cancelInterstitialWarmPreload();
+        cancelInterstitialHealthCheck();
         cancelRewardedAdRetry();
         startFavoriteOnlineWatcher();
         super.onPause();
@@ -2626,6 +2808,7 @@ public class MainActivity extends Activity {
         if (billingEntitlementTimeoutRunnable != null) uiHandler.removeCallbacks(billingEntitlementTimeoutRunnable);
         uiHandler.removeCallbacks(adFreeTicker);
         cancelInterstitialAdRetry();
+        cancelInterstitialHealthCheck();
         cancelRewardedAdRetry();
         destroyAllBannerAds();
         if (favoriteOnlineWatcher != null) uiHandler.removeCallbacks(favoriteOnlineWatcher);
@@ -3009,6 +3192,8 @@ public class MainActivity extends Activity {
     }
 
     private void buildUi() {
+        selectedBadgesLiveHost = null;
+        selectedBadgesLiveToken = 0;
         pruneFloatingProfileProgressViews(true);
         mainTutorialSettingsTarget = null;
         mainTutorialSearchTarget = null;
@@ -4705,6 +4890,14 @@ public class MainActivity extends Activity {
         setLoading(false, "");
         renderProfile(snapshot);
         uiHandler.postDelayed(this::refreshAttachedProfileBannerAds, 160L);
+        if (!profileSectionsInProgress) {
+            uiHandler.postDelayed(() -> {
+                ProfileResult current = activeRenderedProfile;
+                if (current != null && isCurrentProfileResult(current, token)) {
+                    startSelectedBadgeDateLookup(current, token);
+                }
+            }, 650L);
+        }
         setStatusMessage("");
         String loadedReference = preferUniqueId && !snapshot.uniqueId.isEmpty()
                 ? snapshot.uniqueId
@@ -4792,6 +4985,9 @@ public class MainActivity extends Activity {
         // navegação, etc.) já no Locale correspondente ao hotel escolhido.
         buildUi();
         refreshSponsors();
+        // Rebuilding the main UI for a sponsor/hotel change must never interrupt
+        // the full-screen ad cache. Repair it explicitly before starting the profile.
+        ensureInterstitialHealthy("external-profile-ui-rebuild");
         if (mainScroll != null) {
             mainScroll.post(() -> mainScroll.scrollTo(0, 0));
         }
@@ -5523,8 +5719,12 @@ public class MainActivity extends Activity {
         runOnUiThread(() -> uiHandler.postDelayed(() -> {
             if (isActiveToken(token) && !searchInProgress && !profileSectionsInProgress) {
                 maybeShowProfileFeaturesTutorial();
+                ProfileResult current = activeRenderedProfile;
+                if (current != null && isCurrentProfileResult(current, token)) {
+                    startSelectedBadgeDateLookup(current, token);
+                }
             }
-        }, 520L));
+        }, 650L));
     }
 
     private <T> T awaitFutureValue(Future<T> future) {
@@ -6622,6 +6822,104 @@ public class MainActivity extends Activity {
         }
     }
 
+    private HashSet<String> selectedBadgeCodesMissingDates(ProfileResult r) {
+        HashSet<String> missing = new HashSet<>();
+        if (r == null || r.selectedBadges == null) return missing;
+        for (JSONObject selected : r.selectedBadges) {
+            if (selected == null || !badgeObtainedDate(selected).isEmpty()) continue;
+            String code = firstText(selected, "code", "badgeCode").trim().toUpperCase(Locale.ROOT);
+            if (!code.isEmpty()) missing.add(code);
+        }
+        return missing;
+    }
+
+    private boolean enrichSelectedBadgesFromItems(ProfileResult r, ArrayList<JSONObject> items) {
+        if (r == null || items == null || items.isEmpty() || r.selectedBadges == null) return false;
+        HashMap<String, JSONObject> byCode = new HashMap<>();
+        addBadgesToLookup(byCode, items);
+        boolean changed = false;
+        for (JSONObject selected : r.selectedBadges) {
+            if (selected == null || !badgeObtainedDate(selected).isEmpty()) continue;
+            String code = firstText(selected, "code", "badgeCode").trim().toUpperCase(Locale.ROOT);
+            if (code.isEmpty()) continue;
+            JSONObject full = byCode.get(code);
+            if (full == null) continue;
+            String obtained = badgeObtainedDate(full);
+            if (obtained.isEmpty()) continue;
+            try {
+                fillMissingJsonFields(selected, full);
+                if (badgeObtainedDate(selected).isEmpty()) selected.put("creationTime", obtained);
+                changed = true;
+            } catch(Exception ignored) {}
+        }
+        return changed;
+    }
+
+    private ArrayList<Integer> selectedBadgeLookupPageOrder(ProfileResult r) {
+        ArrayList<Integer> pages = new ArrayList<>();
+        if (r == null) return pages;
+        int total = Math.max(r.badgesTotal, 0);
+        try { total = Math.max(total, Integer.parseInt(r.totalBadges)); } catch(Exception ignored) {}
+        int totalPages = total > 0 ? (int)Math.ceil(total / 100.0) : 0;
+        int loadedCount = r.badgesWithAchievements == null ? 0 : r.badgesWithAchievements.size();
+        int firstUnloaded = Math.max(2, (int)Math.ceil(loadedCount / 100.0) + 1);
+        if (r.badgesNextPage > 1) firstUnloaded = Math.max(firstUnloaded, r.badgesNextPage);
+        if (totalPages >= firstUnloaded) {
+            int left = firstUnloaded, right = totalPages;
+            while (left <= right) {
+                pages.add(left);
+                if (right != left) pages.add(right);
+                left++; right--;
+            }
+        } else if (r.badgesHasMore) {
+            int start = r.badgesNextPage > 1 ? r.badgesNextPage : firstUnloaded;
+            for (int page = start; page < start + 40; page++) pages.add(page);
+        }
+        return pages;
+    }
+
+    private void startSelectedBadgeDateLookup(ProfileResult r, int token) {
+        if (r == null || r.uniqueId == null || r.uniqueId.trim().isEmpty()
+                || !isCurrentProfileResult(r, token)) return;
+        synchronized (r) {
+            enrichSelectedBadgesWithOwnership(r);
+            if (selectedBadgeCodesMissingDates(r).isEmpty()) {
+                runOnUiThread(() -> refreshSelectedBadgesLive(r, token));
+                return;
+            }
+        }
+        if (selectedBadgeDateLookupRunningToken == token) return;
+        selectedBadgeDateLookupRunningToken = token;
+        executor.execute(() -> {
+            try {
+                ArrayList<Integer> pages;
+                synchronized (r) { pages = selectedBadgeLookupPageOrder(r); }
+                int consecutiveEmptyPages = 0;
+                for (int page : pages) {
+                    if (!isCurrentProfileResult(r, token)) return;
+                    synchronized (r) { if (selectedBadgeCodesMissingDates(r).isEmpty()) break; }
+                    PageResult result = fetchCriticalBadgesPage(r.uniqueId, page, 100, false);
+                    if (!isCurrentProfileResult(r, token)) return;
+                    if (result == null || !result.success || result.items == null || result.items.isEmpty()) {
+                        consecutiveEmptyPages++;
+                        if (r.badgesTotal <= 0 || consecutiveEmptyPages >= 3) break;
+                        continue;
+                    }
+                    consecutiveEmptyPages = 0;
+                    boolean changed;
+                    synchronized (r) { changed = enrichSelectedBadgesFromItems(r, result.items); }
+                    if (changed) runOnUiThread(() -> refreshSelectedBadgesLive(r, token));
+                    try { Thread.sleep(120L); } catch(InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                }
+            } finally {
+                if (selectedBadgeDateLookupRunningToken == token) selectedBadgeDateLookupRunningToken = 0;
+            }
+        });
+    }
+
     private void addBadgesToLookup(HashMap<String, JSONObject> byCode, ArrayList<JSONObject> list) {
         if (byCode == null || list == null) return;
         for (JSONObject b : list) {
@@ -7104,6 +7402,8 @@ public class MainActivity extends Activity {
         profileFavoriteTutorialTarget = null;
         profileFriendTutorialTarget = null;
         if (!searchInProgress) setLoading(false, "");
+        selectedBadgesLiveHost = null;
+        selectedBadgesLiveToken = 0;
         resultWrap.removeAllViews();
 
         if (profileSectionsInProgress
@@ -7337,7 +7637,17 @@ public class MainActivity extends Activity {
     }
 
     private void addSelectedBadges(ArrayList<JSONObject> list) {
-        if (list.isEmpty()) return;
+        if (list == null || list.isEmpty()) return;
+        FrameLayout host = new FrameLayout(this);
+        selectedBadgesLiveHost = host;
+        selectedBadgesLiveToken = activeSearchToken;
+        resultWrap.addView(host, lp(-1, dp(72), 0, 0, 0, 14));
+        renderSelectedBadgesIntoHost(host, list);
+    }
+
+    private void renderSelectedBadgesIntoHost(FrameLayout host, ArrayList<JSONObject> list) {
+        if (host == null || list == null) return;
+        host.removeAllViews();
         HorizontalScrollView hsv = new HorizontalScrollView(this);
         hsv.setHorizontalScrollBarEnabled(false);
         hsv.setFillViewport(true);
@@ -7347,22 +7657,19 @@ public class MainActivity extends Activity {
         row.setMinimumWidth(getResources().getDisplayMetrics().widthPixels - dp(36));
         row.setPadding(dp(2), dp(2), dp(2), dp(2));
         hsv.addView(row);
-        resultWrap.addView(hsv, lp(-1, dp(72), 0, 0, 0, 14));
+        host.addView(hsv, new FrameLayout.LayoutParams(-1, dp(72), Gravity.TOP));
         for (int i = 0; i < Math.min(list.size(), 12); i++) {
             JSONObject b = list.get(i);
             String code = firstText(b, "code", "badgeCode");
-
             FrameLayout cell = new FrameLayout(this);
             LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(dp(54), dp(58));
             p.rightMargin = dp(8);
             row.addView(cell, p);
-
             ImageView img = new ImageView(this);
             img.setScaleType(ImageView.ScaleType.FIT_CENTER);
             img.setPadding(dp(2), dp(2), dp(2), dp(2));
             cell.addView(img, new FrameLayout.LayoutParams(dp(50), dp(50), Gravity.CENTER));
             if (!code.isEmpty()) loadImage(img, badgeImageUrl(code));
-
             if (isTodayCreationTime(badgeObtainedDate(b))) {
                 TextView newBadge = text(newBadgeLabel(), 8, Color.WHITE, true);
                 newBadge.setGravity(Gravity.CENTER);
@@ -7376,6 +7683,13 @@ public class MainActivity extends Activity {
             final JSONObject badgeObj = b;
             cell.setOnClickListener(v -> showBadgeDialog(badgeObj));
         }
+    }
+
+    private void refreshSelectedBadgesLive(ProfileResult r, int token) {
+        if (!isCurrentProfileResult(r, token)) return;
+        FrameLayout host = selectedBadgesLiveHost;
+        if (host == null || selectedBadgesLiveToken != token || host.getParent() == null) return;
+        renderSelectedBadgesIntoHost(host, r.selectedBadges);
     }
 
     private void addPreviousNames(ArrayList<JSONObject> list) {
