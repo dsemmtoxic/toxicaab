@@ -18,8 +18,8 @@ android {
         applicationId 'com.toxic.search'
         minSdk 23
         targetSdk 36
-        versionCode 78
-        versionName '1.3.48'
+        versionCode 80
+        versionName '1.3.50'
         buildConfigField 'String', 'HABBODEX_PROXY_KEY', "\"${escapedHabbodexProxyKey}\""
     }
 
