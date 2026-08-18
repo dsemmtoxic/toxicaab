@@ -47,7 +47,13 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Development APKs must never request production ads.
+            buildConfigField 'boolean', 'ADMOB_USE_TEST_ADS', 'true'
+        }
         release {
+            // Google Play / production builds use the real ad units.
+            buildConfigField 'boolean', 'ADMOB_USE_TEST_ADS', 'false'
             if (hasReleaseSigning) {
                 signingConfig signingConfigs.release
             }
