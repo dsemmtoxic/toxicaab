@@ -78,8 +78,8 @@ applicationId 'com.toxic.search'
 2. Aumente o `versionCode` em `app/build.gradle`:
 
 ```gradle
-versionCode 43
-versionName '1.3.1'
+versionCode 82
+versionName '1.3.7'
 ```
 
 O `versionCode` precisa sempre aumentar. O `versionName` é o texto exibido para você/usuário.
@@ -87,17 +87,23 @@ O `versionCode` precisa sempre aumentar. O `versionName` é o texto exibido para
 3. Gere outro AAB pelo mesmo workflow **2 - Build Signed Android AAB**.
 4. Use sempre a mesma chave/secrets.
 
-## 6. Ative a renovação automática dos banners no AdMob
+## 6. Unity Ads
 
-O aplicativo tenta carregar novamente um banner quando ocorre falta de preenchimento
-ou erro de rede, começando após 30 segundos e aumentando gradualmente até 5 minutos.
-Quando um anúncio está carregado, a troca periódica do criativo é controlada pelo
-AdMob.
+Esta versão usa Unity Ads no lugar do AdMob. O projeto está configurado com o Game ID
+Android e com os placements `Banner_Android`, `Interstitial_Android` e
+`Rewarded_Android`.
 
-No painel do AdMob, abra cada uma das cinco unidades de banner usadas pelo aplicativo
-e deixe a opção de atualização automática em **Otimizada pelo Google**. Essa é a
-configuração recomendada para manter banners visíveis recebendo novos anúncios sem
-criar solicitações duplicadas no código.
+- Builds `debug` inicializam a Unity em modo de teste.
+- Builds `release` inicializam em modo de produção.
+- O antigo anúncio nativo da tela inicial foi substituído por um banner 320x50.
+- Os demais banners, o intersticial e o rewarded mantêm os mesmos pontos e regras
+  de exibição do aplicativo.
+- O intersticial continua respeitando o intervalo mínimo de 2 minutos.
+- A lógica Premium/Supporter continua impedindo a exibição de anúncios quando válida.
+
+Antes de publicar, confirme no Unity Monetization Dashboard que os placements Android
+existem com exatamente esses nomes, inclusive maiúsculas/minúsculas. Também revise
+as configurações de privacidade/consentimento e o `app-ads.txt` da aplicação.
 
 ## 7. Configure a compra Premium `remove_ads`
 
