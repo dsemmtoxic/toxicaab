@@ -40,6 +40,11 @@ import com.android.billingclient.api.QueryProductDetailsParams;
 import com.android.billingclient.api.QueryProductDetailsResult;
 import com.android.billingclient.api.QueryPurchasesParams;
 import com.android.billingclient.api.UnfetchedProduct;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 import java.io.*;
 import java.net.*;
 import java.security.MessageDigest;
@@ -52,7 +57,7 @@ public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_BASE = "https://habbodex.com/api/v1/habboinfo";
     private static final String HABBODEX_FURNIDEX_API = "https://habbodex.com/api/v1/furnidex/furni/from-figure-string";
-    private static final String APP_VERSION = "1.3.7";
+    private static final String APP_VERSION = "1.3.8";
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -578,16 +583,7 @@ public class MainActivity extends Activity {
         } catch (Exception e) {
             habboFont = Typeface.create("sans-serif-condensed", Typeface.BOLD);
         }
-        getWindow().setStatusBarColor(lightTheme ? Color.WHITE : bg);
-        getWindow().setNavigationBarColor(lightTheme ? Color.rgb(245, 245, 245) : bg);
-        if (Build.VERSION.SDK_INT >= 29) {
-            getWindow().setNavigationBarContrastEnforced(false);
-        }
-        if (Build.VERSION.SDK_INT >= 23) {
-            int flags = lightTheme ? View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR : 0;
-            if (Build.VERSION.SDK_INT >= 26 && lightTheme) flags |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
-            getWindow().getDecorView().setSystemUiVisibility(flags);
-        }
+        applySystemBarsForTheme(getWindow());
         loadOpenedProfilesHistory();
         loadFavoriteProfiles();
         loadFavoriteOnlineStatesFromPrefs();
@@ -642,24 +638,27 @@ public class MainActivity extends Activity {
     }
 
     private void applySystemBarsForTheme() {
-        getWindow().setStatusBarColor(lightTheme ? Color.WHITE : bg);
-        getWindow().setNavigationBarColor(lightTheme ? Color.WHITE : bg);
-        if (Build.VERSION.SDK_INT >= 29) {
-            getWindow().setNavigationBarContrastEnforced(false);
-        }
-        if (Build.VERSION.SDK_INT >= 23) {
-            int flags = lightTheme ? View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR : 0;
-            if (Build.VERSION.SDK_INT >= 26 && lightTheme) flags |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
-            getWindow().getDecorView().setSystemUiVisibility(flags);
-        }
+        applySystemBarsForTheme(getWindow());
         if (screen != null) applySafeAreaInsets(getWindow(), screen);
     }
 
+    private void applySystemBarsForTheme(Window window) {
+        if (window == null) return;
+
+        WindowCompat.enableEdgeToEdge(window);
+        WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(
+                window,
+                window.getDecorView()
+        );
+        controller.setAppearanceLightStatusBars(lightTheme);
+        controller.setAppearanceLightNavigationBars(lightTheme);
+    }
+
     private void applySafeAreaInsets(Window window, View content) {
-        if (window == null || content == null || Build.VERSION.SDK_INT < 30) return;
+        if (window == null || content == null) return;
 
         try {
-            window.setDecorFitsSystemWindows(false);
+            applySystemBarsForTheme(window);
             window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         } catch (Exception ignored) {}
 
@@ -673,9 +672,9 @@ public class MainActivity extends Activity {
             };
             safeAreaPaddingByView.put(content, basePadding);
             final int[] stableBasePadding = basePadding;
-            content.setOnApplyWindowInsetsListener((view, insets) -> {
-                android.graphics.Insets safe = insets.getInsets(
-                        WindowInsets.Type.systemBars() | WindowInsets.Type.displayCutout()
+            ViewCompat.setOnApplyWindowInsetsListener(content, (view, insets) -> {
+                Insets safe = insets.getInsets(
+                        WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout()
                 );
                 view.setPadding(
                         stableBasePadding[0] + safe.left,
@@ -687,7 +686,7 @@ public class MainActivity extends Activity {
             });
         }
 
-        content.post(content::requestApplyInsets);
+        content.post(() -> ViewCompat.requestApplyInsets(content));
     }
 
     private long calculateAdRetryDelayMs(int failureCount) {
@@ -2925,19 +2924,14 @@ public class MainActivity extends Activity {
             Window window = dialog.getWindow();
             if (window != null) {
                 window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-                window.setStatusBarColor(lightTheme ? Color.WHITE : bg);
-                window.setNavigationBarColor(lightTheme ? Color.WHITE : bg);
                 window.setLayout(WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT);
                 WindowManager.LayoutParams params = window.getAttributes();
                 params.width = WindowManager.LayoutParams.MATCH_PARENT;
                 params.height = WindowManager.LayoutParams.MATCH_PARENT;
                 params.dimAmount = 0f;
                 window.setAttributes(params);
-                if (Build.VERSION.SDK_INT >= 23) {
-                    int flags = lightTheme ? View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR : 0;
-                    if (Build.VERSION.SDK_INT >= 26 && lightTheme) flags |= View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR;
-                    window.getDecorView().setSystemUiVisibility(flags);
-                }
+                applySystemBarsForTheme(window);
+                ViewCompat.requestApplyInsets(full);
             }
         } catch(Exception ignored) {
             accessGateDialog = null;
