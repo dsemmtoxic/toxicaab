@@ -57,7 +57,7 @@ public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_BASE = "https://habbodex.com/api/v1/habboinfo";
     private static final String HABBODEX_FURNIDEX_API = "https://habbodex.com/api/v1/furnidex/furni/from-figure-string";
-    private static final String APP_VERSION = "1.3.8";
+    private static final String APP_VERSION = "1.3.9";
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -405,6 +405,13 @@ public class MainActivity extends Activity {
     private static final String PREF_SUPPORTER_TUTORIAL_VERSION = "supporter_tutorial_version";
     private static final int CURRENT_SUPPORTER_TUTORIAL_VERSION = 2;
     private static final long SUPPORTER_REVERIFY_INTERVAL_MS = 15L * 60L * 1000L;
+    private static final long[] SUPPORTER_STATUS_RETRY_DELAYS_MS = new long[] {
+            2_000L,
+            5_000L,
+            10_000L,
+            20_000L,
+            40_000L
+    };
     private ProductDetails supporterProductDetails;
     private boolean supporterActive = false;
     private boolean supporterStatusRequestRunning = false;
@@ -419,6 +426,7 @@ public class MainActivity extends Activity {
     private String supporterProfileNick = "";
     private String supporterProfileHotel = "";
     private Runnable billingEntitlementTimeoutRunnable;
+    private Runnable supporterStatusRetryRunnable;
     private boolean openingSplashShownThisSession = false;
     private JSONObject visualFigureDataCache = null;
     private long visualFigureDataLoadedAt = 0L;
@@ -1897,6 +1905,7 @@ public class MainActivity extends Activity {
                     handleSupporterPurchases(purchases, false);
                 }
                 if (!owned) {
+                    cancelSupporterStatusRetry();
                     supporterPurchaseToken = "";
                     supporterExpiresAtMs = 0L;
                     supporterNextVerificationAtMs = 0L;
@@ -1923,9 +1932,17 @@ public class MainActivity extends Activity {
         for (Purchase purchase : purchases) {
             if (!isSupporterPurchase(purchase)) continue;
             if (purchase.getPurchaseState() == Purchase.PurchaseState.PURCHASED) {
-                supporterPurchaseToken = purchase.getPurchaseToken() == null
+                String purchaseToken = purchase.getPurchaseToken() == null
                         ? ""
                         : purchase.getPurchaseToken().trim();
+                if (purchaseToken.isEmpty()) continue;
+                if (!purchaseToken.equals(supporterPurchaseToken)) cancelSupporterStatusRetry();
+                supporterPurchaseToken = purchaseToken;
+                billingEntitlementCheckPending = true;
+                if (billingEntitlementTimeoutRunnable != null) {
+                    uiHandler.removeCallbacks(billingEntitlementTimeoutRunnable);
+                    billingEntitlementTimeoutRunnable = null;
+                }
                 if (showToast) {
                     getSharedPreferences(PREFS, MODE_PRIVATE)
                             .edit()
@@ -1973,6 +1990,7 @@ public class MainActivity extends Activity {
         boolean changed = supporterActive != active;
         supporterActive = active;
         if (active) {
+            cancelSupporterStatusRetry();
             clearPendingProfileInterstitial();
             clearPendingRewardedShow();
             cancelInterstitialAdRetry();
@@ -2577,6 +2595,7 @@ public class MainActivity extends Activity {
         stopAccessGateMonitoring();
         if (suggestionDebounceTask != null) uiHandler.removeCallbacks(suggestionDebounceTask);
         if (billingEntitlementTimeoutRunnable != null) uiHandler.removeCallbacks(billingEntitlementTimeoutRunnable);
+        cancelSupporterStatusRetry();
         uiHandler.removeCallbacks(adFreeTicker);
         cancelInterstitialAdRetry();
         cancelInterstitialHealthCheck();
@@ -3701,15 +3720,23 @@ public class MainActivity extends Activity {
     }
 
     private void syncSupporterStatusWithBackend(String purchaseToken, boolean showActivation) {
+        cancelSupporterStatusRetry();
+        syncSupporterStatusWithBackend(purchaseToken, showActivation, 0);
+    }
+
+    private void syncSupporterStatusWithBackend(String purchaseToken, boolean showActivation, int attempt) {
         if (purchaseToken == null || purchaseToken.trim().isEmpty() || supporterStatusRequestRunning) return;
+        final String cleanToken = purchaseToken.trim();
         supporterStatusRequestRunning = true;
         executor.execute(() -> {
             try {
                 JSONObject payload = new JSONObject();
-                payload.put("purchaseToken", purchaseToken);
+                payload.put("purchaseToken", cleanToken);
                 JSONObject response = postJsonObject(PROFILE_API + "/sponsors/status", payload);
                 boolean active = response.optBoolean("active", false);
                 applySupporterStatus(response);
+                if (!active && scheduleSupporterStatusRetry(cleanToken, showActivation, attempt)) return;
+                cancelSupporterStatusRetry();
                 supporterNextVerificationAtMs = System.currentTimeMillis() + SUPPORTER_REVERIFY_INTERVAL_MS;
                 runOnUiThread(() -> {
                     // A compra local apenas fornece o token. O direito e a
@@ -3720,8 +3747,20 @@ public class MainActivity extends Activity {
                     if (active) uiHandler.postDelayed(this::maybeShowSupporterTutorial, 650L);
                 });
             } catch(ApiHttpException error) {
+                boolean definitiveRejection = error.statusCode == 401
+                        || error.statusCode == 403
+                        || error.statusCode == 410;
+                if (!definitiveRejection
+                        && scheduleSupporterStatusRetry(cleanToken, showActivation, attempt)) {
+                    android.util.Log.i(
+                            "ToxicBilling",
+                            "Supporter validation retry scheduled after HTTP " + error.statusCode
+                    );
+                    return;
+                }
+                cancelSupporterStatusRetry();
                 supporterNextVerificationAtMs = System.currentTimeMillis() + 2L * 60L * 1000L;
-                if (error.statusCode == 401 || error.statusCode == 403 || error.statusCode == 410) {
+                if (definitiveRejection) {
                     runOnUiThread(() -> finishBillingEntitlementCheck(false));
                 } else {
                     runOnUiThread(() -> {
@@ -3732,6 +3771,11 @@ public class MainActivity extends Activity {
                     });
                 }
             } catch(Exception error) {
+                if (scheduleSupporterStatusRetry(cleanToken, showActivation, attempt)) {
+                    android.util.Log.i("ToxicBilling", "Supporter validation retry scheduled", error);
+                    return;
+                }
+                cancelSupporterStatusRetry();
                 supporterNextVerificationAtMs = System.currentTimeMillis() + 2L * 60L * 1000L;
                 runOnUiThread(() -> {
                     finishBillingEntitlementCheck(supporterActive);
@@ -3741,6 +3785,29 @@ public class MainActivity extends Activity {
                 supporterStatusRequestRunning = false;
             }
         });
+    }
+
+    private boolean scheduleSupporterStatusRetry(String purchaseToken, boolean showActivation, int attempt) {
+        if (purchaseToken == null
+                || !purchaseToken.equals(supporterPurchaseToken)
+                || attempt >= SUPPORTER_STATUS_RETRY_DELAYS_MS.length) return false;
+
+        cancelSupporterStatusRetry();
+        long delay = SUPPORTER_STATUS_RETRY_DELAYS_MS[attempt];
+        supporterNextVerificationAtMs = System.currentTimeMillis() + delay;
+        supporterStatusRetryRunnable = () -> {
+            supporterStatusRetryRunnable = null;
+            if (!appInForeground || !purchaseToken.equals(supporterPurchaseToken)) return;
+            syncSupporterStatusWithBackend(purchaseToken, showActivation, attempt + 1);
+        };
+        uiHandler.postDelayed(supporterStatusRetryRunnable, delay);
+        return true;
+    }
+
+    private void cancelSupporterStatusRetry() {
+        if (supporterStatusRetryRunnable == null) return;
+        uiHandler.removeCallbacks(supporterStatusRetryRunnable);
+        supporterStatusRetryRunnable = null;
     }
 
     private void applySupporterStatus(JSONObject response) {
