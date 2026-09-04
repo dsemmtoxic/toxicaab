@@ -77,10 +77,13 @@
     <string name="history_cleared">Geschiedenis gewist.</string>
     <string name="loading_details">Profielgegevens laden...</string>
     <string name="loading_history">Geschiedenis laden...</string>
+    <string name="not_available">Niet beschikbaar</string>
+    <string name="security_verification_title">Beveiligingscontrole</string>
+    <string name="security_verification_body">Voltooi de controle om door te gaan. Toxic gaat daarna automatisch verder.</string>
     <string name="loading_styles_friends">Looks en vrienden laden...</string>
     <string name="loading_rooms_groups">Kamers en groepen laden...</string>
     <string name="loading_clothes">Kleding laden...</string>
-    <string name="cannot_load_clothes">Items konden niet worden geladen.</string>
+    <string name="cannot_load_clothes">Niet beschikbaar</string>
     <string name="no_clothes_found">Geen items gevonden</string>
     <string name="current_look">Huidige look</string>
     <string name="looks">Looks</string>
@@ -178,7 +181,7 @@
     <string name="male">Man</string>
     <string name="female">Vrouw</string>
     <string name="loading_visuals">Look-passer laden...</string>
-    <string name="cannot_load_visuals">Kon de look-passer niet laden.</string>
+    <string name="cannot_load_visuals">Niet beschikbaar</string>
     <string name="not_found_simple">Profiel niet gevonden.</string>
     <string name="no_items_found">Geen items gevonden.</string>
     <string name="remove_item">Verwijder</string>
