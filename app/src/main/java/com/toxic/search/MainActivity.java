@@ -57,7 +57,7 @@ public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_BASE = "https://habbodex.com/api/v1/habboinfo";
     private static final String HABBODEX_FURNIDEX_API = "https://habbodex.com/api/v1/furnidex/furni/from-figure-string";
-    private static final String APP_VERSION = "1.4.2";
+    private static final String APP_VERSION = "1.4.3";
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -253,8 +253,17 @@ public class MainActivity extends Activity {
     private int photosScrollX = 0;
     private int stylesScrollX = 0;
     private static final int PAGE_CHUNK = 20;
-    private static final int HORIZONTAL_AUTO_LOAD_THRESHOLD_DP = 220;
+    // Inicia a pré-busca algumas peças antes do fim para que o lote seguinte
+    // normalmente já esteja disponível quando o usuário chegar à borda.
+    private static final int HORIZONTAL_AUTO_LOAD_THRESHOLD_DP = 420;
     private static final long HORIZONTAL_AUTO_LOAD_RETRY_BACKOFF_MS = 5_000L;
+    private static final String TAG_STYLES_CAROUSEL_ROW = "styles_carousel_row";
+    private static final String TAG_STYLES_CAROUSEL_TITLE = "styles_carousel_title";
+    private static final String TAG_PHOTOS_CAROUSEL_ROW = "photos_carousel_row";
+    private static final String TAG_PHOTOS_CAROUSEL_TITLE = "photos_carousel_title";
+    private static final String TAG_HORIZONTAL_CAROUSEL_LOADER = "horizontal_carousel_loader";
+    private static final String TAG_STYLE_ITEM_PREFIX = "style_carousel_item|";
+    private static final String TAG_PHOTO_ITEM_PREFIX = "photo_carousel_item|";
     private static final String PREFS = "toxic_search_settings";
     private static final String PREF_MAX_PROFILES = "max_profiles";
     private static final String PREF_CACHE_DAYS = "cache_days";
@@ -7953,6 +7962,61 @@ public class MainActivity extends Activity {
         return combined;
     }
 
+    /**
+     * O endpoint de visuais nem sempre respeita limit=100 e pode devolver só
+     * dez registros. Acumula páginas remotas até obter ao menos vinte itens
+     * realmente novos, sem descartar o restante quando uma página vier maior.
+     */
+    private PageResult fetchStylesRemoteChunk(
+            String uniqueId,
+            int startPage,
+            ArrayList<JSONObject> existing,
+            int knownTotal,
+            int desiredNewItems
+    ) {
+        PageResult combined = new PageResult();
+        combined.page = Math.max(1, startPage);
+        combined.total = Math.max(0, knownTotal);
+        ArrayList<JSONObject> baseline = existing == null
+                ? new ArrayList<>()
+                : new ArrayList<>(existing);
+        int target = Math.max(1, desiredNewItems);
+        int page = combined.page;
+
+        for (int request = 0; request < 12; request++) {
+            PageResult part = fetchPage(
+                    uniqueId,
+                    "previous-styles",
+                    "previousStyles",
+                    page,
+                    100
+            );
+            if (part == null || !part.success) break;
+            combined.success = true;
+            combined.page = part.page;
+            combined.total = Math.max(combined.total, part.total);
+            combined.items = mergeLists(combined.items, part.items);
+
+            ArrayList<JSONObject> withExisting = mergeLists(baseline, combined.items);
+            int newCount = Math.max(0, withExisting.size() - baseline.size());
+            boolean hasMore = part.hasMore
+                    || (combined.total > 0 && withExisting.size() < combined.total);
+            int nextPage = part.nextPage;
+            if (hasMore && nextPage <= page && part.items != null && !part.items.isEmpty()) {
+                nextPage = page + 1;
+            }
+            combined.nextPage = nextPage > page ? nextPage : 0;
+            combined.hasMore = combined.nextPage > 0;
+
+            if (newCount >= target || !combined.hasMore
+                    || part.items == null || part.items.isEmpty()) {
+                break;
+            }
+            page = combined.nextPage;
+        }
+        return combined;
+    }
+
     private int extractTotalCount(JSONObject data) {
         if (data == null) return 0;
         int total = firstPositiveInt(data, "total", "totalItems", "totalCount", "count", "recordsTotal");
@@ -8005,138 +8069,367 @@ public class MainActivity extends Activity {
         if (!r.stylesHasMore) r.stylesNextPage = 0;
     }
 
-    private void loadMorePhotos(ProfileResult r, HorizontalScrollView photosHsv) {
-        if (r == null || r.photosLoading || !r.photosHasMore || r.uniqueId == null || r.uniqueId.isEmpty()) return;
-        if (SystemClock.elapsedRealtime() < r.photosAutoLoadRetryAfterMs) return;
-        final int token = boundProfileToken(r);
-        if (!isCurrentProfileResult(r, token)) return;
-        if (r.allPhotosSource != null && !r.allPhotosSource.isEmpty()) {
-            r.photosAutoLoadRetryAfterMs = 0L;
-            photosScrollX = photosHsv == null ? 0 : photosHsv.getScrollX();
-            int end = Math.min(r.photos.size() + PAGE_CHUNK, r.allPhotosSource.size());
-            r.photos = new ArrayList<>(r.allPhotosSource.subList(0, end));
-            r.photosTotal = r.allPhotosSource.size();
-            r.photosHasMore = end < r.photosTotal;
-            r.photosNextPage = r.photosHasMore ? (end / PAGE_CHUNK) + 1 : 0;
-            enrichPhotoRoomInfo(r);
-            renderProfile(r);
+    private ProfileResult livePaginationProfile(ProfileResult rendered) {
+        ProfileResult source = activeProfileSource;
+        if (source != null && rendered != null && sameProfile(source, rendered)
+                && normalizeHotelKey(source.hotelKey).equals(
+                        normalizeHotelKey(rendered.hotelKey)
+                )) {
+            return source;
+        }
+        return rendered;
+    }
+
+    private void syncPhotosPaginationToRendered(ProfileResult source) {
+        ProfileResult rendered = activeRenderedProfile;
+        if (source == null || rendered == null || source == rendered
+                || !sameProfile(source, rendered)) return;
+        ArrayList<JSONObject> photos;
+        ArrayList<JSONObject> allPhotos;
+        int nextPage;
+        int total;
+        boolean hasMore;
+        boolean loading;
+        long retryAfter;
+        synchronized (source) {
+            photos = new ArrayList<>(source.photos);
+            allPhotos = new ArrayList<>(source.allPhotosSource);
+            nextPage = source.photosNextPage;
+            total = source.photosTotal;
+            hasMore = source.photosHasMore;
+            loading = source.photosLoading;
+            retryAfter = source.photosAutoLoadRetryAfterMs;
+        }
+        synchronized (rendered) {
+            rendered.photos = photos;
+            rendered.allPhotosSource = allPhotos;
+            rendered.photosNextPage = nextPage;
+            rendered.photosTotal = total;
+            rendered.photosHasMore = hasMore;
+            rendered.photosLoading = loading;
+            rendered.photosAutoLoadRetryAfterMs = retryAfter;
+        }
+    }
+
+    private void syncStylesPaginationToRendered(ProfileResult source) {
+        ProfileResult rendered = activeRenderedProfile;
+        if (source == null || rendered == null || source == rendered
+                || !sameProfile(source, rendered)) return;
+        ArrayList<JSONObject> styles;
+        ArrayList<JSONObject> allStyles;
+        int nextPage;
+        int total;
+        int remoteNextPage;
+        boolean hasMore;
+        boolean loading;
+        boolean remotePaged;
+        boolean fromComplement;
+        long retryAfter;
+        synchronized (source) {
+            styles = new ArrayList<>(source.previousStyles);
+            allStyles = new ArrayList<>(source.allStylesSource);
+            nextPage = source.stylesNextPage;
+            total = source.stylesTotal;
+            remoteNextPage = source.stylesRemoteNextPage;
+            hasMore = source.stylesHasMore;
+            loading = source.stylesLoading;
+            remotePaged = source.stylesRemotePaged;
+            fromComplement = source.stylesFromComplement;
+            retryAfter = source.stylesAutoLoadRetryAfterMs;
+        }
+        synchronized (rendered) {
+            rendered.previousStyles = styles;
+            rendered.allStylesSource = allStyles;
+            rendered.stylesNextPage = nextPage;
+            rendered.stylesTotal = total;
+            rendered.stylesRemoteNextPage = remoteNextPage;
+            rendered.stylesHasMore = hasMore;
+            rendered.stylesLoading = loading;
+            rendered.stylesRemotePaged = remotePaged;
+            rendered.stylesFromComplement = fromComplement;
+            rendered.stylesAutoLoadRetryAfterMs = retryAfter;
+        }
+    }
+
+    private LinearLayout taggedCarouselRow(String tag) {
+        if (resultWrap == null) return null;
+        View found = resultWrap.findViewWithTag(tag);
+        return found instanceof LinearLayout ? (LinearLayout) found : null;
+    }
+
+    private TextView taggedCarouselTitle(String tag) {
+        if (resultWrap == null) return null;
+        View found = resultWrap.findViewWithTag(tag);
+        return found instanceof TextView ? (TextView) found : null;
+    }
+
+    private void tagHorizontalCarouselTitle(LinearLayout card, String tag) {
+        if (card == null || card.getChildCount() == 0) return;
+        View headerView = card.getChildAt(0);
+        if (!(headerView instanceof ViewGroup)) return;
+        ViewGroup header = (ViewGroup) headerView;
+        if (header.getChildCount() == 0) return;
+        View label = header.getChildAt(0);
+        if (label instanceof TextView) label.setTag(tag);
+    }
+
+    private void setHorizontalCarouselLoading(String rowTag, boolean loading, int rowHeightDp) {
+        LinearLayout row = taggedCarouselRow(rowTag);
+        if (row == null) return;
+        View current = row.findViewWithTag(TAG_HORIZONTAL_CAROUSEL_LOADER);
+        if (!loading) {
+            if (current != null) row.removeView(current);
             return;
         }
-        final int page = r.photosNextPage <= 0 ? 2 : r.photosNextPage;
-        r.photosLoading = true;
+        if (current != null) return;
+
+        FrameLayout holder = new FrameLayout(this);
+        holder.setTag(TAG_HORIZONTAL_CAROUSEL_LOADER);
+        LinearLayout.LayoutParams holderParams = new LinearLayout.LayoutParams(
+                dp(44),
+                dp(rowHeightDp)
+        );
+        holderParams.rightMargin = dp(10);
+        row.addView(holder, holderParams);
+
+        ProgressBar spinner = new ProgressBar(
+                this,
+                null,
+                android.R.attr.progressBarStyleSmall
+        );
+        if (Build.VERSION.SDK_INT >= 21) {
+            spinner.setIndeterminateTintList(ColorStateList.valueOf(purple));
+        }
+        holder.addView(
+                spinner,
+                new FrameLayout.LayoutParams(dp(22), dp(22), Gravity.CENTER)
+        );
+    }
+
+    private void updateHorizontalCarouselTitle(
+            String titleTag,
+            String title,
+            int shown,
+            int total
+    ) {
+        TextView label = taggedCarouselTitle(titleTag);
+        if (label == null) return;
+        label.setText(
+                title + " (" + formatCount(shown) + "/"
+                        + formatCount(Math.max(shown, total)) + ")"
+        );
+    }
+
+    private void refreshPhotosCarouselIncrementally(ProfileResult state, int token) {
+        if (!isCurrentProfileResult(state, token)) return;
+        syncPhotosPaginationToRendered(state);
+        ProfileResult rendered = activeRenderedProfile;
+        if (rendered == null) return;
+        setHorizontalCarouselLoading(TAG_PHOTOS_CAROUSEL_ROW, false, 165);
+        LinearLayout row = taggedCarouselRow(TAG_PHOTOS_CAROUSEL_ROW);
+        if (row != null) appendPhotoCarouselItems(row, rendered.photos);
+        updateHorizontalCarouselTitle(
+                TAG_PHOTOS_CAROUSEL_TITLE,
+                t(R.string.user_photos),
+                rendered.photos.size(),
+                rendered.photosTotal
+        );
+    }
+
+    private void refreshStylesCarouselIncrementally(ProfileResult state, int token) {
+        if (!isCurrentProfileResult(state, token)) return;
+        syncStylesPaginationToRendered(state);
+        ProfileResult rendered = activeRenderedProfile;
+        if (rendered == null) return;
+        setHorizontalCarouselLoading(TAG_STYLES_CAROUSEL_ROW, false, 162);
+        LinearLayout row = taggedCarouselRow(TAG_STYLES_CAROUSEL_ROW);
+        if (row != null) appendStyleCarouselItems(row, rendered.previousStyles);
+        updateHorizontalCarouselTitle(
+                TAG_STYLES_CAROUSEL_TITLE,
+                t(R.string.previous_styles),
+                rendered.previousStyles.size(),
+                rendered.stylesTotal
+        );
+    }
+
+    private void loadMorePhotos(ProfileResult r, HorizontalScrollView photosHsv) {
+        if (r == null) return;
+        final int token = boundProfileToken(r);
+        if (!isCurrentProfileResult(r, token)) return;
+        final ProfileResult state = livePaginationProfile(r);
+        if (state == null || state.photosLoading || !state.photosHasMore
+                || state.uniqueId == null || state.uniqueId.isEmpty()) return;
+        if (SystemClock.elapsedRealtime() < state.photosAutoLoadRetryAfterMs) return;
+        if (state.allPhotosSource != null && !state.allPhotosSource.isEmpty()) {
+            photosScrollX = photosHsv == null ? 0 : photosHsv.getScrollX();
+            synchronized (state) {
+                state.photosAutoLoadRetryAfterMs = 0L;
+                int end = Math.min(
+                        state.photos.size() + PAGE_CHUNK,
+                        state.allPhotosSource.size()
+                );
+                state.photos = new ArrayList<>(state.allPhotosSource.subList(0, end));
+                state.photosTotal = state.allPhotosSource.size();
+                state.photosHasMore = end < state.photosTotal;
+                state.photosNextPage = state.photosHasMore
+                        ? (end / PAGE_CHUNK) + 1
+                        : 0;
+                enrichPhotoRoomInfo(state);
+            }
+            syncPhotosPaginationToRendered(state);
+            refreshPhotosCarouselIncrementally(state, token);
+            return;
+        }
+        final int page = state.photosNextPage <= 0 ? 2 : state.photosNextPage;
+        state.photosLoading = true;
         photosScrollX = photosHsv == null ? 0 : photosHsv.getScrollX();
-        renderProfile(r);
+        syncPhotosPaginationToRendered(state);
+        setHorizontalCarouselLoading(TAG_PHOTOS_CAROUSEL_ROW, true, 165);
         executor.execute(() -> {
             try {
-                PageResult next = fetchPageChunk(r.uniqueId, "photos", "photos", page, PAGE_CHUNK, PAGE_CHUNK);
+                PageResult next = fetchPageChunk(
+                        state.uniqueId,
+                        "photos",
+                        "photos",
+                        page,
+                        PAGE_CHUNK,
+                        PAGE_CHUNK
+                );
                 if (!isCurrentProfileResult(r, token)) return;
                 if (!next.success) {
-                    r.photosAutoLoadRetryAfterMs = SystemClock.elapsedRealtime()
+                    state.photosAutoLoadRetryAfterMs = SystemClock.elapsedRealtime()
                             + HORIZONTAL_AUTO_LOAD_RETRY_BACKOFF_MS;
                     return;
                 }
-                if (next.items.isEmpty()) {
-                    r.photosHasMore = false;
-                    r.photosNextPage = 0;
-                    r.photosTotal = r.photos.size();
-                } else {
-                    applyPhotosPage(r, next, false);
+                synchronized (state) {
+                    if (next.items.isEmpty()) {
+                        state.photosHasMore = false;
+                        state.photosNextPage = 0;
+                        state.photosTotal = state.photos.size();
+                    } else {
+                        applyPhotosPage(state, next, false);
+                    }
+                    state.photosAutoLoadRetryAfterMs = 0L;
+                    try { enrichPhotoRoomInfo(state); } catch(Exception ignored) {}
                 }
-                r.photosAutoLoadRetryAfterMs = 0L;
-                try { enrichPhotoRoomInfo(r); } catch(Exception ignored) {}
             } catch (Exception ignored) {
-                r.photosAutoLoadRetryAfterMs = SystemClock.elapsedRealtime()
+                state.photosAutoLoadRetryAfterMs = SystemClock.elapsedRealtime()
                         + HORIZONTAL_AUTO_LOAD_RETRY_BACKOFF_MS;
             } finally {
-                r.photosLoading = false;
+                state.photosLoading = false;
                 runOnUiThread(() -> {
-                    if (!isCurrentProfileResult(r, token)) return;
-                    renderProfile(r);
+                    if (!isCurrentProfileResult(state, token)) return;
+                    refreshPhotosCarouselIncrementally(state, token);
                 });
             }
         });
     }
 
     private void loadMoreStyles(ProfileResult r, HorizontalScrollView stylesHsv) {
-        if (r == null || r.stylesLoading || !r.stylesHasMore
-                || r.uniqueId == null || r.uniqueId.isEmpty()) return;
-        if (SystemClock.elapsedRealtime() < r.stylesAutoLoadRetryAfterMs) return;
+        if (r == null) return;
         final int token = boundProfileToken(r);
         if (!isCurrentProfileResult(r, token)) return;
+        final ProfileResult state = livePaginationProfile(r);
+        if (state == null || state.stylesLoading || !state.stylesHasMore
+                || state.uniqueId == null || state.uniqueId.isEmpty()) return;
+        if (SystemClock.elapsedRealtime() < state.stylesAutoLoadRetryAfterMs) return;
 
         stylesScrollX = stylesHsv == null ? 0 : stylesHsv.getScrollX();
 
         // Primeiro libera itens que já vieram na página de rede atual.
-        if (r.allStylesSource != null
-                && r.previousStyles.size() < r.allStylesSource.size()) {
-            r.stylesAutoLoadRetryAfterMs = 0L;
-            int end = Math.min(
-                    r.previousStyles.size() + PAGE_CHUNK,
-                    r.allStylesSource.size()
-            );
-            r.previousStyles = new ArrayList<>(r.allStylesSource.subList(0, end));
-            r.stylesHasMore = end < r.allStylesSource.size() || r.stylesRemotePaged;
-            if (!r.stylesHasMore) r.stylesNextPage = 0;
-            renderProfile(r);
+        if (state.allStylesSource != null
+                && state.previousStyles.size() < state.allStylesSource.size()) {
+            synchronized (state) {
+                state.stylesAutoLoadRetryAfterMs = 0L;
+                int end = Math.min(
+                        state.previousStyles.size() + PAGE_CHUNK,
+                        state.allStylesSource.size()
+                );
+                state.previousStyles = new ArrayList<>(
+                        state.allStylesSource.subList(0, end)
+                );
+                state.stylesHasMore = end < state.allStylesSource.size()
+                        || state.stylesRemotePaged;
+                if (!state.stylesHasMore) state.stylesNextPage = 0;
+            }
+            syncStylesPaginationToRendered(state);
+            refreshStylesCarouselIncrementally(state, token);
             return;
         }
 
-        // Quando os 100 itens já baixados foram consumidos, busca a próxima
-        // página remota de 100 e volta a liberar em blocos de PAGE_CHUNK.
-        if (r.stylesRemotePaged) {
-            final int remotePage = r.stylesRemoteNextPage <= 1
+        // Quando os itens já baixados foram consumidos, acumula páginas até
+        // receber vinte novos visuais e os acrescenta sem reconstruir a tela.
+        if (state.stylesRemotePaged) {
+            final int remotePage = state.stylesRemoteNextPage <= 1
                     ? 2
-                    : r.stylesRemoteNextPage;
-            r.stylesLoading = true;
-            renderProfile(r);
+                    : state.stylesRemoteNextPage;
+            final ArrayList<JSONObject> existingStyles;
+            final int knownStylesTotal;
+            synchronized (state) {
+                existingStyles = new ArrayList<>(state.allStylesSource);
+                knownStylesTotal = state.stylesTotal;
+                state.stylesLoading = true;
+            }
+            syncStylesPaginationToRendered(state);
+            setHorizontalCarouselLoading(TAG_STYLES_CAROUSEL_ROW, true, 162);
             executor.execute(() -> {
                 try {
-                    PageResult next = fetchPage(
-                            r.uniqueId,
-                            "previous-styles",
-                            "previousStyles",
+                    PageResult next = fetchStylesRemoteChunk(
+                            state.uniqueId,
                             remotePage,
-                            100
+                            existingStyles,
+                            knownStylesTotal,
+                            PAGE_CHUNK
                     );
                     if (!isCurrentProfileResult(r, token)) return;
                     if (!next.success) {
-                        r.stylesAutoLoadRetryAfterMs = SystemClock.elapsedRealtime()
+                        state.stylesAutoLoadRetryAfterMs = SystemClock.elapsedRealtime()
                                 + HORIZONTAL_AUTO_LOAD_RETRY_BACKOFF_MS;
                         return;
                     }
-                    synchronized (r) {
-                        r.allStylesSource = mergeLists(r.allStylesSource, next.items);
-                        if (next.total > 0) {
-                            r.stylesTotal = Math.max(r.stylesTotal, next.total);
+                    synchronized (state) {
+                        int sourceCountBefore = state.allStylesSource.size();
+                        state.allStylesSource = mergeLists(state.allStylesSource, next.items);
+                        int addedToSource = state.allStylesSource.size() - sourceCountBefore;
+                        if (addedToSource <= 0 && state.stylesRemotePaged) {
+                            state.stylesAutoLoadRetryAfterMs = SystemClock.elapsedRealtime()
+                                    + HORIZONTAL_AUTO_LOAD_RETRY_BACKOFF_MS;
+                            return;
                         }
-                        r.stylesRemoteNextPage = next.nextPage;
-                        r.stylesRemotePaged = next.hasMore
-                                || (r.stylesTotal > 0
-                                && r.allStylesSource.size() < r.stylesTotal);
-                        if (r.stylesRemotePaged
-                                && r.stylesRemoteNextPage <= remotePage) {
-                            r.stylesRemoteNextPage = remotePage + 1;
+                        if (next.total > 0) {
+                            state.stylesTotal = Math.max(state.stylesTotal, next.total);
+                        }
+                        state.stylesRemoteNextPage = next.nextPage;
+                        state.stylesRemotePaged = next.hasMore
+                                || (state.stylesTotal > 0
+                                && state.allStylesSource.size() < state.stylesTotal);
+                        if (state.stylesRemotePaged
+                                && state.stylesRemoteNextPage <= remotePage) {
+                            state.stylesRemoteNextPage = Math.max(
+                                    remotePage + 1,
+                                    next.page + 1
+                            );
                         }
                         int end = Math.min(
-                                r.previousStyles.size() + PAGE_CHUNK,
-                                r.allStylesSource.size()
+                                state.previousStyles.size() + PAGE_CHUNK,
+                                state.allStylesSource.size()
                         );
-                        r.previousStyles = new ArrayList<>(
-                                r.allStylesSource.subList(0, end)
+                        state.previousStyles = new ArrayList<>(
+                                state.allStylesSource.subList(0, end)
                         );
-                        r.stylesHasMore = end < r.allStylesSource.size()
-                                || r.stylesRemotePaged;
-                        if (!r.stylesHasMore) r.stylesNextPage = 0;
-                        r.stylesAutoLoadRetryAfterMs = 0L;
+                        state.stylesHasMore = end < state.allStylesSource.size()
+                                || state.stylesRemotePaged;
+                        if (!state.stylesHasMore) state.stylesNextPage = 0;
+                        state.stylesAutoLoadRetryAfterMs = 0L;
                     }
                 } catch(Exception ignored) {
-                    r.stylesAutoLoadRetryAfterMs = SystemClock.elapsedRealtime()
+                    state.stylesAutoLoadRetryAfterMs = SystemClock.elapsedRealtime()
                             + HORIZONTAL_AUTO_LOAD_RETRY_BACKOFF_MS;
                 } finally {
-                    r.stylesLoading = false;
+                    state.stylesLoading = false;
                     runOnUiThread(() -> {
-                        if (!isCurrentProfileResult(r, token)) return;
-                        renderProfile(r);
+                        if (!isCurrentProfileResult(state, token)) return;
+                        refreshStylesCarouselIncrementally(state, token);
                     });
                 }
             });
@@ -8144,19 +8437,26 @@ public class MainActivity extends Activity {
         }
 
         // Compatibilidade com fontes locais completas já existentes.
-        if (r.stylesFromComplement && r.allStylesSource != null) {
-            r.stylesAutoLoadRetryAfterMs = 0L;
-            int end = Math.min(
-                    r.previousStyles.size() + PAGE_CHUNK,
-                    r.allStylesSource.size()
-            );
-            r.previousStyles = new ArrayList<>(r.allStylesSource.subList(0, end));
-            r.stylesHasMore = end < r.allStylesSource.size();
-            r.stylesNextPage = r.stylesHasMore ? (end / PAGE_CHUNK) + 1 : 0;
-            renderProfile(r);
+        if (state.stylesFromComplement && state.allStylesSource != null) {
+            synchronized (state) {
+                state.stylesAutoLoadRetryAfterMs = 0L;
+                int end = Math.min(
+                        state.previousStyles.size() + PAGE_CHUNK,
+                        state.allStylesSource.size()
+                );
+                state.previousStyles = new ArrayList<>(
+                        state.allStylesSource.subList(0, end)
+                );
+                state.stylesHasMore = end < state.allStylesSource.size();
+                state.stylesNextPage = state.stylesHasMore
+                        ? (end / PAGE_CHUNK) + 1
+                        : 0;
+            }
+            syncStylesPaginationToRendered(state);
+            refreshStylesCarouselIncrementally(state, token);
             return;
         }
-        r.stylesAutoLoadRetryAfterMs = SystemClock.elapsedRealtime()
+        state.stylesAutoLoadRetryAfterMs = SystemClock.elapsedRealtime()
                 + HORIZONTAL_AUTO_LOAD_RETRY_BACKOFF_MS;
     }
 
@@ -8758,6 +9058,68 @@ public class MainActivity extends Activity {
         return v;
     }
 
+    private View previousStyleCarouselItem(JSONObject item) {
+        if (item == null) return null;
+        String figure = firstText(item, "figureString", "figure", "look");
+        if (figure.isEmpty()) return null;
+        String date = niceDate(firstText(
+                item,
+                "changedAt",
+                "date",
+                "createdAt",
+                "creationTime"
+        ));
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setGravity(Gravity.CENTER);
+        box.setPadding(dp(8), dp(8), dp(8), dp(8));
+        box.setBackground(round(
+                lightTheme ? Color.rgb(250,250,250) : Color.argb(18,255,255,255),
+                dp(18),
+                lightTheme ? Color.rgb(220,220,220) : Color.argb(24,255,255,255),
+                1
+        ));
+        LinearLayout.LayoutParams boxParams = new LinearLayout.LayoutParams(
+                dp(106),
+                dp(162)
+        );
+        boxParams.rightMargin = dp(12);
+        box.setLayoutParams(boxParams);
+
+        ImageView image = new ImageView(this);
+        image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        box.addView(image, new LinearLayout.LayoutParams(-1, dp(112)));
+        loadImage(image, avatarSmall(figure));
+
+        TextView dateText = text(
+                date,
+                12,
+                Color.argb(185,255,255,255),
+                false
+        );
+        dateText.setGravity(Gravity.CENTER);
+        dateText.setMaxLines(2);
+        box.addView(dateText, lp(-1, -2, 0, 4, 0, 0));
+        box.setOnClickListener(v -> showClothesDialog(figure, date));
+        return box;
+    }
+
+    private void appendStyleCarouselItems(
+            LinearLayout row,
+            ArrayList<JSONObject> items
+    ) {
+        if (row == null || items == null) return;
+        for (int i = 0; i < items.size(); i++) {
+            String itemTag = TAG_STYLE_ITEM_PREFIX + i;
+            if (row.findViewWithTag(itemTag) != null) continue;
+            View item = previousStyleCarouselItem(items.get(i));
+            if (item == null) continue;
+            item.setTag(itemTag);
+            row.addView(item);
+        }
+    }
+
     private void addPreviousStyles(ProfileResult profileResult) {
         if (profileResult == null) return;
         ArrayList<JSONObject> list = profileResult.previousStyles;
@@ -8768,26 +9130,21 @@ public class MainActivity extends Activity {
                 t(R.string.previous_styles),
                 loaded,
                 totalLabel > 0 ? totalLabel : loaded,
-                profileResult.stylesLoading,
-                profileResult.stylesLoading,
+                false,
+                false,
                 null
         );
+        tagHorizontalCarouselTitle(c, TAG_STYLES_CAROUSEL_TITLE);
         HorizontalScrollView hsv = new HorizontalScrollView(this); hsv.setHorizontalScrollBarEnabled(false);
-        LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.HORIZONTAL); hsv.addView(row);
+        LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setTag(TAG_STYLES_CAROUSEL_ROW);
+        hsv.addView(row);
         c.addView(hsv, lp(-1, dp(172), 0, 0, 0, 8));
         final HorizontalScrollView stylesHsv = hsv;
         if (stylesScrollX > 0) stylesHsv.post(() -> stylesHsv.scrollTo(stylesScrollX, 0));
-        for (int i=0; i<loaded; i++) {
-            JSONObject o = list.get(i);
-            String fig = firstText(o, "figureString", "figure", "look");
-            if (fig.isEmpty()) continue;
-            LinearLayout box = new LinearLayout(this); box.setOrientation(LinearLayout.VERTICAL); box.setGravity(Gravity.CENTER); box.setPadding(dp(8),dp(8),dp(8),dp(8)); box.setBackground(round(lightTheme ? Color.rgb(250,250,250) : Color.argb(18,255,255,255), dp(18), lightTheme ? Color.rgb(220,220,220) : Color.argb(24,255,255,255),1));
-            LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(dp(106), dp(162)); bp.rightMargin = dp(12); row.addView(box, bp);
-            ImageView img = new ImageView(this); img.setScaleType(ImageView.ScaleType.FIT_CENTER); box.addView(img, new LinearLayout.LayoutParams(-1, dp(112)));
-            loadImage(img, avatarSmall(fig));
-            TextView dt = text(niceDate(firstText(o, "changedAt", "date", "createdAt", "creationTime")), 12, Color.argb(185,255,255,255), false); dt.setGravity(Gravity.CENTER); dt.setMaxLines(2); box.addView(dt, lp(-1,-2,0,4,0,0));
-            final String finalFig = fig;
-            box.setOnClickListener(v -> showClothesDialog(finalFig, niceDate(firstText(o, "changedAt", "date", "createdAt", "creationTime"))));
+        appendStyleCarouselItems(row, list);
+        if (profileResult.stylesLoading) {
+            setHorizontalCarouselLoading(TAG_STYLES_CAROUSEL_ROW, true, 162);
         }
         if (profileResult.stylesHasMore) {
             bindHorizontalAutoLoad(
@@ -9517,6 +9874,61 @@ public class MainActivity extends Activity {
         return url == null ? "" : url.trim();
     }
 
+    private View photoCarouselItem(JSONObject photo) {
+        if (photo == null) return null;
+        String url = getPhotoUrl(photo);
+        String date = getPhotoTimestamp(photo);
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setBackground(round(
+                lightTheme ? Color.rgb(250,250,250) : Color.argb(18,255,255,255),
+                dp(16),
+                lightTheme ? Color.rgb(220,220,220) : Color.argb(24,255,255,255),
+                1
+        ));
+        LinearLayout.LayoutParams boxParams = new LinearLayout.LayoutParams(
+                dp(160),
+                dp(160)
+        );
+        boxParams.rightMargin = dp(12);
+        box.setLayoutParams(boxParams);
+
+        ImageView image = new ImageView(this);
+        image.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        applyRoundedClip(image, dp(14));
+        box.addView(image, new LinearLayout.LayoutParams(-1, dp(112)));
+
+        TextView dateText = text(
+                date,
+                12,
+                Color.argb(190,255,255,255),
+                false
+        );
+        dateText.setGravity(Gravity.CENTER);
+        box.addView(dateText, lp(-1, -2, 0, 8, 0, 0));
+        if (!url.isEmpty()) {
+            loadImage(image, url);
+            box.setOnClickListener(v -> showPhotoDialog(photo));
+        }
+        return box;
+    }
+
+    private void appendPhotoCarouselItems(
+            LinearLayout row,
+            ArrayList<JSONObject> items
+    ) {
+        if (row == null || items == null) return;
+        for (int i = 0; i < items.size(); i++) {
+            String itemTag = TAG_PHOTO_ITEM_PREFIX + i;
+            if (row.findViewWithTag(itemTag) != null) continue;
+            View item = photoCarouselItem(items.get(i));
+            if (item == null) continue;
+            item.setTag(itemTag);
+            row.addView(item);
+        }
+    }
+
     private void addPhotos(ProfileResult profileResult) {
         if (profileResult == null) return;
         ArrayList<JSONObject> list = profileResult.photos;
@@ -9527,24 +9939,21 @@ public class MainActivity extends Activity {
                 t(R.string.user_photos),
                 loaded,
                 totalLabel > 0 ? totalLabel : loaded,
-                profileResult.photosLoading,
-                profileResult.photosLoading,
+                false,
+                false,
                 null
         );
+        tagHorizontalCarouselTitle(c, TAG_PHOTOS_CAROUSEL_TITLE);
         HorizontalScrollView hsv = new HorizontalScrollView(this); hsv.setHorizontalScrollBarEnabled(false);
-        LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.HORIZONTAL); hsv.addView(row);
+        LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setTag(TAG_PHOTOS_CAROUSEL_ROW);
+        hsv.addView(row);
         c.addView(hsv, lp(-1, dp(165), 0, 0, 0, 0));
         final HorizontalScrollView photosHsv = hsv;
         if (photosScrollX > 0) photosHsv.post(() -> photosHsv.scrollTo(photosScrollX, 0));
-        for (int i=0; i<loaded; i++) {
-            JSONObject o = list.get(i);
-            String url = getPhotoUrl(o);
-            String date = getPhotoTimestamp(o);
-            LinearLayout box = new LinearLayout(this); box.setOrientation(LinearLayout.VERTICAL); box.setBackground(round(lightTheme ? Color.rgb(250,250,250) : Color.argb(18,255,255,255), dp(16), lightTheme ? Color.rgb(220,220,220) : Color.argb(24,255,255,255), 1));
-            LinearLayout.LayoutParams bp = new LinearLayout.LayoutParams(dp(160), dp(160)); bp.rightMargin = dp(12); row.addView(box, bp);
-            ImageView img = new ImageView(this); img.setScaleType(ImageView.ScaleType.CENTER_CROP); applyRoundedClip(img, dp(14)); box.addView(img, new LinearLayout.LayoutParams(-1, dp(112)));
-            TextView dt = text(date, 12, Color.argb(190,255,255,255), false); dt.setGravity(Gravity.CENTER); box.addView(dt, lp(-1,-2,0,8,0,0));
-            if (!url.isEmpty()) { loadImage(img, url); final JSONObject photoObj = o; box.setOnClickListener(v -> showPhotoDialog(photoObj)); }
+        appendPhotoCarouselItems(row, list);
+        if (profileResult.photosLoading) {
+            setHorizontalCarouselLoading(TAG_PHOTOS_CAROUSEL_ROW, true, 165);
         }
         if (profileResult.photosHasMore) {
             bindHorizontalAutoLoad(
@@ -17922,7 +18331,8 @@ private int loadingProgressFor(String message) {
         int removedFriendsNextPage = 0, removedFriendsTotal = 0, friendsNextPage = 0, friendsTotal = 0, friendsTabPage = 1;
         int previousMottosSlideIndex = 0;
         int badgesNextPage = 0, badgesTotal = 0, badgesTabPage = 1;
-        boolean photosHasMore = false, stylesHasMore = false, photosLoading = false, stylesLoading = false;
+        boolean photosHasMore = false, stylesHasMore = false;
+        volatile boolean photosLoading = false, stylesLoading = false;
         boolean removedFriendsHasMore = false, removedFriendsLoading = false, friendsHasMore = false, friendsLoading = false, friendsPagedMode = false, friendsTabShowingRemoved = false, friendsTabSelectionTouched = false;
         boolean badgesHasMore = false, badgesLoading = false, badgesPagedMode = false, hideAchievementBadges = true;
         boolean officialProfileAttempted = false, officialPhotosAttempted = false, officialPhotosSucceeded = false, photosFromOfficial = false, stylesFromComplement = false, stylesRemotePaged = false, friendsDatesReady = false;
