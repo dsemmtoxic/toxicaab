@@ -77,10 +77,13 @@
     <string name="history_cleared">Verlauf gelöscht.</string>
     <string name="loading_details">Profildetails werden geladen...</string>
     <string name="loading_history">Verlauf wird geladen...</string>
+    <string name="not_available">Nicht verfügbar</string>
+    <string name="security_verification_title">Sicherheitsüberprüfung</string>
+    <string name="security_verification_body">Schließe die Überprüfung ab, um fortzufahren. Toxic fährt danach automatisch fort.</string>
     <string name="loading_styles_friends">Looks und Freunde werden geladen...</string>
     <string name="loading_rooms_groups">Räume und Gruppen werden geladen...</string>
     <string name="loading_clothes">Kleidung wird geladen...</string>
-    <string name="cannot_load_clothes">Die Teile konnten nicht geladen werden.</string>
+    <string name="cannot_load_clothes">Nicht verfügbar</string>
     <string name="no_clothes_found">Keine Teile gefunden</string>
     <string name="current_look">Aktueller Look</string>
     <string name="looks">Looks</string>
@@ -178,7 +181,7 @@
     <string name="male">Männlich</string>
     <string name="female">Weiblich</string>
     <string name="loading_visuals">Editor wird geladen...</string>
-    <string name="cannot_load_visuals">Editor konnte nicht geladen werden.</string>
+    <string name="cannot_load_visuals">Nicht verfügbar</string>
     <string name="not_found_simple">Profil nicht gefunden.</string>
     <string name="no_items_found">Keine Teile gefunden.</string>
     <string name="remove_item">Entfernen</string>
