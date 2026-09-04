@@ -57,7 +57,7 @@ public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_BASE = "https://habbodex.com/api/v1/habboinfo";
     private static final String HABBODEX_FURNIDEX_API = "https://habbodex.com/api/v1/furnidex/furni/from-figure-string";
-    private static final String APP_VERSION = "1.4.3";
+    private static final String APP_VERSION = "1.4.5";
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -6100,14 +6100,12 @@ public class MainActivity extends Activity {
         synchronized (r) {
             r.badgesPagedMode = true;
         }
-        // O perfil oficial é iniciado uma única vez e compartilhado. A tarefa de
-        // amigos espera este resultado antes de liberar a lista, garantindo que
-        // nenhum amigo oficial apareça sem a respectiva data do HabboDex.
+        // As coleções oficiais são iniciadas uma única vez e compartilhadas.
+        // Amigos e emblemas continuam visíveis mesmo sem as datas complementares;
+        // quando elas chegam, os itens são enriquecidos normalmente.
         final Future<JSONObject> officialProfileFuture = restrictedProfile
                 ? null
-                : executor.submit(() -> tryJson(
-                        habboApiUrl("/api/public/users/" + enc(uniqueId) + "/profile")
-                ));
+                : executor.submit(() -> fetchOfficialProfileCollections(uniqueId));
 
         // 1) Nomes anteriores são críticos. Não aceita uma resposta vazia transitória
         // do cache como confirmação definitiva: tenta rota dedicada, perfil completo
@@ -6203,9 +6201,8 @@ public class MainActivity extends Activity {
             }
         });
 
-        // 4) Amigos atuais são críticos, mas agora usam paginação progressiva.
-        // A primeira página (100 itens) é liberada assim que TODOS esses itens tiverem data.
-        // As páginas seguintes são buscadas somente quando o usuário alcança o fim do lote carregado.
+        // 4) Amigos atuais usam paginação progressiva quando o complemento responde.
+        // Sem ele, a lista completa da API oficial permanece disponível, apenas sem datas.
         profileSectionsExecutor.execute(() -> {
             try {
                 PageResult firstFriends = fetchCriticalFriendsPage(
@@ -6437,8 +6434,8 @@ public class MainActivity extends Activity {
             });
         }
 
-        // Emblemas são paginados pelo HabboDex; a API oficial apenas enriquece
-        // metadados dos itens já carregados e mantém a contagem total.
+        // Emblemas usam paginação enriquecida quando o complemento responde e
+        // recorrem à coleção oficial completa quando ele está indisponível.
     }
 
     private boolean mayLoadOfficialProfileSections(ProfileResult profile) {
@@ -6516,6 +6513,49 @@ public class MainActivity extends Activity {
         } catch(Exception ignored) {
             future.cancel(true);
             return null;
+        }
+    }
+
+    private JSONObject fetchOfficialProfileCollections(String uniqueId) {
+        String cleanId = uniqueId == null ? "" : uniqueId.trim();
+        if (cleanId.isEmpty()) return null;
+
+        JSONObject profile = tryJson(
+                habboApiUrl("/api/public/users/" + enc(cleanId) + "/profile")
+        );
+        boolean profileLoaded = profile != null;
+        if (profile == null) profile = new JSONObject();
+
+        boolean friendsAvailable = hasNamedListDeep(profile, "friends");
+        boolean badgesAvailable = hasNamedListDeep(profile, "badges");
+        if (!friendsAvailable) {
+            friendsAvailable = attachOfficialCollection(profile, cleanId, "friends");
+        }
+        if (!badgesAvailable) {
+            badgesAvailable = attachOfficialCollection(profile, cleanId, "badges");
+        }
+        return profileLoaded || friendsAvailable || badgesAvailable ? profile : null;
+    }
+
+    private boolean attachOfficialCollection(
+            JSONObject profile,
+            String uniqueId,
+            String collection
+    ) {
+        if (profile == null || uniqueId == null || uniqueId.trim().isEmpty()
+                || collection == null || collection.trim().isEmpty()) return false;
+        JSONObject payload = tryJson(
+                habboApiUrl(
+                        "/api/public/users/" + enc(uniqueId.trim()) + "/" + collection.trim()
+                )
+        );
+        JSONArray items = findListArrayDeep(payload, collection, 0);
+        if (items == null) return false;
+        try {
+            profile.put(collection, items);
+            return true;
+        } catch(Exception ignored) {
+            return false;
         }
     }
 
@@ -7157,6 +7197,9 @@ public class MainActivity extends Activity {
                 r.oldFriends,
                 extractList(complement, "previousFriends")
         );
+        if (hasNamedListDeep(complement, "previousFriends")) {
+            r.removedFriendsDataAvailable = true;
+        }
         applyLocalStylesSource(
                 r,
                 mergeLists(r.allStylesSource, extractList(complement, "previousStyles"))
@@ -7202,9 +7245,10 @@ public class MainActivity extends Activity {
             ArrayList<JSONObject> officialFriends = extractList(official, "friends");
             ArrayList<JSONObject> officialRooms = extractList(official, "rooms");
             ArrayList<JSONObject> officialGroups = extractList(official, "groups");
+            ArrayList<JSONObject> officialBadgeCollection = extractList(official, "badges");
             ArrayList<JSONObject> officialBadges = r.badgesPagedMode
                     ? new ArrayList<>()
-                    : extractList(official, "badges");
+                    : officialBadgeCollection;
             ArrayList<JSONObject> officialSelected = extractList(officialUser, "selectedBadges");
             boolean hasOfficialSelected = officialUser != null && officialUser.has("selectedBadges");
             if (!hasOfficialSelected && r.habboPublic != null && r.habboPublic.has("selectedBadges")) {
@@ -7246,6 +7290,44 @@ public class MainActivity extends Activity {
                             ? new ArrayList<>(officialBadges)
                             : new ArrayList<>();
                 }
+            }
+
+            // Datas de amizade são um enriquecimento opcional. Quando elas ainda
+            // não chegaram, mantém a coleção oficial completa e desativa a
+            // paginação remota para não esconder a seção.
+            if (!r.friendsDatesReady && hasNamedListDeep(official, "friends")) {
+                r.friends = mergeListsEnrichingPrimary(
+                        officialFriends,
+                        complementFriends,
+                        false
+                );
+                r.friendsPagedMode = false;
+                r.friendsDatesReady = true;
+                r.friendsTotal = r.friends.size();
+                r.friendsNextPage = 0;
+                r.friendsHasMore = false;
+            }
+
+            // Enquanto a primeira página enriquecida não existe, usa todos os
+            // emblemas oficiais. Uma página válida do complemento pode assumir
+            // novamente depois, preservando as datas de obtenção.
+            if (r.badgesPagedMode
+                    && (r.badgesWithAchievements == null
+                            || r.badgesWithAchievements.isEmpty())
+                    && hasNamedListDeep(official, "badges")) {
+                r.badgesWithAchievements = new ArrayList<>(officialBadgeCollection);
+                r.badgesPagedMode = false;
+                r.badgesNextPage = 0;
+                r.badgesHasMore = false;
+                int declaredOfficialBadges = 0;
+                try {
+                    declaredOfficialBadges = Integer.parseInt(r.totalBadges);
+                } catch(Exception ignored) {}
+                r.badgesTotal = Math.max(
+                        declaredOfficialBadges,
+                        r.badgesWithAchievements.size()
+                );
+                r.totalBadges = String.valueOf(r.badgesTotal);
             }
         } else if (r.privateProfile || r.officialProfileAttempted) {
             // A fonte complementar assume dados atuais somente em perfil privado
@@ -8611,21 +8693,15 @@ public class MainActivity extends Activity {
 
         if (r.previousNames != null && !r.previousNames.isEmpty()) {
             addPreviousNames(r.previousNames);
-        } else if (additionalDataUnavailable) {
-            addUnavailableSection(R.string.previous_names);
         }
 
         if (r.previousMottos != null && !r.previousMottos.isEmpty()) {
             addPreviousMottos(r, r.previousMottos);
-        } else if (additionalDataUnavailable) {
-            addUnavailableSection(R.string.previous_mottos);
         }
 
         if ((r.previousStyles != null && !r.previousStyles.isEmpty())
                 || r.stylesHasMore || r.stylesLoading) {
             addPreviousStyles(r);
-        } else if (additionalDataUnavailable) {
-            addUnavailableSection(R.string.previous_styles);
         }
 
         if ((r.photos != null && !r.photos.isEmpty())
@@ -8636,8 +8712,7 @@ public class MainActivity extends Activity {
         }
         addStats(r);
 
-        boolean hasFriendsArea = (r.friendsDatesReady && r.friends != null
-                && !r.friends.isEmpty())
+        boolean hasFriendsArea = r.friendsDatesReady
                 || (r.oldFriends != null && !r.oldFriends.isEmpty())
                 || r.removedFriendsLoading;
         if (hasFriendsArea) {
@@ -8661,9 +8736,11 @@ public class MainActivity extends Activity {
         boolean hasBadges = (r.badgesWithAchievements != null
                 && !r.badgesWithAchievements.isEmpty())
                 || (r.badges != null && !r.badges.isEmpty());
+        boolean officialBadgesKnown = r.officialProfile != null
+                && hasNamedListDeep(r.officialProfile, "badges");
         if (hasBadges || !additionalDataUnavailable) {
             addBadgesSection(r);
-        } else {
+        } else if (!officialBadgesKnown) {
             addUnavailableSection(R.string.badges);
         }
     }
@@ -10452,7 +10529,8 @@ public class MainActivity extends Activity {
         ArrayList<JSONObject> removedList = profileResult.oldFriends == null
                 ? new ArrayList<>()
                 : profileResult.oldFriends;
-        if (friendsList.isEmpty() && removedList.isEmpty()
+        if (!profileResult.friendsDatesReady
+                && friendsList.isEmpty() && removedList.isEmpty()
                 && !profileResult.removedFriendsLoading) return;
         LinearLayout c = sectionCard(null, 0, false);
         LinearLayout tabs = new LinearLayout(this);
@@ -10491,21 +10569,35 @@ public class MainActivity extends Activity {
             if (page[0] > loadedPages) page[0] = loadedPages;
             profileResult.friendsTabPage = page[0];
             profileResult.friendsTabShowingRemoved = showingRemoved[0];
-            renderFriendsPage(content, data, page[0], 10, showingRemoved[0]);
-            renderPager(content, data.size(), 10, page, render[0], () -> {
-                profileResult.friendsTabPage = page[0];
-                profileResult.friendsTabShowingRemoved = showingRemoved[0];
-                scrollMainToView(c, dp(12));
-                if (showingRemoved[0]
-                        && profileResult.removedFriendsHasMore
-                        && page[0] >= Math.max(1, (int)Math.ceil(profileResult.oldFriends.size() / 10.0))) {
-                    loadMoreRemovedFriends(profileResult);
-                } else if (!showingRemoved[0]
-                        && profileResult.friendsHasMore
-                        && page[0] >= Math.max(1, (int)Math.ceil(profileResult.friends.size() / 10.0))) {
-                    loadMoreFriends(profileResult);
-                }
-            });
+            boolean removedWaiting = showingRemoved[0]
+                    && data.isEmpty()
+                    && !profileResult.removedFriendsDataAvailable
+                    && (profileSectionsInProgress || profileResult.removedFriendsLoading);
+            boolean removedUnavailable = showingRemoved[0]
+                    && data.isEmpty()
+                    && !profileResult.removedFriendsDataAvailable
+                    && !removedWaiting;
+            if (removedWaiting) {
+                content.addView(centerNote(t(R.string.loading_history)));
+            } else if (removedUnavailable) {
+                content.addView(centerNote(t(R.string.not_available)));
+            } else {
+                renderFriendsPage(content, data, page[0], 10, showingRemoved[0]);
+                renderPager(content, data.size(), 10, page, render[0], () -> {
+                    profileResult.friendsTabPage = page[0];
+                    profileResult.friendsTabShowingRemoved = showingRemoved[0];
+                    scrollMainToView(c, dp(12));
+                    if (showingRemoved[0]
+                            && profileResult.removedFriendsHasMore
+                            && page[0] >= Math.max(1, (int)Math.ceil(profileResult.oldFriends.size() / 10.0))) {
+                        loadMoreRemovedFriends(profileResult);
+                    } else if (!showingRemoved[0]
+                            && profileResult.friendsHasMore
+                            && page[0] >= Math.max(1, (int)Math.ceil(profileResult.friends.size() / 10.0))) {
+                        loadMoreFriends(profileResult);
+                    }
+                });
+            }
         };
         btFriends.setOnClickListener(v -> {
             showingRemoved[0] = false;
@@ -10605,12 +10697,13 @@ public class MainActivity extends Activity {
         name.setEllipsize(TextUtils.TruncateAt.END);
         card.addView(name, lp(-1,-2,0,2,0,6));
 
-        // O HabboDex fornece data e horário tanto para amizades atuais quanto
-        // para as removidas; mantém os dois visíveis no card.
-        TextView d = text(niceDate(date), 12, Color.argb(185,255,255,255), false);
-        d.setGravity(Gravity.CENTER);
-        d.setSingleLine(true);
-        card.addView(d, lp(-1,-2,0,0,0,0));
+        String formattedDate = niceDate(date);
+        if (!formattedDate.isEmpty()) {
+            TextView d = text(formattedDate, 12, Color.argb(185,255,255,255), false);
+            d.setGravity(Gravity.CENTER);
+            d.setSingleLine(true);
+            card.addView(d, lp(-1,-2,0,0,0,0));
+        }
 
         final String fname = n;
         final String friendId = fid;
@@ -17293,7 +17386,7 @@ private int loadingProgressFor(String message) {
         c.photosAutoLoadRetryAfterMs = src.photosAutoLoadRetryAfterMs; c.stylesAutoLoadRetryAfterMs = src.stylesAutoLoadRetryAfterMs;
         c.removedFriendsNextPage = src.removedFriendsNextPage; c.removedFriendsTotal = src.removedFriendsTotal; c.friendsNextPage = src.friendsNextPage; c.friendsTotal = src.friendsTotal; c.friendsTabPage = src.friendsTabPage; c.previousMottosSlideIndex = src.previousMottosSlideIndex; c.badgesNextPage = src.badgesNextPage; c.badgesTotal = src.badgesTotal; c.badgesTabPage = src.badgesTabPage;
         c.photosHasMore = src.photosHasMore; c.stylesHasMore = src.stylesHasMore; c.photosLoading = false; c.stylesLoading = false;
-        c.removedFriendsHasMore = src.removedFriendsHasMore; c.removedFriendsLoading = false; c.friendsHasMore = src.friendsHasMore; c.friendsLoading = false; c.friendsPagedMode = src.friendsPagedMode; c.friendsTabShowingRemoved = src.friendsTabShowingRemoved; c.friendsTabSelectionTouched = src.friendsTabSelectionTouched; c.badgesHasMore = src.badgesHasMore; c.badgesLoading = false; c.badgesPagedMode = src.badgesPagedMode; c.hideAchievementBadges = src.hideAchievementBadges;
+        c.removedFriendsHasMore = src.removedFriendsHasMore; c.removedFriendsLoading = false; c.removedFriendsDataAvailable = src.removedFriendsDataAvailable; c.friendsHasMore = src.friendsHasMore; c.friendsLoading = false; c.friendsPagedMode = src.friendsPagedMode; c.friendsTabShowingRemoved = src.friendsTabShowingRemoved; c.friendsTabSelectionTouched = src.friendsTabSelectionTouched; c.badgesHasMore = src.badgesHasMore; c.badgesLoading = false; c.badgesPagedMode = src.badgesPagedMode; c.hideAchievementBadges = src.hideAchievementBadges;
         c.officialProfileAttempted = src.officialProfileAttempted; c.officialPhotosAttempted = src.officialPhotosAttempted; c.officialPhotosSucceeded = src.officialPhotosSucceeded; c.photosFromOfficial = src.photosFromOfficial; c.stylesFromComplement = src.stylesFromComplement; c.stylesRemotePaged = src.stylesRemotePaged; c.friendsDatesReady = src.friendsDatesReady;
         return c;
     }
@@ -18606,7 +18699,7 @@ private int loadingProgressFor(String message) {
         int badgesNextPage = 0, badgesTotal = 0, badgesTabPage = 1;
         boolean photosHasMore = false, stylesHasMore = false;
         volatile boolean photosLoading = false, stylesLoading = false;
-        boolean removedFriendsHasMore = false, removedFriendsLoading = false, friendsHasMore = false, friendsLoading = false, friendsPagedMode = false, friendsTabShowingRemoved = false, friendsTabSelectionTouched = false;
+        boolean removedFriendsHasMore = false, removedFriendsLoading = false, removedFriendsDataAvailable = false, friendsHasMore = false, friendsLoading = false, friendsPagedMode = false, friendsTabShowingRemoved = false, friendsTabSelectionTouched = false;
         boolean badgesHasMore = false, badgesLoading = false, badgesPagedMode = false, hideAchievementBadges = true;
         boolean officialProfileAttempted = false, officialPhotosAttempted = false, officialPhotosSucceeded = false, photosFromOfficial = false, stylesFromComplement = false, stylesRemotePaged = false, friendsDatesReady = false;
     }
