@@ -77,10 +77,13 @@
     <string name="history_cleared">Historia tyhjennetty.</string>
     <string name="loading_details">Ladataan profiilin tietoja...</string>
     <string name="loading_history">Ladataan historiaa...</string>
+    <string name="not_available">Ei saatavilla</string>
+    <string name="security_verification_title">Turvatarkistus</string>
+    <string name="security_verification_body">Suorita tarkistus jatkaaksesi. Toxic jatkaa sen jälkeen automaattisesti.</string>
     <string name="loading_styles_friends">Ladataan asuja ja kavereita...</string>
     <string name="loading_rooms_groups">Ladataan huoneita ja ryhmiä...</string>
     <string name="loading_clothes">Ladataan vaatteita...</string>
-    <string name="cannot_load_clothes">Kohteita ei voitu ladata.</string>
+    <string name="cannot_load_clothes">Ei saatavilla</string>
     <string name="no_clothes_found">Kohteita ei löytynyt</string>
     <string name="current_look">Nykyinen asu</string>
     <string name="looks">Asut</string>
@@ -178,7 +181,7 @@
     <string name="male">Mies</string>
     <string name="female">Nainen</string>
     <string name="loading_visuals">Ladataan editoria...</string>
-    <string name="cannot_load_visuals">Editoria ei voitu ladata.</string>
+    <string name="cannot_load_visuals">Ei saatavilla</string>
     <string name="not_found_simple">Profiilia ei löytynyt.</string>
     <string name="no_items_found">Kohteita ei löytynyt.</string>
     <string name="remove_item">Poista</string>
