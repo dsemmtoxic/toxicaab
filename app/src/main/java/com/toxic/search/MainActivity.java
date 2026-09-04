@@ -57,7 +57,7 @@ public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_BASE = "https://habbodex.com/api/v1/habboinfo";
     private static final String HABBODEX_FURNIDEX_API = "https://habbodex.com/api/v1/furnidex/furni/from-figure-string";
-    private static final String APP_VERSION = "1.4.0";
+    private static final String APP_VERSION = "1.4.1";
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -445,6 +445,9 @@ public class MainActivity extends Activity {
     private String supporterProfileNick = "";
     private String supporterProfileHotel = "";
     private Runnable supporterStatusRetryRunnable;
+    private Runnable supporterTutorialRetryRunnable;
+    private boolean supporterTutorialAutoPositioned = false;
+    private boolean mainScrollUserTouching = false;
     private final Set<Long> supporterStatusRequestsInFlight = new HashSet<>();
     private static final String PREF_SUPPORTER_VERIFIED_TOKEN = "supporter_verified_token";
     private static final String PREF_SUPPORTER_VERIFIED_UNTIL_MS = "supporter_verified_until_ms";
@@ -2379,6 +2382,8 @@ public class MainActivity extends Activity {
         }
         markSupporterEntitlementPending();
         if (showToast) {
+            supporterTutorialAutoPositioned = false;
+            cancelSupporterTutorialRetry();
             getSharedPreferences(PREFS, MODE_PRIVATE)
                     .edit()
                     .putBoolean(PREF_SUPPORTER_TUTORIAL_PENDING, true)
@@ -3053,6 +3058,7 @@ public class MainActivity extends Activity {
         stopAccessGateMonitoring();
         if (suggestionDebounceTask != null) uiHandler.removeCallbacks(suggestionDebounceTask);
         cancelSupporterStatusRetry();
+        cancelSupporterTutorialRetry();
         resetBillingConnectionRetry();
         resetRemoveAdsProductDetailsRetry();
         resetSupporterProductDetailsRetry();
@@ -3460,6 +3466,11 @@ public class MainActivity extends Activity {
         scroll.setFillViewport(true);
         scroll.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
         scroll.setOnTouchListener((v, event) -> {
+            int action = event.getActionMasked();
+            if (action == MotionEvent.ACTION_DOWN) mainScrollUserTouching = true;
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                mainScrollUserTouching = false;
+            }
             if (event.getAction() == MotionEvent.ACTION_DOWN && searchInput != null && searchInput.hasFocus() && !isTouchInsideView(searchInput, event)) {
                 clearSearchFocus();
             }
@@ -3798,12 +3809,16 @@ public class MainActivity extends Activity {
                 runOnUiThread(() -> renderSponsors(finalSponsors));
             } catch(Exception error) {
                 runOnUiThread(() -> {
+                    int requestedScrollX = supporterTutorialAutoPositioned
+                            ? Integer.MAX_VALUE
+                            : (sponsorsCarouselScroll == null ? 0 : sponsorsCarouselScroll.getScrollX());
                     if (sponsorsCarouselRow != null && sponsorsCarouselRow.getChildCount() == 0) {
                         sponsorsCarouselRow.addView(sponsorActionCard());
                     }
                     finishSponsorsDisplay(
                             sponsorsCarouselRow != null && sponsorsCarouselRow.getChildCount() > 0
                     );
+                    settleSponsorsCarouselPosition(requestedScrollX, null);
                 });
             } finally {
                 sponsorsLoading = false;
@@ -3813,6 +3828,9 @@ public class MainActivity extends Activity {
 
     private void renderSponsors(JSONArray sponsors) {
         if (sponsorsCarouselRow == null) return;
+        int requestedScrollX = supporterTutorialAutoPositioned
+                ? Integer.MAX_VALUE
+                : (sponsorsCarouselScroll == null ? 0 : sponsorsCarouselScroll.getScrollX());
         sponsorsCarouselRow.removeAllViews();
         sponsorsSubscribeButton = null;
         sponsorsActionIcon = null;
@@ -3831,6 +3849,35 @@ public class MainActivity extends Activity {
         // sempre por último, com o mesmo formato visual dos patrocinadores.
         sponsorsCarouselRow.addView(sponsorActionCard());
         finishSponsorsDisplay(sponsorsCarouselRow.getChildCount() > 0);
+        settleSponsorsCarouselPosition(requestedScrollX, null);
+    }
+
+    private void settleSponsorsCarouselPosition(int requestedScrollX, Runnable afterPositioned) {
+        final HorizontalScrollView carousel = sponsorsCarouselScroll;
+        final LinearLayout row = sponsorsCarouselRow;
+        if (carousel == null || row == null) {
+            if (afterPositioned != null) afterPositioned.run();
+            return;
+        }
+        row.requestLayout();
+        carousel.requestLayout();
+        carousel.getViewTreeObserver().addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
+            @Override public boolean onPreDraw() {
+                ViewTreeObserver observer = carousel.getViewTreeObserver();
+                if (observer.isAlive()) observer.removeOnPreDrawListener(this);
+                if (carousel != sponsorsCarouselScroll || row != sponsorsCarouselRow) return true;
+                int viewportWidth = Math.max(
+                        0,
+                        carousel.getWidth() - carousel.getPaddingLeft() - carousel.getPaddingRight()
+                );
+                int maxScrollX = Math.max(0, row.getWidth() - viewportWidth);
+                int safeScrollX = Math.min(maxScrollX, Math.max(0, requestedScrollX));
+                carousel.scrollTo(safeScrollX, 0);
+                if (afterPositioned != null) carousel.postOnAnimation(afterPositioned);
+                return true;
+            }
+        });
+        carousel.invalidate();
     }
 
     private View sponsorCard(String nick, String hotel, String figure, String uniqueId) {
@@ -4295,7 +4342,7 @@ public class MainActivity extends Activity {
             }
             if (showActivation) toast(t(R.string.supporter_activated));
             refreshSponsors();
-            uiHandler.postDelayed(this::maybeShowSupporterTutorial, 650L);
+            scheduleSupporterTutorialCheck(650L);
         } else {
             clearCachedSupporterEntitlement();
             markSupporterEntitlementPending();
@@ -4430,20 +4477,41 @@ public class MainActivity extends Activity {
         android.content.SharedPreferences preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
         boolean pending = preferences.getBoolean(PREF_SUPPORTER_TUTORIAL_PENDING, false);
         int shownVersion = preferences.getInt(PREF_SUPPORTER_TUTORIAL_VERSION, 0);
-        if (!supporterActive || (!pending && shownVersion >= CURRENT_SUPPORTER_TUTORIAL_VERSION)) return;
+        if (!supporterActive || (!pending && shownVersion >= CURRENT_SUPPORTER_TUTORIAL_VERSION)) {
+            cancelSupporterTutorialRetry();
+            supporterTutorialAutoPositioned = false;
+            return;
+        }
         if (tutorialOverlayView != null || sponsorsSubscribeButton == null || sponsorsSubscribeButton.getWindowToken() == null) {
-            uiHandler.postDelayed(this::maybeShowSupporterTutorial, 450L);
+            scheduleSupporterTutorialCheck(450L);
             return;
         }
         Rect visibleTarget = new Rect();
         boolean mostlyVisible = sponsorsSubscribeButton.getGlobalVisibleRect(visibleTarget)
+                && visibleTarget.width() >= sponsorsSubscribeButton.getWidth() * .72f
                 && visibleTarget.height() >= sponsorsSubscribeButton.getHeight() * .72f;
         if (!mostlyVisible && mainScroll != null && sponsorsSection != null) {
-            mainScroll.smoothScrollTo(0, Math.max(0, sponsorsSection.getTop() - dp(76)));
-            if (sponsorsCarouselScroll != null) sponsorsCarouselScroll.fullScroll(View.FOCUS_RIGHT);
-            uiHandler.postDelayed(this::maybeShowSupporterTutorial, 360L);
+            // Faz no máximo um reposicionamento automático. O ciclo anterior
+            // repetia smoothScrollTo enquanto o carrossel era reconstruído e
+            // disputava o gesto de rolagem do usuário.
+            if (mainScrollUserTouching) {
+                scheduleSupporterTutorialCheck(700L);
+                return;
+            }
+            if (supporterTutorialAutoPositioned) {
+                cancelSupporterTutorialRetry();
+                return;
+            }
+            supporterTutorialAutoPositioned = true;
+            settleSponsorsCarouselPosition(Integer.MAX_VALUE, () -> {
+                if (!mainScrollUserTouching && sponsorsSection != null) {
+                    scrollMainToView(sponsorsSection, dp(76));
+                }
+                scheduleSupporterTutorialCheck(650L);
+            });
             return;
         }
+        cancelSupporterTutorialRetry();
         cancelTutorialPulseAnimation();
         FrameLayout overlay = new FrameLayout(this);
         overlay.setClickable(true);
@@ -4481,6 +4549,8 @@ public class MainActivity extends Activity {
         card.addView(choose, lp(-1, dp(48), 0, 0, 0, 0));
 
         Runnable finish = () -> {
+            cancelSupporterTutorialRetry();
+            supporterTutorialAutoPositioned = false;
             cancelTutorialPulseAnimation();
             detachViewFromParent(overlay);
             if (tutorialOverlayView == overlay) tutorialOverlayView = null;
@@ -4503,6 +4573,22 @@ public class MainActivity extends Activity {
             overlay.invalidate();
         });
         pulse.start();
+    }
+
+    private void scheduleSupporterTutorialCheck(long delayMs) {
+        if (activityDestroyed) return;
+        cancelSupporterTutorialRetry();
+        supporterTutorialRetryRunnable = () -> {
+            supporterTutorialRetryRunnable = null;
+            if (!activityDestroyed) maybeShowSupporterTutorial();
+        };
+        uiHandler.postDelayed(supporterTutorialRetryRunnable, Math.max(0L, delayMs));
+    }
+
+    private void cancelSupporterTutorialRetry() {
+        if (supporterTutorialRetryRunnable == null) return;
+        uiHandler.removeCallbacks(supporterTutorialRetryRunnable);
+        supporterTutorialRetryRunnable = null;
     }
 
     private void showOpeningSplashOverlay() {
