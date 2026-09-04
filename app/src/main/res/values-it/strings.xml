@@ -77,10 +77,13 @@
     <string name="history_cleared">Cronologia cancellata.</string>
     <string name="loading_details">Caricamento dettagli profilo...</string>
     <string name="loading_history">Caricamento cronologia...</string>
+    <string name="not_available">Non disponibile</string>
+    <string name="security_verification_title">Verifica di sicurezza</string>
+    <string name="security_verification_body">Completa la verifica per continuare. Toxic riprenderà automaticamente.</string>
     <string name="loading_styles_friends">Caricamento look e amici...</string>
     <string name="loading_rooms_groups">Caricamento stanze e gruppi...</string>
     <string name="loading_clothes">Caricamento vestiti...</string>
-    <string name="cannot_load_clothes">Impossibile caricare gli elementi.</string>
+    <string name="cannot_load_clothes">Non disponibile</string>
     <string name="no_clothes_found">Nessun elemento trovato</string>
     <string name="current_look">Look attuale</string>
     <string name="looks">Look</string>
@@ -178,7 +181,7 @@
     <string name="male">Maschile</string>
     <string name="female">Femminile</string>
     <string name="loading_visuals">Caricamento prova look...</string>
-    <string name="cannot_load_visuals">Impossibile caricare la prova look.</string>
+    <string name="cannot_load_visuals">Non disponibile</string>
     <string name="not_found_simple">Profilo non trovato.</string>
     <string name="no_items_found">Nessun item trovato.</string>
     <string name="remove_item">Rimuovi</string>
