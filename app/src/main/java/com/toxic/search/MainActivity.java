@@ -57,7 +57,7 @@ public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_BASE = "https://habbodex.com/api/v1/habboinfo";
     private static final String HABBODEX_FURNIDEX_API = "https://habbodex.com/api/v1/furnidex/furni/from-figure-string";
-    private static final String APP_VERSION = "1.4.1";
+    private static final String APP_VERSION = "1.4.2";
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -253,6 +253,8 @@ public class MainActivity extends Activity {
     private int photosScrollX = 0;
     private int stylesScrollX = 0;
     private static final int PAGE_CHUNK = 20;
+    private static final int HORIZONTAL_AUTO_LOAD_THRESHOLD_DP = 220;
+    private static final long HORIZONTAL_AUTO_LOAD_RETRY_BACKOFF_MS = 5_000L;
     private static final String PREFS = "toxic_search_settings";
     private static final String PREF_MAX_PROFILES = "max_profiles";
     private static final String PREF_CACHE_DAYS = "cache_days";
@@ -398,6 +400,8 @@ public class MainActivity extends Activity {
     private long startNativeAdRetryAfterMs = 0L;
     private boolean startScreenVisible = true;
     private volatile boolean sponsorsLoading = false;
+    private volatile boolean sponsorsRefreshPending = false;
+    private final AtomicInteger sponsorsDataGeneration = new AtomicInteger(0);
     private volatile String sponsorsCacheJson = null;
     private static final String SUPPORTER_PRODUCT_ID = "tx_supporter";
     private static final String SUPPORTER_BASE_PLAN_ID = "basic";
@@ -428,6 +432,11 @@ public class MainActivity extends Activity {
             10_000L,
             20_000L,
             40_000L
+    };
+    private static final long[] SUPPORTER_PROFILE_CONFIRM_DELAYS_MS = new long[] {
+            0L,
+            1_200L,
+            3_000L
     };
     private ProductDetails supporterProductDetails;
     private boolean supporterActive = false;
@@ -3785,6 +3794,10 @@ public class MainActivity extends Activity {
 
     private void refreshSponsors() {
         if (sponsorsLoading) {
+            // Não perde uma atualização solicitada enquanto outra resposta
+            // ainda está em voo. Isso é importante logo após salvar o perfil:
+            // a resposta antiga pode ter sido iniciada antes da gravação.
+            sponsorsRefreshPending = true;
             runOnUiThread(() -> {
                 if (sponsorsCacheJson == null
                         && (sponsorsCarouselRow == null || sponsorsCarouselRow.getChildCount() == 0)) {
@@ -3794,6 +3807,8 @@ public class MainActivity extends Activity {
             return;
         }
         sponsorsLoading = true;
+        sponsorsRefreshPending = false;
+        final int requestDataGeneration = sponsorsDataGeneration.get();
         runOnUiThread(() -> {
             if (sponsorsCarouselRow == null || sponsorsCarouselRow.getChildCount() == 0) {
                 setSponsorsLoadingVisible(true);
@@ -3805,8 +3820,16 @@ public class MainActivity extends Activity {
                 JSONArray sponsors = response.optJSONArray("sponsors");
                 if (sponsors == null) sponsors = response.optJSONArray("items");
                 final JSONArray finalSponsors = sponsors == null ? new JSONArray() : sponsors;
-                sponsorsCacheJson = finalSponsors.toString();
-                runOnUiThread(() -> renderSponsors(finalSponsors));
+                runOnUiThread(() -> {
+                    // Uma resposta iniciada antes da gravação não pode apagar a
+                    // inclusão otimista que acabou de ser mostrada na tela.
+                    if (requestDataGeneration != sponsorsDataGeneration.get()) {
+                        refreshSponsors();
+                        return;
+                    }
+                    sponsorsCacheJson = finalSponsors.toString();
+                    renderSponsors(finalSponsors);
+                });
             } catch(Exception error) {
                 runOnUiThread(() -> {
                     int requestedScrollX = supporterTutorialAutoPositioned
@@ -3822,6 +3845,10 @@ public class MainActivity extends Activity {
                 });
             } finally {
                 sponsorsLoading = false;
+                if (sponsorsRefreshPending && !activityDestroyed) {
+                    sponsorsRefreshPending = false;
+                    runOnUiThread(this::refreshSponsors);
+                }
             }
         });
     }
@@ -3882,6 +3909,7 @@ public class MainActivity extends Activity {
 
     private View sponsorCard(String nick, String hotel, String figure, String uniqueId) {
         LinearLayout item = new LinearLayout(this);
+        item.setTag("sponsor_profile|" + sponsorIdentity(nick, hotel));
         item.setOrientation(LinearLayout.VERTICAL);
         item.setGravity(Gravity.TOP | Gravity.CENTER_HORIZONTAL);
         item.setPadding(dp(2), 0, dp(2), 0);
@@ -3934,6 +3962,7 @@ public class MainActivity extends Activity {
 
     private View sponsorActionCard() {
         LinearLayout item = new LinearLayout(this);
+        item.setTag("sponsor_action");
         item.setOrientation(LinearLayout.VERTICAL);
         item.setGravity(Gravity.TOP | Gravity.CENTER_HORIZONTAL);
         item.setPadding(dp(2), 0, dp(2), 0);
@@ -4207,20 +4236,20 @@ public class MainActivity extends Activity {
     }
 
     private void submitSponsorProfile(Dialog dialog, TextView saveButton, String nick, String hotel) {
-        final String token = supporterPurchaseToken;
+        final String token = supporterPurchaseToken == null ? "" : supporterPurchaseToken.trim();
+        final String normalizedHotel = normalizeHotelKey(hotel);
         executor.execute(() -> {
             try {
                 JSONObject payload = new JSONObject();
                 payload.put("purchaseToken", token);
                 payload.put("nick", nick);
-                payload.put("hotel", normalizeHotelKey(hotel));
-                JSONObject response = postJsonObject(PROFILE_API + "/sponsors/profile", payload);
-                applySupporterStatus(response);
-                runOnUiThread(() -> {
-                    dialog.dismiss();
-                    toast(t(R.string.supporter_profile_saved));
-                    refreshSponsors();
-                });
+                payload.put("hotel", normalizedHotel);
+                JSONObject response = postJsonObject(
+                        PROFILE_API + "/sponsors/profile",
+                        payload,
+                        45_000
+                );
+                finishSponsorProfileSave(dialog, response);
             } catch(ApiHttpException error) {
                 JSONObject body = error.payload;
                 String next = body.optString("nextChangeAt", "");
@@ -4229,18 +4258,225 @@ public class MainActivity extends Activity {
                 final String message = "profile_change_cooldown".equals(body.optString("code"))
                         ? tr(R.string.supporter_change_wait, formatSupporterCooldown(Math.max(0L, supporterCanChangeAtMs - System.currentTimeMillis())))
                         : body.optString("error", t(R.string.supporter_save_error));
-                runOnUiThread(() -> {
-                    saveButton.setEnabled(true);
-                    saveButton.setText(t(R.string.supporter_save_profile));
-                    toast(message);
-                });
+                if (error.statusCode == 408 || error.statusCode >= 500) {
+                    android.util.Log.w(
+                            "ToxicSponsor",
+                            "Resposta incerta ao salvar; confirmando estado local (HTTP "
+                                    + error.statusCode + ")"
+                    );
+                    confirmSponsorProfileSave(
+                            dialog,
+                            saveButton,
+                            token,
+                            nick,
+                            normalizedHotel,
+                            message,
+                            0
+                    );
+                } else {
+                    showSponsorProfileSaveError(saveButton, message);
+                }
             } catch(Exception error) {
-                runOnUiThread(() -> {
-                    saveButton.setEnabled(true);
-                    saveButton.setText(t(R.string.supporter_save_profile));
-                    toast(t(R.string.supporter_save_error));
-                });
+                android.util.Log.w(
+                        "ToxicSponsor",
+                        "Resposta incerta ao salvar; confirmando estado local",
+                        error
+                );
+                confirmSponsorProfileSave(
+                        dialog,
+                        saveButton,
+                        token,
+                        nick,
+                        normalizedHotel,
+                        t(R.string.supporter_save_error),
+                        0
+                );
             }
+        });
+    }
+
+    private void confirmSponsorProfileSave(
+            Dialog dialog,
+            TextView saveButton,
+            String purchaseToken,
+            String expectedNick,
+            String expectedHotel,
+            String fallbackMessage,
+            int attempt
+    ) {
+        if (attempt >= SUPPORTER_PROFILE_CONFIRM_DELAYS_MS.length) {
+            showSponsorProfileSaveError(saveButton, fallbackMessage);
+            return;
+        }
+        long delay = SUPPORTER_PROFILE_CONFIRM_DELAYS_MS[attempt];
+        uiHandler.postDelayed(() -> {
+            if (activityDestroyed || dialog == null || !dialog.isShowing()) return;
+            try {
+                executor.execute(() -> {
+                    try {
+                        JSONObject payload = new JSONObject();
+                        payload.put("purchaseToken", purchaseToken);
+                        JSONObject response = postJsonObject(
+                                PROFILE_API + "/sponsors/profile/confirm",
+                                payload,
+                                8_000
+                        );
+                        if (supporterProfileMatches(response, expectedNick, expectedHotel)) {
+                            finishSponsorProfileSave(dialog, response);
+                            return;
+                        }
+                    } catch(Exception confirmError) {
+                        android.util.Log.i(
+                                "ToxicSponsor",
+                                "Confirmação de perfil pendente (tentativa " + (attempt + 1) + ")",
+                                confirmError
+                        );
+                    }
+                    confirmSponsorProfileSave(
+                            dialog,
+                            saveButton,
+                            purchaseToken,
+                            expectedNick,
+                            expectedHotel,
+                            fallbackMessage,
+                            attempt + 1
+                    );
+                });
+            } catch(Exception rejected) {
+                showSponsorProfileSaveError(saveButton, fallbackMessage);
+            }
+        }, delay);
+    }
+
+    private boolean supporterProfileMatches(JSONObject response, String expectedNick, String expectedHotel) {
+        if (response == null || !response.optBoolean("active", false)) return false;
+        JSONObject sponsor = response.optJSONObject("sponsor");
+        if (sponsor == null) return false;
+        String actualNick = sponsor.optString("nick", sponsor.optString("name", ""));
+        String actualHotel = normalizeHotelKey(sponsor.optString("hotel", ""));
+        return normalizeNickKey(actualNick).equals(normalizeNickKey(expectedNick))
+                && actualHotel.equals(normalizeHotelKey(expectedHotel));
+    }
+
+    private void finishSponsorProfileSave(Dialog dialog, JSONObject response) {
+        runOnUiThread(() -> {
+            if (activityDestroyed) return;
+            String previousNick = supporterProfileNick;
+            String previousHotel = supporterProfileHotel;
+            applySupporterStatus(response);
+            showSavedSponsorImmediately(
+                    response == null ? null : response.optJSONObject("sponsor"),
+                    previousNick,
+                    previousHotel
+            );
+            if (dialog != null && dialog.isShowing()) dialog.dismiss();
+            toast(t(R.string.supporter_profile_saved));
+            refreshSponsors();
+        });
+    }
+
+    private String sponsorIdentity(String nick, String hotel) {
+        String normalizedNick = normalizeNickKey(nick);
+        String normalizedHotel = normalizeHotelKey(hotel);
+        if (normalizedNick.isEmpty() || normalizedHotel.isEmpty()) return "";
+        return normalizedHotel + "|" + normalizedNick;
+    }
+
+    private String sponsorIdentity(JSONObject sponsor) {
+        if (sponsor == null) return "";
+        return sponsorIdentity(
+                sponsor.optString("nick", sponsor.optString("name", "")),
+                sponsor.optString("hotel", "")
+        );
+    }
+
+    private void showSavedSponsorImmediately(
+            JSONObject sponsor,
+            String previousNick,
+            String previousHotel
+    ) {
+        if (sponsor == null || sponsorsCarouselRow == null) return;
+        String nick = sponsor.optString("nick", sponsor.optString("name", "")).trim();
+        String hotel = normalizeHotelKey(sponsor.optString("hotel", ""));
+        String figure = sponsor.optString(
+                "figure",
+                sponsor.optString("figureString", "")
+        ).trim();
+        String uniqueId = sponsor.optString(
+                "uniqueId",
+                sponsor.optString("id", "")
+        ).trim();
+        String newIdentity = sponsorIdentity(nick, hotel);
+        if (newIdentity.isEmpty() || figure.isEmpty()) return;
+
+        String previousIdentity = sponsorIdentity(previousNick, previousHotel);
+        sponsorsDataGeneration.incrementAndGet();
+
+        JSONArray cachedSponsors = null;
+        String cached = sponsorsCacheJson;
+        if (cached != null && !cached.trim().isEmpty()) {
+            try { cachedSponsors = new JSONArray(cached); } catch(Exception ignored) {}
+        }
+        if (cachedSponsors != null) {
+            JSONArray merged = new JSONArray();
+            boolean inserted = false;
+            for (int i = 0; i < cachedSponsors.length(); i++) {
+                JSONObject current = cachedSponsors.optJSONObject(i);
+                if (current == null) continue;
+                String currentIdentity = sponsorIdentity(current);
+                boolean isCurrentProfile = newIdentity.equals(currentIdentity);
+                boolean isPreviousProfile = !previousIdentity.isEmpty()
+                        && previousIdentity.equals(currentIdentity);
+                if (isCurrentProfile || isPreviousProfile) {
+                    if (!inserted) {
+                        merged.put(sponsor);
+                        inserted = true;
+                    }
+                } else {
+                    merged.put(current);
+                }
+            }
+            if (!inserted) merged.put(sponsor);
+            sponsorsCacheJson = merged.toString();
+            renderSponsors(merged);
+            return;
+        }
+
+        // Sem JSON em cache, preserva os cartões existentes e troca apenas o
+        // cartão deste assinante. O convite de assinatura continua por último.
+        String newTag = "sponsor_profile|" + newIdentity;
+        String previousTag = previousIdentity.isEmpty()
+                ? ""
+                : "sponsor_profile|" + previousIdentity;
+        for (int i = sponsorsCarouselRow.getChildCount() - 1; i >= 0; i--) {
+            Object tag = sponsorsCarouselRow.getChildAt(i).getTag();
+            String tagText = tag == null ? "" : String.valueOf(tag);
+            if (newTag.equals(tagText) || (!previousTag.isEmpty() && previousTag.equals(tagText))) {
+                sponsorsCarouselRow.removeViewAt(i);
+            }
+        }
+        int insertAt = sponsorsCarouselRow.getChildCount();
+        for (int i = 0; i < sponsorsCarouselRow.getChildCount(); i++) {
+            if ("sponsor_action".equals(String.valueOf(sponsorsCarouselRow.getChildAt(i).getTag()))) {
+                insertAt = i;
+                break;
+            }
+        }
+        sponsorsCarouselRow.addView(
+                sponsorCard(nick, hotel, figure, uniqueId),
+                insertAt
+        );
+        finishSponsorsDisplay(true);
+    }
+
+    private void showSponsorProfileSaveError(TextView saveButton, String message) {
+        runOnUiThread(() -> {
+            if (activityDestroyed || saveButton == null) return;
+            saveButton.setEnabled(true);
+            saveButton.setText(t(R.string.supporter_save_profile));
+            toast(message == null || message.trim().isEmpty()
+                    ? t(R.string.supporter_save_error)
+                    : message);
         });
     }
 
@@ -7680,7 +7916,8 @@ public class MainActivity extends Activity {
 
         while (page > 0 && safety < 12 && combined.items.size() < target) {
             PageResult part = fetchPage(uniqueId, endpoint, primaryKey, page, limit);
-            if (part == null) break;
+            if (part == null || !part.success) break;
+            combined.success = true;
             if (combined.total <= 0 && part.total > 0) combined.total = part.total;
             if (part.items == null || part.items.isEmpty()) {
                 combined.nextPage = 0;
@@ -7703,11 +7940,13 @@ public class MainActivity extends Activity {
             safety++;
         }
 
-        if (combined.total > 0 && combined.items.size() < Math.min(target, combined.total) && combined.nextPage <= 0) {
+        int estimatedLoaded = Math.max(0, (Math.max(1, startPage) - 1) * limit)
+                + combined.items.size();
+        if (combined.total > estimatedLoaded && combined.nextPage <= 0) {
             combined.nextPage = Math.max(startPage + 1, page + 1);
             combined.hasMore = true;
         }
-        if (combined.total > 0 && combined.items.size() >= combined.total) {
+        if (combined.total > 0 && estimatedLoaded >= combined.total) {
             combined.nextPage = 0;
             combined.hasMore = false;
         }
@@ -7768,9 +8007,11 @@ public class MainActivity extends Activity {
 
     private void loadMorePhotos(ProfileResult r, HorizontalScrollView photosHsv) {
         if (r == null || r.photosLoading || !r.photosHasMore || r.uniqueId == null || r.uniqueId.isEmpty()) return;
+        if (SystemClock.elapsedRealtime() < r.photosAutoLoadRetryAfterMs) return;
         final int token = boundProfileToken(r);
         if (!isCurrentProfileResult(r, token)) return;
         if (r.allPhotosSource != null && !r.allPhotosSource.isEmpty()) {
+            r.photosAutoLoadRetryAfterMs = 0L;
             photosScrollX = photosHsv == null ? 0 : photosHsv.getScrollX();
             int end = Math.min(r.photos.size() + PAGE_CHUNK, r.allPhotosSource.size());
             r.photos = new ArrayList<>(r.allPhotosSource.subList(0, end));
@@ -7789,9 +8030,23 @@ public class MainActivity extends Activity {
             try {
                 PageResult next = fetchPageChunk(r.uniqueId, "photos", "photos", page, PAGE_CHUNK, PAGE_CHUNK);
                 if (!isCurrentProfileResult(r, token)) return;
-                applyPhotosPage(r, next, false);
+                if (!next.success) {
+                    r.photosAutoLoadRetryAfterMs = SystemClock.elapsedRealtime()
+                            + HORIZONTAL_AUTO_LOAD_RETRY_BACKOFF_MS;
+                    return;
+                }
+                if (next.items.isEmpty()) {
+                    r.photosHasMore = false;
+                    r.photosNextPage = 0;
+                    r.photosTotal = r.photos.size();
+                } else {
+                    applyPhotosPage(r, next, false);
+                }
+                r.photosAutoLoadRetryAfterMs = 0L;
                 try { enrichPhotoRoomInfo(r); } catch(Exception ignored) {}
             } catch (Exception ignored) {
+                r.photosAutoLoadRetryAfterMs = SystemClock.elapsedRealtime()
+                        + HORIZONTAL_AUTO_LOAD_RETRY_BACKOFF_MS;
             } finally {
                 r.photosLoading = false;
                 runOnUiThread(() -> {
@@ -7805,6 +8060,7 @@ public class MainActivity extends Activity {
     private void loadMoreStyles(ProfileResult r, HorizontalScrollView stylesHsv) {
         if (r == null || r.stylesLoading || !r.stylesHasMore
                 || r.uniqueId == null || r.uniqueId.isEmpty()) return;
+        if (SystemClock.elapsedRealtime() < r.stylesAutoLoadRetryAfterMs) return;
         final int token = boundProfileToken(r);
         if (!isCurrentProfileResult(r, token)) return;
 
@@ -7813,6 +8069,7 @@ public class MainActivity extends Activity {
         // Primeiro libera itens que já vieram na página de rede atual.
         if (r.allStylesSource != null
                 && r.previousStyles.size() < r.allStylesSource.size()) {
+            r.stylesAutoLoadRetryAfterMs = 0L;
             int end = Math.min(
                     r.previousStyles.size() + PAGE_CHUNK,
                     r.allStylesSource.size()
@@ -7841,7 +8098,12 @@ public class MainActivity extends Activity {
                             remotePage,
                             100
                     );
-                    if (!isCurrentProfileResult(r, token) || !next.success) return;
+                    if (!isCurrentProfileResult(r, token)) return;
+                    if (!next.success) {
+                        r.stylesAutoLoadRetryAfterMs = SystemClock.elapsedRealtime()
+                                + HORIZONTAL_AUTO_LOAD_RETRY_BACKOFF_MS;
+                        return;
+                    }
                     synchronized (r) {
                         r.allStylesSource = mergeLists(r.allStylesSource, next.items);
                         if (next.total > 0) {
@@ -7865,8 +8127,11 @@ public class MainActivity extends Activity {
                         r.stylesHasMore = end < r.allStylesSource.size()
                                 || r.stylesRemotePaged;
                         if (!r.stylesHasMore) r.stylesNextPage = 0;
+                        r.stylesAutoLoadRetryAfterMs = 0L;
                     }
                 } catch(Exception ignored) {
+                    r.stylesAutoLoadRetryAfterMs = SystemClock.elapsedRealtime()
+                            + HORIZONTAL_AUTO_LOAD_RETRY_BACKOFF_MS;
                 } finally {
                     r.stylesLoading = false;
                     runOnUiThread(() -> {
@@ -7880,6 +8145,7 @@ public class MainActivity extends Activity {
 
         // Compatibilidade com fontes locais completas já existentes.
         if (r.stylesFromComplement && r.allStylesSource != null) {
+            r.stylesAutoLoadRetryAfterMs = 0L;
             int end = Math.min(
                     r.previousStyles.size() + PAGE_CHUNK,
                     r.allStylesSource.size()
@@ -7888,7 +8154,29 @@ public class MainActivity extends Activity {
             r.stylesHasMore = end < r.allStylesSource.size();
             r.stylesNextPage = r.stylesHasMore ? (end / PAGE_CHUNK) + 1 : 0;
             renderProfile(r);
+            return;
         }
+        r.stylesAutoLoadRetryAfterMs = SystemClock.elapsedRealtime()
+                + HORIZONTAL_AUTO_LOAD_RETRY_BACKOFF_MS;
+    }
+
+    private void bindHorizontalAutoLoad(
+            HorizontalScrollView carousel,
+            View content,
+            Runnable loadMore
+    ) {
+        if (carousel == null || content == null || loadMore == null) return;
+        Runnable check = () -> {
+            if (activityDestroyed || carousel.getWidth() <= 0 || content.getWidth() <= 0) return;
+            int viewportWidth = Math.max(
+                    0,
+                    carousel.getWidth() - carousel.getPaddingLeft() - carousel.getPaddingRight()
+            );
+            int remaining = content.getWidth() - carousel.getScrollX() - viewportWidth;
+            if (remaining <= dp(HORIZONTAL_AUTO_LOAD_THRESHOLD_DP)) loadMore.run();
+        };
+        carousel.setOnScrollChangeListener((view, scrollX, scrollY, oldScrollX, oldScrollY) -> check.run());
+        carousel.post(check);
     }
 
     private ArrayList<JSONObject> fetchOfficialPhotos(String uniqueId) throws Exception {
@@ -8476,7 +8764,14 @@ public class MainActivity extends Activity {
         if (list.isEmpty() && !profileResult.stylesHasMore && !profileResult.stylesLoading) return;
         final int loaded = list.size();
         final int totalLabel = Math.max(profileResult.stylesTotal, loaded);
-        LinearLayout c = sectionCardWithLoadMore(t(R.string.previous_styles), loaded, totalLabel > 0 ? totalLabel : loaded, profileResult.stylesHasMore || profileResult.stylesLoading, profileResult.stylesLoading, () -> loadMoreStyles(profileResult, null));
+        LinearLayout c = sectionCardWithLoadMore(
+                t(R.string.previous_styles),
+                loaded,
+                totalLabel > 0 ? totalLabel : loaded,
+                profileResult.stylesLoading,
+                profileResult.stylesLoading,
+                null
+        );
         HorizontalScrollView hsv = new HorizontalScrollView(this); hsv.setHorizontalScrollBarEnabled(false);
         LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.HORIZONTAL); hsv.addView(row);
         c.addView(hsv, lp(-1, dp(172), 0, 0, 0, 8));
@@ -8494,9 +8789,12 @@ public class MainActivity extends Activity {
             final String finalFig = fig;
             box.setOnClickListener(v -> showClothesDialog(finalFig, niceDate(firstText(o, "changedAt", "date", "createdAt", "creationTime"))));
         }
-        if (profileResult.stylesHasMore && !profileResult.stylesLoading) {
-            View more = c.findViewWithTag("load_more_header_button");
-            if (more != null) more.setOnClickListener(v -> loadMoreStyles(profileResult, stylesHsv));
+        if (profileResult.stylesHasMore) {
+            bindHorizontalAutoLoad(
+                    stylesHsv,
+                    row,
+                    () -> loadMoreStyles(profileResult, stylesHsv)
+            );
         }
         // Keep the slot in the profile hierarchy during progressive renders. Loading is
         // automatically deferred while entitlement is being verified.
@@ -9225,7 +9523,14 @@ public class MainActivity extends Activity {
         if (list.isEmpty() && !profileResult.photosHasMore && !profileResult.photosLoading) return;
         final int loaded = list.size();
         final int totalLabel = Math.max(profileResult.photosTotal, loaded);
-        LinearLayout c = sectionCardWithLoadMore(t(R.string.user_photos), loaded, totalLabel > 0 ? totalLabel : loaded, profileResult.photosHasMore || profileResult.photosLoading, profileResult.photosLoading, () -> loadMorePhotos(profileResult, null));
+        LinearLayout c = sectionCardWithLoadMore(
+                t(R.string.user_photos),
+                loaded,
+                totalLabel > 0 ? totalLabel : loaded,
+                profileResult.photosLoading,
+                profileResult.photosLoading,
+                null
+        );
         HorizontalScrollView hsv = new HorizontalScrollView(this); hsv.setHorizontalScrollBarEnabled(false);
         LinearLayout row = new LinearLayout(this); row.setOrientation(LinearLayout.HORIZONTAL); hsv.addView(row);
         c.addView(hsv, lp(-1, dp(165), 0, 0, 0, 0));
@@ -9241,9 +9546,12 @@ public class MainActivity extends Activity {
             TextView dt = text(date, 12, Color.argb(190,255,255,255), false); dt.setGravity(Gravity.CENTER); box.addView(dt, lp(-1,-2,0,8,0,0));
             if (!url.isEmpty()) { loadImage(img, url); final JSONObject photoObj = o; box.setOnClickListener(v -> showPhotoDialog(photoObj)); }
         }
-        if (profileResult.photosHasMore && !profileResult.photosLoading) {
-            View more = c.findViewWithTag("load_more_header_button");
-            if (more != null) more.setOnClickListener(v -> loadMorePhotos(profileResult, photosHsv));
+        if (profileResult.photosHasMore) {
+            bindHorizontalAutoLoad(
+                    photosHsv,
+                    row,
+                    () -> loadMorePhotos(profileResult, photosHsv)
+            );
         }
     }
 
@@ -12063,13 +12371,18 @@ private int loadingProgressFor(String message) {
     }
 
     private JSONObject postJsonObject(String url, JSONObject payload) throws Exception {
+        return postJsonObject(url, payload, 30_000);
+    }
+
+    private JSONObject postJsonObject(String url, JSONObject payload, int readTimeoutMs) throws Exception {
         HttpURLConnection connection = null;
         try {
             connection = (HttpURLConnection)new URL(url).openConnection();
             connection.setUseCaches(false);
             connection.setDefaultUseCaches(false);
-            connection.setConnectTimeout(10000);
-            connection.setReadTimeout(30000);
+            int safeReadTimeout = Math.max(5_000, readTimeoutMs);
+            connection.setConnectTimeout(Math.min(10_000, safeReadTimeout));
+            connection.setReadTimeout(safeReadTimeout);
             connection.setRequestMethod("POST");
             connection.setDoOutput(true);
             connection.setRequestProperty("Accept", "application/json");
@@ -16305,6 +16618,7 @@ private int loadingProgressFor(String message) {
         c.previousNames = new ArrayList<>(src.previousNames); c.previousMottos = new ArrayList<>(src.previousMottos); c.previousStyles = new ArrayList<>(src.previousStyles); c.photos = new ArrayList<>(src.photos); c.friends = new ArrayList<>(src.friends); c.oldFriends = new ArrayList<>(src.oldFriends); c.rooms = new ArrayList<>(src.rooms); c.oldRooms = new ArrayList<>(src.oldRooms); c.groups = new ArrayList<>(src.groups); c.badges = new ArrayList<>(src.badges); c.badgesWithAchievements = new ArrayList<>(src.badgesWithAchievements); c.totalBadges = src.totalBadges; c.selectedBadges = new ArrayList<>(src.selectedBadges);
         c.allPhotosSource = new ArrayList<>(src.allPhotosSource); c.allStylesSource = new ArrayList<>(src.allStylesSource);
         c.photosNextPage = src.photosNextPage; c.stylesNextPage = src.stylesNextPage; c.photosTotal = src.photosTotal; c.stylesTotal = src.stylesTotal; c.stylesRemoteNextPage = src.stylesRemoteNextPage;
+        c.photosAutoLoadRetryAfterMs = src.photosAutoLoadRetryAfterMs; c.stylesAutoLoadRetryAfterMs = src.stylesAutoLoadRetryAfterMs;
         c.removedFriendsNextPage = src.removedFriendsNextPage; c.removedFriendsTotal = src.removedFriendsTotal; c.friendsNextPage = src.friendsNextPage; c.friendsTotal = src.friendsTotal; c.friendsTabPage = src.friendsTabPage; c.previousMottosSlideIndex = src.previousMottosSlideIndex; c.badgesNextPage = src.badgesNextPage; c.badgesTotal = src.badgesTotal; c.badgesTabPage = src.badgesTabPage;
         c.photosHasMore = src.photosHasMore; c.stylesHasMore = src.stylesHasMore; c.photosLoading = false; c.stylesLoading = false;
         c.removedFriendsHasMore = src.removedFriendsHasMore; c.removedFriendsLoading = false; c.friendsHasMore = src.friendsHasMore; c.friendsLoading = false; c.friendsPagedMode = src.friendsPagedMode; c.friendsTabShowingRemoved = src.friendsTabShowingRemoved; c.friendsTabSelectionTouched = src.friendsTabSelectionTouched; c.badgesHasMore = src.badgesHasMore; c.badgesLoading = false; c.badgesPagedMode = src.badgesPagedMode; c.hideAchievementBadges = src.hideAchievementBadges;
@@ -17604,6 +17918,7 @@ private int loadingProgressFor(String message) {
         ArrayList<JSONObject> allPhotosSource = new ArrayList<>(), allStylesSource = new ArrayList<>();
         int photosNextPage = 0, stylesNextPage = 0, photosTotal = 0, stylesTotal = 0;
         int stylesRemoteNextPage = 0;
+        volatile long photosAutoLoadRetryAfterMs = 0L, stylesAutoLoadRetryAfterMs = 0L;
         int removedFriendsNextPage = 0, removedFriendsTotal = 0, friendsNextPage = 0, friendsTotal = 0, friendsTabPage = 1;
         int previousMottosSlideIndex = 0;
         int badgesNextPage = 0, badgesTotal = 0, badgesTabPage = 1;
