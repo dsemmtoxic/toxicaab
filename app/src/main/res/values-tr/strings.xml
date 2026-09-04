@@ -77,10 +77,13 @@
     <string name="history_cleared">Geçmiş temizlendi.</string>
     <string name="loading_details">Profil detayları yükleniyor...</string>
     <string name="loading_history">Geçmiş yükleniyor...</string>
+    <string name="not_available">Kullanılamıyor</string>
+    <string name="security_verification_title">Güvenlik doğrulaması</string>
+    <string name="security_verification_body">Devam etmek için doğrulamayı tamamlayın. Toxic daha sonra otomatik olarak devam eder.</string>
     <string name="loading_styles_friends">Görünümler ve arkadaşlar yükleniyor...</string>
     <string name="loading_rooms_groups">Odalar ve gruplar yükleniyor...</string>
     <string name="loading_clothes">Kıyafetler yükleniyor...</string>
-    <string name="cannot_load_clothes">Öğeler yüklenemedi.</string>
+    <string name="cannot_load_clothes">Kullanılamıyor</string>
     <string name="no_clothes_found">Öğe bulunamadı</string>
     <string name="current_look">Mevcut görünüm</string>
     <string name="looks">Görünümler</string>
@@ -178,7 +181,7 @@
     <string name="male">Erkek</string>
     <string name="female">Kadın</string>
     <string name="loading_visuals">Görünüm yükleniyor...</string>
-    <string name="cannot_load_visuals">Görünüm deneme yüklenemedi.</string>
+    <string name="cannot_load_visuals">Kullanılamıyor</string>
     <string name="not_found_simple">Profil bulunamadı.</string>
     <string name="no_items_found">Öğe bulunamadı.</string>
     <string name="remove_item">Kaldır</string>
