@@ -176,9 +176,16 @@ public class MainActivity extends Activity {
             "/GmRPiA2L2vji2TZm73IKPdOLlKtey7SGxFxSkdItzEpTP1Q/SImRCinUX+47pc1w4Z0QjqFEYXyCSnX/BYpb8RfBGwQ9WO9i1BpR/0xwhexctfrIpMI2uD2" +
             "ZtPTd6J+mWkRo5zWq6gXGUjIBoa2NhfSOjppHajBwHQG5ee2vnr7WMoixez/b3/7/4RHUQmqMgEA";
     private static final long JSON_RESPONSE_CACHE_TTL_MS = 5L * 60L * 1000L;
+    private static final long HABBODEX_UNAVAILABLE_COOLDOWN_MS = 5L * 60L * 1000L;
+    private static volatile long habbodexUnavailableUntilElapsedMs = 0L;
+    private static final long SUGGESTION_DEBOUNCE_MS = 500L;
+    private static final long SUGGESTION_CACHE_TTL_MS = 5L * 60L * 1000L;
+    private static final long EMPTY_SUGGESTION_CACHE_TTL_MS = 30L * 1000L;
+    private static final int SUGGESTION_CACHE_MAX_ENTRIES = 64;
     private final ExecutorService executor = Executors.newFixedThreadPool(10);
     private final ExecutorService profileSectionsExecutor = Executors.newFixedThreadPool(6);
     private final ConcurrentHashMap<String, CachedJsonResponse> jsonResponseCache = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, CachedSuggestionResult> suggestionResultCache = new ConcurrentHashMap<>();
     private static volatile JSONObject habbonewsRarityItemsMemory;
 
     // Transporte HabboDex via WebView: mantém uma sessão web real no próprio aparelho.
@@ -210,7 +217,7 @@ public class MainActivity extends Activity {
     private final ArrayList<CircularPullProgressView> floatingProfileProgressViews = new ArrayList<>();
     private LinearLayout suggestionsBox;
     private ScrollView suggestionsScroll;
-    private int suggestionRequestId = 0;
+    private volatile int suggestionRequestId = 0;
     private Runnable suggestionDebounceTask;
     private boolean suppressSuggestions = false;
     private boolean programmaticSearchTextChange = false;
@@ -8598,15 +8605,67 @@ public class MainActivity extends Activity {
         }
 
         addSelectedBadges(r.selectedBadges);
-        addPreviousNames(r.previousNames);
-        addPreviousMottos(r, r.previousMottos);
-        addPreviousStyles(r);
-        addPhotos(r);
+        boolean additionalDataUnavailable = !profileSectionsInProgress
+                && isHabbodexTemporarilyUnavailable();
+        boolean restrictedProfile = r.privateProfile || r.banned;
+
+        if (r.previousNames != null && !r.previousNames.isEmpty()) {
+            addPreviousNames(r.previousNames);
+        } else if (additionalDataUnavailable) {
+            addUnavailableSection(R.string.previous_names);
+        }
+
+        if (r.previousMottos != null && !r.previousMottos.isEmpty()) {
+            addPreviousMottos(r, r.previousMottos);
+        } else if (additionalDataUnavailable) {
+            addUnavailableSection(R.string.previous_mottos);
+        }
+
+        if ((r.previousStyles != null && !r.previousStyles.isEmpty())
+                || r.stylesHasMore || r.stylesLoading) {
+            addPreviousStyles(r);
+        } else if (additionalDataUnavailable) {
+            addUnavailableSection(R.string.previous_styles);
+        }
+
+        if ((r.photos != null && !r.photos.isEmpty())
+                || r.photosHasMore || r.photosLoading) {
+            addPhotos(r);
+        } else if (additionalDataUnavailable && restrictedProfile) {
+            addUnavailableSection(R.string.user_photos);
+        }
         addStats(r);
-        addFriendsTabs(r);
-        addRoomsTabs(r.rooms);
-        addGroups(r.groups);
-        addBadgesSection(r);
+
+        boolean hasFriendsArea = (r.friendsDatesReady && r.friends != null
+                && !r.friends.isEmpty())
+                || (r.oldFriends != null && !r.oldFriends.isEmpty())
+                || r.removedFriendsLoading;
+        if (hasFriendsArea) {
+            addFriendsTabs(r);
+        } else if (additionalDataUnavailable) {
+            addUnavailableSection(R.string.friends);
+        }
+
+        if (r.rooms != null && !r.rooms.isEmpty()) {
+            addRoomsTabs(r.rooms);
+        } else if (additionalDataUnavailable && restrictedProfile) {
+            addUnavailableSection(R.string.rooms);
+        }
+
+        if (r.groups != null && !r.groups.isEmpty()) {
+            addGroups(r.groups);
+        } else if (additionalDataUnavailable && restrictedProfile) {
+            addUnavailableSection(R.string.groups);
+        }
+
+        boolean hasBadges = (r.badgesWithAchievements != null
+                && !r.badgesWithAchievements.isEmpty())
+                || (r.badges != null && !r.badges.isEmpty());
+        if (hasBadges || !additionalDataUnavailable) {
+            addBadgesSection(r);
+        } else {
+            addUnavailableSection(R.string.badges);
+        }
     }
 
     private LinearLayout profileBadge(String label, String icon, int color) {
@@ -9242,7 +9301,10 @@ public class MainActivity extends Activity {
                     }
                 });
             } catch (Exception ex) {
-                runOnUiThread(() -> loading.setText(t(R.string.cannot_load_clothes)));
+                runOnUiThread(() -> {
+                    clothesContainer.removeAllViews();
+                    clothesContainer.addView(centerNote(t(R.string.not_available)));
+                });
             }
         });
     }
@@ -11213,6 +11275,17 @@ public class MainActivity extends Activity {
         return c;
     }
 
+    private void addUnavailableSection(int titleResource) {
+        LinearLayout c = sectionCard(null, 0, false);
+        TextView title = habboText(t(titleResource), 19, true);
+        title.setTextColor(lightTheme
+                ? Color.rgb(81, 48, 133)
+                : Color.rgb(232, 224, 255));
+        title.setLetterSpacing(0.015f);
+        c.addView(title, lp(-1, -2, 0, 0, 0, 8));
+        c.addView(centerNote(t(R.string.not_available)), lp(-1, -2, 0, 0, 0, 0));
+    }
+
     private LinearLayout sectionCardWithLoadMore(String title, int shown, int total, boolean showButton, boolean loading, final Runnable action) {
         LinearLayout c = card(dp(22));
         applyProfilePrivateBorder(c, dp(22));
@@ -11295,6 +11368,7 @@ public class MainActivity extends Activity {
 
     private void scheduleSuggestions(String raw) {
         final String q = raw == null ? "" : raw.trim();
+        final String hotel = normalizeHotelKey(currentHotelKey);
         if (suggestionDebounceTask != null) {
             uiHandler.removeCallbacks(suggestionDebounceTask);
             suggestionDebounceTask = null;
@@ -11307,17 +11381,30 @@ public class MainActivity extends Activity {
         if (suppressSuggestions || searchInProgress || searchInput == null || !searchInput.hasFocus()) return;
         if (q.length() < 2) return;
 
-        showSuggestionsLoading();
+        suggestionDebounceTask = () -> {
+            if (requestId != suggestionRequestId || suppressSuggestions || searchInProgress
+                    || searchInput == null || !searchInput.hasFocus()
+                    || !q.equals(searchInput.getText().toString().trim())
+                    || !hotel.equals(normalizeHotelKey(currentHotelKey))) return;
 
-        suggestionDebounceTask = () -> executor.execute(() -> {
-            ArrayList<JSONObject> suggestions = fetchLiveNickSuggestions(q);
-            runOnUiThread(() -> {
-                if (requestId == suggestionRequestId && !suppressSuggestions && !searchInProgress && searchInput != null && searchInput.hasFocus()) {
-                    renderLiveSuggestions(q, suggestions);
-                }
+            // O indicador só aparece depois da pausa de digitação. Assim a lista
+            // não pisca e nenhuma chamada é iniciada enquanto o nick muda.
+            showSuggestionsLoading();
+            executor.execute(() -> {
+                if (requestId != suggestionRequestId) return;
+                ArrayList<JSONObject> suggestions = fetchLiveNickSuggestions(q, hotel);
+                runOnUiThread(() -> {
+                    if (requestId == suggestionRequestId && !suppressSuggestions
+                            && !searchInProgress && searchInput != null
+                            && searchInput.hasFocus()
+                            && q.equals(searchInput.getText().toString().trim())
+                            && hotel.equals(normalizeHotelKey(currentHotelKey))) {
+                        renderLiveSuggestions(q, suggestions);
+                    }
+                });
             });
-        });
-        uiHandler.postDelayed(suggestionDebounceTask, 180L);
+        };
+        uiHandler.postDelayed(suggestionDebounceTask, SUGGESTION_DEBOUNCE_MS);
     }
 
     private void showSuggestionsLoading() {
@@ -11362,15 +11449,51 @@ public class MainActivity extends Activity {
         } catch(Exception e) { return new ArrayList<>(); }
     }
 
-    private ArrayList<JSONObject> fetchLiveNickSuggestions(String query) {
+    private ArrayList<JSONObject> fetchLiveNickSuggestions(String query, String hotelKey) {
         ArrayList<JSONObject> out = new ArrayList<>();
         String q = query == null ? "" : query.trim();
         if (q.length() < 2) return out;
+        String hotel = normalizeHotelKey(hotelKey);
+        if (hotel.isEmpty()) hotel = normalizeHotelKey(currentHotelKey);
+        String cacheKey = hotel + ":" + normalizeNickKey(q);
+        long now = SystemClock.elapsedRealtime();
+        CachedSuggestionResult cached = suggestionResultCache.get(cacheKey);
+        if (cached != null) {
+            long ttl = cached.items.isEmpty()
+                    ? EMPTY_SUGGESTION_CACHE_TTL_MS
+                    : SUGGESTION_CACHE_TTL_MS;
+            if (now - cached.storedAtMs >= 0L && now - cached.storedAtMs <= ttl) {
+                return new ArrayList<>(cached.items);
+            }
+            suggestionResultCache.remove(cacheKey, cached);
+        }
+
+        String url = "https://" + hotelDomain(hotel)
+                + "/api/public/users?name=" + enc(q);
         JSONObject official = validProfileObject(
-                tryJson(habboApiUrl("/api/public/users?name=" + enc(q)))
+                tryJson(url)
         );
         if (official != null) out.add(official);
+        trimSuggestionCacheIfNeeded();
+        suggestionResultCache.put(
+                cacheKey,
+                new CachedSuggestionResult(out, SystemClock.elapsedRealtime())
+        );
         return out;
+    }
+
+    private void trimSuggestionCacheIfNeeded() {
+        if (suggestionResultCache.size() < SUGGESTION_CACHE_MAX_ENTRIES) return;
+        String oldestKey = null;
+        long oldestTime = Long.MAX_VALUE;
+        for (Map.Entry<String, CachedSuggestionResult> entry : suggestionResultCache.entrySet()) {
+            CachedSuggestionResult value = entry.getValue();
+            if (value != null && value.storedAtMs < oldestTime) {
+                oldestTime = value.storedAtMs;
+                oldestKey = entry.getKey();
+            }
+        }
+        if (oldestKey != null) suggestionResultCache.remove(oldestKey);
     }
 
     private ArrayList<JSONObject> filterExactPreviousNickSuggestions(JSONObject suggest, String query) {
@@ -12198,6 +12321,74 @@ private int loadingProgressFor(String message) {
         }
     }
 
+    private boolean isHabbodexTemporarilyUnavailable() {
+        long until = habbodexUnavailableUntilElapsedMs;
+        if (until <= 0L) return false;
+        if (SystemClock.elapsedRealtime() < until) return true;
+        habbodexUnavailableUntilElapsedMs = 0L;
+        return false;
+    }
+
+    private void clearHabbodexUnavailableState() {
+        habbodexUnavailableUntilElapsedMs = 0L;
+    }
+
+    private void markHabbodexTemporarilyUnavailable() {
+        long until = SystemClock.elapsedRealtime() + HABBODEX_UNAVAILABLE_COOLDOWN_MS;
+        if (until > habbodexUnavailableUntilElapsedMs) {
+            habbodexUnavailableUntilElapsedMs = until;
+        }
+        habbodexWebChallengeDetected = false;
+
+        HabbodexUnavailableException unavailable = new HabbodexUnavailableException();
+        synchronized (habbodexWebSessionLock) {
+            CompletableFuture<Boolean> session = habbodexWebSessionFuture;
+            if (session != null && !session.isDone()) session.complete(false);
+        }
+        for (Map.Entry<String, CompletableFuture<String>> entry : habbodexWebRequests.entrySet()) {
+            CompletableFuture<String> pending = entry.getValue();
+            if (pending != null && habbodexWebRequests.remove(entry.getKey(), pending)
+                    && !pending.isDone()) {
+                pending.completeExceptionally(unavailable);
+            }
+        }
+
+        Runnable hideVerification = () -> {
+            try {
+                if (habbodexVerificationDialog != null
+                        && habbodexVerificationDialog.isShowing()) {
+                    habbodexVerificationDialog.dismiss();
+                }
+            } catch(Exception ignored) {}
+            attachHabbodexWebViewHidden();
+        };
+        if (Looper.myLooper() == Looper.getMainLooper()) hideVerification.run();
+        else uiHandler.post(hideVerification);
+    }
+
+    private boolean looksLikeHabbodexMaintenance(String title, String text, String url) {
+        String combined = ((title == null ? "" : title) + "\n"
+                + (text == null ? "" : text) + "\n"
+                + (url == null ? "" : url)).toLowerCase(Locale.ROOT);
+        try {
+            combined = Normalizer.normalize(combined, Normalizer.Form.NFD)
+                    .replaceAll("\\p{M}+", "");
+        } catch(Exception ignored) {}
+        return combined.contains("voltaremos em breve")
+                || combined.contains("temporariamente em manutencao")
+                || combined.contains("manutencao em andamento")
+                || combined.contains("under maintenance")
+                || combined.contains("maintenance in progress")
+                || combined.contains("temporarily unavailable")
+                || combined.contains("back soon")
+                || combined.contains("en mantenimiento")
+                || combined.contains("manutenzione")
+                || combined.contains("wartungsarbeiten")
+                || combined.contains("onderhoud")
+                || combined.contains("huolto")
+                || combined.contains("bakim");
+    }
+
     private boolean looksLikeHabbodexChallenge(String title, String text, String url) {
         String combined = ((title == null ? "" : title) + "\n"
                 + (text == null ? "" : text) + "\n"
@@ -12332,6 +12523,12 @@ private int loadingProgressFor(String message) {
                     text = state.optString("text", "");
                 } catch(Exception ignored) {}
 
+                if (looksLikeHabbodexMaintenance(title, text, href)) {
+                    markHabbodexTemporarilyUnavailable();
+                    return;
+                }
+                if (isHabbodexTemporarilyUnavailable()) return;
+
                 boolean challenge = looksLikeHabbodexChallenge(title, text, href);
                 if (challenge) {
                     habbodexWebChallengeDetected = true;
@@ -12382,7 +12579,10 @@ private int loadingProgressFor(String message) {
 
     private boolean ensureHabbodexWebSession() throws Exception {
         if (Looper.myLooper() == Looper.getMainLooper()) {
-            throw new IllegalStateException("HabboDex WebView transport cannot block the UI thread");
+            throw new IllegalStateException("Web transport cannot block the UI thread");
+        }
+        if (isHabbodexTemporarilyUnavailable()) {
+            throw new HabbodexUnavailableException();
         }
 
         CompletableFuture<Boolean> created = new CompletableFuture<>();
@@ -12423,6 +12623,12 @@ private int loadingProgressFor(String message) {
         try {
             return Boolean.TRUE.equals(session.get(HABBODEX_WEB_BOOT_TIMEOUT_MS, TimeUnit.MILLISECONDS));
         } catch(TimeoutException timeout) {
+            // Um carregamento lento ou uma página fora do ar não é, por si só,
+            // uma verificação humana. Só exibe a janela após detectar sinais reais.
+            if (!habbodexWebChallengeDetected) {
+                markHabbodexTemporarilyUnavailable();
+                return false;
+            }
             uiHandler.post(() -> showHabbodexVerificationDialog(
                     habbodexWebLastChallengeUrl == null || habbodexWebLastChallengeUrl.trim().isEmpty()
                             ? "https://habbodex.com/"
@@ -12434,13 +12640,26 @@ private int loadingProgressFor(String message) {
                         TimeUnit.MILLISECONDS
                 ));
             } catch(TimeoutException ignored) {
+                markHabbodexTemporarilyUnavailable();
                 return false;
             }
         }
     }
 
     private CompletableFuture<Boolean> beginHabbodexInteractiveVerification(String url) {
-        final CompletableFuture<Boolean> session = resetHabbodexWebSessionFuture();
+        if (isHabbodexTemporarilyUnavailable()) {
+            return CompletableFuture.completedFuture(false);
+        }
+        final CompletableFuture<Boolean> session;
+        synchronized (habbodexWebSessionLock) {
+            CompletableFuture<Boolean> current = habbodexWebSessionFuture;
+            if (habbodexWebChallengeDetected && current != null && !current.isDone()) {
+                return current;
+            }
+            session = new CompletableFuture<>();
+            habbodexWebSessionFuture = session;
+            habbodexWebChallengeDetected = true;
+        }
         final String target = url == null || url.trim().isEmpty()
                 ? "https://habbodex.com/"
                 : url;
@@ -12478,7 +12697,7 @@ private int loadingProgressFor(String message) {
             LinearLayout top = new LinearLayout(this);
             top.setOrientation(LinearLayout.HORIZONTAL);
             top.setGravity(Gravity.CENTER_VERTICAL);
-            TextView title = text("Verificação HabboDex", 16,
+            TextView title = text(t(R.string.security_verification_title), 16,
                     lightTheme ? Color.rgb(35, 30, 40) : Color.WHITE, true);
             top.addView(title, new LinearLayout.LayoutParams(0, dp(44), 1f));
             TextView close = text("×", 28,
@@ -12488,7 +12707,7 @@ private int loadingProgressFor(String message) {
             shell.addView(top, new LinearLayout.LayoutParams(-1, dp(44)));
 
             TextView hint = text(
-                    "Conclua a verificação exibida pelo HabboDex. Depois o aplicativo continua automaticamente.",
+                    t(R.string.security_verification_body),
                     12,
                     lightTheme ? Color.rgb(90, 82, 98) : Color.argb(210,255,255,255),
                     false
@@ -12505,8 +12724,13 @@ private int loadingProgressFor(String message) {
             habbodexWebView.setFocusable(true);
             habbodexWebView.setFocusableInTouchMode(true);
 
-            close.setOnClickListener(v -> dialog.dismiss());
+            close.setOnClickListener(v -> {
+                dialog.dismiss();
+                markHabbodexTemporarilyUnavailable();
+            });
             dialog.setContentView(shell);
+            dialog.setCanceledOnTouchOutside(false);
+            dialog.setOnCancelListener(d -> markHabbodexTemporarilyUnavailable());
             dialog.setOnDismissListener(d -> {
                 if (habbodexVerificationDialog == dialog) habbodexVerificationDialog = null;
                 try {
@@ -12557,8 +12781,12 @@ private int loadingProgressFor(String message) {
     }
 
     private Object fetchHabbodexViaWebViewOnce(String url) throws Exception {
+        if (isHabbodexTemporarilyUnavailable()) {
+            throw new HabbodexUnavailableException();
+        }
         if (!ensureHabbodexWebSession()) {
-            throw new IOException("HabboDex web session unavailable");
+            markHabbodexTemporarilyUnavailable();
+            throw new HabbodexUnavailableException();
         }
 
         String requestId = "tx" + habbodexWebRequestSeq.incrementAndGet()
@@ -12577,7 +12805,7 @@ private int loadingProgressFor(String message) {
                 + "['data','profile','user','habbo','result'].forEach(function(k){try{scrub(o[k],d+1);}catch(e){}});};"
                 + "fetch(u,{method:'GET',credentials:'include',cache:'no-store',headers:{'Accept':'application/json,text/plain,*/*'}})"
                 + ".then(function(r){return r.text().then(function(t){var body=t;try{var j=JSON.parse(t);if(!isBadgeList)scrub(j,0);body=JSON.stringify(j);}catch(e){}"
-                + "send({ok:r.ok,status:r.status,url:r.url||u,contentType:r.headers.get('content-type')||'',body:body});});})"
+                + "send({ok:r.ok,status:r.status,url:r.url||u,contentType:r.headers.get('content-type')||'',cfMitigated:r.headers.get('cf-mitigated')||'',body:body});});})"
                 + ".catch(function(e){send({ok:false,status:0,url:u,error:String(e),body:''});});})();";
 
         uiHandler.post(() -> {
@@ -12606,20 +12834,45 @@ private int loadingProgressFor(String message) {
         boolean ok = envelope.optBoolean("ok", false);
         String body = envelope.optString("body", "");
         String error = envelope.optString("error", "");
+        String contentType = envelope.optString("contentType", "");
+        String cfMitigated = envelope.optString("cfMitigated", "");
+        String responseUrl = envelope.optString("url", url);
+        String trimmedBody = body == null ? "" : body.trim();
 
-        if (ok && status >= 200 && status < 300 && !body.trim().isEmpty()) {
-            if (body.trim().startsWith("<") || looksLikeHabbodexChallenge("", body, url)) {
-                throw new HabbodexWebChallengeException(url, status);
+        if (looksLikeHabbodexMaintenance("", body, responseUrl)) {
+            markHabbodexTemporarilyUnavailable();
+            throw new HabbodexUnavailableException();
+        }
+        if ("challenge".equalsIgnoreCase(cfMitigated.trim())
+                || looksLikeHabbodexChallenge("", body, responseUrl)) {
+            throw new HabbodexWebChallengeException(responseUrl, status);
+        }
+
+        boolean htmlResponse = trimmedBody.startsWith("<")
+                || contentType.toLowerCase(Locale.ROOT).contains("text/html");
+        if (htmlResponse) {
+            // HTML sem marcadores de desafio é manutenção/erro do provedor,
+            // nunca uma confirmação que o usuário precise concluir.
+            markHabbodexTemporarilyUnavailable();
+            throw new HabbodexUnavailableException();
+        }
+
+        if (ok && status >= 200 && status < 300 && !trimmedBody.isEmpty()) {
+            try {
+                Object parsed = parseCachedJsonBody(body);
+                clearHabbodexUnavailableState();
+                return parsed;
+            } catch(Exception invalidJson) {
+                markHabbodexTemporarilyUnavailable();
+                throw new HabbodexUnavailableException();
             }
-            return parseCachedJsonBody(body);
         }
 
-        if (status == 403 || status == 429 || status == 503
-                || body.trim().startsWith("<")
-                || looksLikeHabbodexChallenge("", body, url)) {
-            throw new HabbodexWebChallengeException(url, status);
+        if (status == 0 || status == 403 || status == 429 || status >= 500) {
+            markHabbodexTemporarilyUnavailable();
+            throw new HabbodexUnavailableException();
         }
-        throw new IOException(error.isEmpty() ? "HabboDex HTTP " + status : error);
+        throw new IOException(error.isEmpty() ? "Additional service HTTP " + status : error);
     }
 
     private Object getJsonViaHabbodexWebView(String url) throws Exception {
@@ -12636,8 +12889,17 @@ private int loadingProgressFor(String message) {
             } catch(TimeoutException timeout) {
                 verified = false;
             }
-            if (!verified) throw challenge;
+            if (!verified) {
+                markHabbodexTemporarilyUnavailable();
+                throw new HabbodexUnavailableException();
+            }
             return fetchHabbodexViaWebViewOnce(url);
+        }
+    }
+
+    private static class HabbodexUnavailableException extends IOException {
+        HabbodexUnavailableException() {
+            super("Additional data temporarily unavailable");
         }
     }
 
@@ -12646,7 +12908,7 @@ private int loadingProgressFor(String message) {
         final int status;
 
         HabbodexWebChallengeException(String url, int status) {
-            super("HabboDex verification required (HTTP " + status + ")");
+            super("Security verification required (HTTP " + status + ")");
             this.url = url == null ? "https://habbodex.com/" : url;
             this.status = status;
         }
@@ -13760,6 +14022,7 @@ private int loadingProgressFor(String message) {
         visualItemViewsSessionCache.clear();
         visualItemRenderLimits.clear();
         jsonResponseCache.clear();
+        suggestionResultCache.clear();
         try {
             getSharedPreferences(PREFS, MODE_PRIVATE).edit()
                 .remove(PREF_VISUAL_EDITOR_FIGURE)
@@ -18313,6 +18576,16 @@ private int loadingProgressFor(String message) {
 
         CachedJsonResponse(String body, long storedAtMs) {
             this.body = body == null ? "" : body;
+            this.storedAtMs = storedAtMs;
+        }
+    }
+
+    private static class CachedSuggestionResult {
+        final ArrayList<JSONObject> items;
+        final long storedAtMs;
+
+        CachedSuggestionResult(ArrayList<JSONObject> items, long storedAtMs) {
+            this.items = items == null ? new ArrayList<>() : new ArrayList<>(items);
             this.storedAtMs = storedAtMs;
         }
     }
