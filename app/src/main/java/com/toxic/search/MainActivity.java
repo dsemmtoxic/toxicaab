@@ -57,7 +57,7 @@ public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_BASE = "https://habbodex.com/api/v1/habboinfo";
     private static final String HABBODEX_FURNIDEX_API = "https://habbodex.com/api/v1/furnidex/furni/from-figure-string";
-    private static final String APP_VERSION = "1.3.9";
+    private static final String APP_VERSION = "1.4.0";
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -405,6 +405,23 @@ public class MainActivity extends Activity {
     private static final String PREF_SUPPORTER_TUTORIAL_VERSION = "supporter_tutorial_version";
     private static final int CURRENT_SUPPORTER_TUTORIAL_VERSION = 2;
     private static final long SUPPORTER_REVERIFY_INTERVAL_MS = 15L * 60L * 1000L;
+    private static final long SUPPORTER_DEFERRED_REVERIFY_MS = 2L * 60L * 1000L;
+    private static final long SUPPORTER_VERIFIED_CACHE_TTL_MS = 6L * 60L * 60L * 1000L;
+    private static final long PURCHASE_EVENT_STABILIZATION_MS = 60_000L;
+    private static final long[] BILLING_RETRY_DELAYS_MS = new long[] {
+            1_000L,
+            3_000L,
+            10_000L,
+            30_000L,
+            60_000L
+    };
+    private static final long[] ACKNOWLEDGEMENT_RETRY_DELAYS_MS = new long[] {
+            1_000L,
+            3_000L,
+            10_000L,
+            30_000L,
+            120_000L
+    };
     private static final long[] SUPPORTER_STATUS_RETRY_DELAYS_MS = new long[] {
             2_000L,
             5_000L,
@@ -414,19 +431,24 @@ public class MainActivity extends Activity {
     };
     private ProductDetails supporterProductDetails;
     private boolean supporterActive = false;
-    private boolean supporterStatusRequestRunning = false;
     private boolean supporterPurchaseQueryRunning = false;
     private boolean supporterProductDetailsQueryRunning = false;
     private boolean billingEntitlementCheckPending = true;
     private boolean pendingSupporterPurchaseLaunch = false;
     private String supporterPurchaseToken = "";
+    private long supporterEntitlementGeneration = 0L;
+    private long supporterLastPurchaseEventAtMs = 0L;
     private long supporterCanChangeAtMs = 0L;
     private long supporterExpiresAtMs = 0L;
+    private long supporterCachedAccessUntilMs = 0L;
     private long supporterNextVerificationAtMs = 0L;
     private String supporterProfileNick = "";
     private String supporterProfileHotel = "";
-    private Runnable billingEntitlementTimeoutRunnable;
     private Runnable supporterStatusRetryRunnable;
+    private final Set<Long> supporterStatusRequestsInFlight = new HashSet<>();
+    private static final String PREF_SUPPORTER_VERIFIED_TOKEN = "supporter_verified_token";
+    private static final String PREF_SUPPORTER_VERIFIED_UNTIL_MS = "supporter_verified_until_ms";
+    private static final String PREF_SUPPORTER_VERIFIED_EXPIRES_AT_MS = "supporter_verified_expires_at_ms";
     private boolean openingSplashShownThisSession = false;
     private JSONObject visualFigureDataCache = null;
     private long visualFigureDataLoadedAt = 0L;
@@ -460,12 +482,31 @@ public class MainActivity extends Activity {
     private static final String PREF_REMOVE_ADS_PURCHASED = "remove_ads_purchased";
     private static final String REMOVE_ADS_PRODUCT_ID = "remove_ads";
     private boolean removeAdsPurchased = false;
+    private String removeAdsPurchaseToken = "";
+    private long removeAdsEntitlementGeneration = 0L;
+    private long removeAdsLastPurchaseEventAtMs = 0L;
     private BillingClient billingClient;
     private ProductDetails removeAdsProductDetails;
     private boolean removeAdsProductDetailsQueryRunning = false;
+    private boolean removeAdsPurchaseQueryRunning = false;
     private boolean billingConnecting = false;
     private boolean billingReady = false;
     private boolean pendingRemoveAdsPurchaseLaunch = false;
+    private boolean activityDestroyed = false;
+    private int billingConnectionRetryAttempt = 0;
+    private int removeAdsProductDetailsRetryAttempt = 0;
+    private int supporterProductDetailsRetryAttempt = 0;
+    private int removeAdsPurchaseQueryRetryAttempt = 0;
+    private int supporterPurchaseQueryRetryAttempt = 0;
+    private Runnable billingConnectionRetryRunnable;
+    private Runnable removeAdsProductDetailsRetryRunnable;
+    private Runnable supporterProductDetailsRetryRunnable;
+    private Runnable removeAdsPurchaseQueryRetryRunnable;
+    private Runnable supporterPurchaseQueryRetryRunnable;
+    private final Set<String> removeAdsTokensNeedingAcknowledgement = new HashSet<>();
+    private final Set<String> supporterTokensNeedingAcknowledgement = new HashSet<>();
+    private final Set<String> acknowledgementRequestsInFlight = new HashSet<>();
+    private final Map<String, Runnable> acknowledgementRetryRunnables = new HashMap<>();
     private static final long REWARDED_AD_FREE_MS = 2L * 60L * 60L * 1000L;
     private static final long MAX_AD_FREE_MS = 4L * 60L * 60L * 1000L;
     private static final int REWARDED_ADS_REQUIRED = 3;
@@ -603,6 +644,7 @@ public class MainActivity extends Activity {
                 getSharedPreferences(PREFS, MODE_PRIVATE).getInt(PREF_REWARDED_ADS_WATCHED, 0)
         ));
         removeAdsPurchased = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_REMOVE_ADS_PURCHASED, false);
+        loadCachedSupporterEntitlement();
         UnityAds.initialize(getApplicationContext(), UNITY_GAME_ID, USE_TEST_ADS, new IUnityAdsInitializationListener() {
             @Override public void onInitializationComplete() {
                 android.util.Log.i(ADS_LOG_TAG, "Unity Ads initialized");
@@ -630,8 +672,9 @@ public class MainActivity extends Activity {
         buildUi();
         startAccessGateMonitoring();
         initBillingClient();
-        billingEntitlementTimeoutRunnable = () -> finishBillingEntitlementCheck(false);
-        uiHandler.postDelayed(billingEntitlementTimeoutRunnable, 6500L);
+        if (!supporterPurchaseToken.isEmpty()) {
+            syncSupporterStatusWithBackend(supporterPurchaseToken, false);
+        }
         refreshSponsors();
         requestFavoriteNotificationPermissionIfNeeded();
         startFavoriteOnlineWatcher();
@@ -1642,17 +1685,314 @@ public class MainActivity extends Activity {
         runOnUiThread(() -> toast(t(messageId)));
     }
 
+    private boolean isRetriableBillingResult(BillingResult billingResult) {
+        if (billingResult == null) return true;
+        int code = billingResult.getResponseCode();
+        return code == BillingClient.BillingResponseCode.NETWORK_ERROR
+                || code == BillingClient.BillingResponseCode.SERVICE_UNAVAILABLE
+                || code == BillingClient.BillingResponseCode.SERVICE_DISCONNECTED
+                || code == BillingClient.BillingResponseCode.ERROR;
+    }
+
+    private long retryDelay(long[] delays, int attempt) {
+        if (delays == null || delays.length == 0) return 1_000L;
+        return delays[Math.max(0, Math.min(attempt, delays.length - 1))];
+    }
+
+    private void resetBillingConnectionRetry() {
+        if (billingConnectionRetryRunnable != null) {
+            uiHandler.removeCallbacks(billingConnectionRetryRunnable);
+            billingConnectionRetryRunnable = null;
+        }
+        billingConnectionRetryAttempt = 0;
+    }
+
+    private void scheduleBillingConnectionRetry(BillingResult billingResult) {
+        logBillingResult("billingConnectionRetry", billingResult);
+        if (activityDestroyed || !isRetriableBillingResult(billingResult)
+                || billingConnectionRetryRunnable != null) return;
+        long delay = retryDelay(BILLING_RETRY_DELAYS_MS, billingConnectionRetryAttempt);
+        billingConnectionRetryAttempt = Math.min(
+                billingConnectionRetryAttempt + 1,
+                BILLING_RETRY_DELAYS_MS.length
+        );
+        billingConnectionRetryRunnable = () -> {
+            billingConnectionRetryRunnable = null;
+            if (activityDestroyed || !appInForeground) return;
+            ensureBillingReady();
+        };
+        uiHandler.postDelayed(billingConnectionRetryRunnable, delay);
+    }
+
+    private void resetRemoveAdsProductDetailsRetry() {
+        if (removeAdsProductDetailsRetryRunnable != null) {
+            uiHandler.removeCallbacks(removeAdsProductDetailsRetryRunnable);
+            removeAdsProductDetailsRetryRunnable = null;
+        }
+        removeAdsProductDetailsRetryAttempt = 0;
+    }
+
+    private boolean scheduleRemoveAdsProductDetailsRetry(BillingResult billingResult) {
+        if (!isRetriableBillingResult(billingResult) || removeAdsProductDetailsRetryRunnable != null) {
+            return removeAdsProductDetailsRetryRunnable != null;
+        }
+        int maxRetries = pendingRemoveAdsPurchaseLaunch ? 3 : BILLING_RETRY_DELAYS_MS.length;
+        if (removeAdsProductDetailsRetryAttempt >= maxRetries) return false;
+        long delay = retryDelay(BILLING_RETRY_DELAYS_MS, removeAdsProductDetailsRetryAttempt++);
+        removeAdsProductDetailsRetryRunnable = () -> {
+            removeAdsProductDetailsRetryRunnable = null;
+            if (activityDestroyed || !appInForeground) return;
+            queryRemoveAdsProductDetails();
+        };
+        uiHandler.postDelayed(removeAdsProductDetailsRetryRunnable, delay);
+        return true;
+    }
+
+    private void resetSupporterProductDetailsRetry() {
+        if (supporterProductDetailsRetryRunnable != null) {
+            uiHandler.removeCallbacks(supporterProductDetailsRetryRunnable);
+            supporterProductDetailsRetryRunnable = null;
+        }
+        supporterProductDetailsRetryAttempt = 0;
+    }
+
+    private boolean scheduleSupporterProductDetailsRetry(BillingResult billingResult) {
+        if (!isRetriableBillingResult(billingResult) || supporterProductDetailsRetryRunnable != null) {
+            return supporterProductDetailsRetryRunnable != null;
+        }
+        int maxRetries = pendingSupporterPurchaseLaunch ? 3 : BILLING_RETRY_DELAYS_MS.length;
+        if (supporterProductDetailsRetryAttempt >= maxRetries) return false;
+        long delay = retryDelay(BILLING_RETRY_DELAYS_MS, supporterProductDetailsRetryAttempt++);
+        supporterProductDetailsRetryRunnable = () -> {
+            supporterProductDetailsRetryRunnable = null;
+            if (activityDestroyed || !appInForeground) return;
+            querySupporterProductDetails();
+        };
+        uiHandler.postDelayed(supporterProductDetailsRetryRunnable, delay);
+        return true;
+    }
+
+    private void resetRemoveAdsPurchaseQueryRetry() {
+        if (removeAdsPurchaseQueryRetryRunnable != null) {
+            uiHandler.removeCallbacks(removeAdsPurchaseQueryRetryRunnable);
+            removeAdsPurchaseQueryRetryRunnable = null;
+        }
+        removeAdsPurchaseQueryRetryAttempt = 0;
+    }
+
+    private void scheduleRemoveAdsPurchaseQueryRetry(BillingResult billingResult) {
+        if (billingResult != null) logBillingResult("queryRemoveAdsPurchases", billingResult);
+        if (activityDestroyed || !isRetriableBillingResult(billingResult)
+                || removeAdsPurchaseQueryRetryRunnable != null) return;
+        long delay = retryDelay(BILLING_RETRY_DELAYS_MS, removeAdsPurchaseQueryRetryAttempt);
+        removeAdsPurchaseQueryRetryAttempt = Math.min(
+                removeAdsPurchaseQueryRetryAttempt + 1,
+                BILLING_RETRY_DELAYS_MS.length
+        );
+        removeAdsPurchaseQueryRetryRunnable = () -> {
+            removeAdsPurchaseQueryRetryRunnable = null;
+            if (activityDestroyed || !appInForeground) return;
+            queryRemoveAdsPurchases();
+        };
+        uiHandler.postDelayed(removeAdsPurchaseQueryRetryRunnable, delay);
+    }
+
+    private void resetSupporterPurchaseQueryRetry() {
+        if (supporterPurchaseQueryRetryRunnable != null) {
+            uiHandler.removeCallbacks(supporterPurchaseQueryRetryRunnable);
+            supporterPurchaseQueryRetryRunnable = null;
+        }
+        supporterPurchaseQueryRetryAttempt = 0;
+    }
+
+    private void scheduleSupporterPurchaseQueryRetry(BillingResult billingResult) {
+        if (billingResult != null) logBillingResult("querySupporterPurchases", billingResult);
+        if (activityDestroyed || !isRetriableBillingResult(billingResult)
+                || supporterPurchaseQueryRetryRunnable != null) return;
+        long delay = retryDelay(BILLING_RETRY_DELAYS_MS, supporterPurchaseQueryRetryAttempt);
+        supporterPurchaseQueryRetryAttempt = Math.min(
+                supporterPurchaseQueryRetryAttempt + 1,
+                BILLING_RETRY_DELAYS_MS.length
+        );
+        supporterPurchaseQueryRetryRunnable = () -> {
+            supporterPurchaseQueryRetryRunnable = null;
+            if (activityDestroyed || !appInForeground) return;
+            querySupporterPurchases();
+        };
+        uiHandler.postDelayed(supporterPurchaseQueryRetryRunnable, delay);
+    }
+
+    private void cancelAcknowledgementRetry(String purchaseToken) {
+        Runnable retry = acknowledgementRetryRunnables.remove(purchaseToken);
+        if (retry != null) uiHandler.removeCallbacks(retry);
+    }
+
+    private void markPurchaseAcknowledged(String purchaseToken) {
+        if (purchaseToken == null) return;
+        cancelAcknowledgementRetry(purchaseToken);
+        acknowledgementRequestsInFlight.remove(purchaseToken);
+        removeAdsTokensNeedingAcknowledgement.remove(purchaseToken);
+        supporterTokensNeedingAcknowledgement.remove(purchaseToken);
+    }
+
+    private void scheduleAcknowledgementRetry(String purchaseToken, String operation, int attempt) {
+        if (purchaseToken == null || purchaseToken.trim().isEmpty() || activityDestroyed
+                || acknowledgementRetryRunnables.containsKey(purchaseToken)) return;
+        long delay = retryDelay(ACKNOWLEDGEMENT_RETRY_DELAYS_MS, attempt);
+        final int nextAttempt = Math.min(attempt + 1, ACKNOWLEDGEMENT_RETRY_DELAYS_MS.length);
+        Runnable retry = () -> {
+            acknowledgementRetryRunnables.remove(purchaseToken);
+            acknowledgePurchaseWithRetry(purchaseToken, operation, nextAttempt);
+        };
+        acknowledgementRetryRunnables.put(purchaseToken, retry);
+        uiHandler.postDelayed(retry, delay);
+    }
+
+    private void acknowledgePurchaseWithRetry(String purchaseToken, String operation, int attempt) {
+        if (purchaseToken == null || purchaseToken.trim().isEmpty() || activityDestroyed) return;
+        String cleanToken = purchaseToken.trim();
+        if (!removeAdsTokensNeedingAcknowledgement.contains(cleanToken)
+                && !supporterTokensNeedingAcknowledgement.contains(cleanToken)) return;
+        if (acknowledgementRequestsInFlight.contains(cleanToken)) return;
+        cancelAcknowledgementRetry(cleanToken);
+        if (billingClient == null || !billingClient.isReady()) {
+            ensureBillingReady();
+            scheduleAcknowledgementRetry(cleanToken, operation, attempt);
+            return;
+        }
+        acknowledgementRequestsInFlight.add(cleanToken);
+        try {
+            AcknowledgePurchaseParams params = AcknowledgePurchaseParams.newBuilder()
+                    .setPurchaseToken(cleanToken)
+                    .build();
+            billingClient.acknowledgePurchase(params, billingResult -> runOnUiThread(() -> {
+                acknowledgementRequestsInFlight.remove(cleanToken);
+                if (billingResult != null
+                        && billingResult.getResponseCode() == BillingClient.BillingResponseCode.OK) {
+                    markPurchaseAcknowledged(cleanToken);
+                    android.util.Log.i("ToxicBilling", operation + ": purchase acknowledged");
+                    return;
+                }
+                logBillingResult(operation, billingResult);
+                if (isRetriableBillingResult(billingResult)) {
+                    scheduleAcknowledgementRetry(cleanToken, operation, attempt);
+                }
+            }));
+        } catch(Exception error) {
+            acknowledgementRequestsInFlight.remove(cleanToken);
+            android.util.Log.w("ToxicBilling", operation + ": acknowledge exception", error);
+            scheduleAcknowledgementRetry(cleanToken, operation, attempt);
+        }
+    }
+
+    private void retryPendingAcknowledgements() {
+        for (String token : new ArrayList<>(removeAdsTokensNeedingAcknowledgement)) {
+            acknowledgePurchaseWithRetry(token, "acknowledgeRemoveAds", 0);
+        }
+        if (supporterActive && !supporterPurchaseToken.isEmpty()
+                && supporterTokensNeedingAcknowledgement.contains(supporterPurchaseToken)) {
+            acknowledgePurchaseWithRetry(supporterPurchaseToken, "acknowledgeSupporter", 0);
+        }
+    }
+
+    private void loadCachedSupporterEntitlement() {
+        SharedPreferences preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
+        String token = preferences.getString(PREF_SUPPORTER_VERIFIED_TOKEN, "");
+        long verifiedUntil = preferences.getLong(PREF_SUPPORTER_VERIFIED_UNTIL_MS, 0L);
+        long expiresAt = preferences.getLong(PREF_SUPPORTER_VERIFIED_EXPIRES_AT_MS, 0L);
+        long now = System.currentTimeMillis();
+        if (token != null && !token.trim().isEmpty()
+                && verifiedUntil > now && (expiresAt <= 0L || expiresAt > now)) {
+            supporterPurchaseToken = token.trim();
+            supporterCachedAccessUntilMs = verifiedUntil;
+            supporterExpiresAtMs = expiresAt;
+            supporterActive = true;
+            supporterNextVerificationAtMs = now;
+            return;
+        }
+        clearCachedSupporterEntitlement();
+    }
+
+    private boolean hasUsableCachedSupporterEntitlement(String purchaseToken) {
+        return supporterActive
+                && purchaseToken != null
+                && purchaseToken.equals(supporterPurchaseToken)
+                && supporterCachedAccessUntilMs > System.currentTimeMillis()
+                && (supporterExpiresAtMs <= 0L || supporterExpiresAtMs > System.currentTimeMillis());
+    }
+
+    private void cacheConfirmedSupporterEntitlement(String purchaseToken) {
+        long now = System.currentTimeMillis();
+        long verifiedUntil = now + SUPPORTER_VERIFIED_CACHE_TTL_MS;
+        if (supporterExpiresAtMs > now) verifiedUntil = Math.min(verifiedUntil, supporterExpiresAtMs);
+        supporterCachedAccessUntilMs = verifiedUntil;
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .putString(PREF_SUPPORTER_VERIFIED_TOKEN, purchaseToken)
+                .putLong(PREF_SUPPORTER_VERIFIED_UNTIL_MS, verifiedUntil)
+                .putLong(PREF_SUPPORTER_VERIFIED_EXPIRES_AT_MS, supporterExpiresAtMs)
+                .apply();
+    }
+
+    private void clearCachedSupporterEntitlement() {
+        supporterCachedAccessUntilMs = 0L;
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                .remove(PREF_SUPPORTER_VERIFIED_TOKEN)
+                .remove(PREF_SUPPORTER_VERIFIED_UNTIL_MS)
+                .remove(PREF_SUPPORTER_VERIFIED_EXPIRES_AT_MS)
+                .apply();
+    }
+
+    private void markSupporterEntitlementPending() {
+        billingEntitlementCheckPending = true;
+        clearPendingProfileInterstitial();
+        clearPendingRewardedShow();
+        cancelInterstitialAdRetry();
+        cancelRewardedAdRetry();
+        destroyAllBannerAds();
+        interstitialAd = null;
+        rewardedAd = null;
+        interstitialLoading = false;
+        interstitialLoadStartedAt = 0L;
+        interstitialLoadedAt = 0L;
+        interstitialShowing = false;
+        interstitialShowStartedAt = 0L;
+        cancelInterstitialHealthCheck();
+        rewardedLoading = false;
+        runOnUiThread(() -> {
+            updateRewardButtonText();
+            updateSponsorsSubscribeButton();
+        });
+    }
+
+    private boolean isSupporterValidationPending() {
+        return billingEntitlementCheckPending
+                && !supporterActive
+                && supporterPurchaseToken != null
+                && !supporterPurchaseToken.isEmpty();
+    }
+
     private void initBillingClient() {
         try {
             billingClient = BillingClient.newBuilder(this)
                     .setListener(new PurchasesUpdatedListener() {
                         @Override public void onPurchasesUpdated(BillingResult billingResult, List<Purchase> purchases) {
                             int code = billingResult == null ? BillingClient.BillingResponseCode.ERROR : billingResult.getResponseCode();
-                            if (code == BillingClient.BillingResponseCode.OK && purchases != null) {
-                                handleRemoveAdsPurchases(purchases, true);
-                                handleSupporterPurchases(purchases, true);
+                            if (code == BillingClient.BillingResponseCode.OK) {
+                                if (purchases != null && !purchases.isEmpty()) {
+                                    handleRemoveAdsPurchases(purchases, true);
+                                    handleSupporterPurchases(purchases, true);
+                                } else {
+                                    queryRemoveAdsPurchases();
+                                    querySupporterPurchases();
+                                }
                             } else if (code != BillingClient.BillingResponseCode.USER_CANCELED) {
-                                showBillingFailure("onPurchasesUpdated", billingResult);
+                                if (isRetriableBillingResult(billingResult)) {
+                                    logBillingResult("onPurchasesUpdated", billingResult);
+                                    scheduleRemoveAdsPurchaseQueryRetry(billingResult);
+                                    scheduleSupporterPurchaseQueryRetry(billingResult);
+                                } else {
+                                    showBillingFailure("onPurchasesUpdated", billingResult);
+                                }
                             }
                         }
                     })
@@ -1680,12 +2020,14 @@ public class MainActivity extends Activity {
             }
             if (billingClient.isReady()) {
                 billingReady = true;
+                resetBillingConnectionRetry();
                 if (pendingRemoveAdsPurchaseLaunch && removeAdsProductDetails == null) {
                     queryRemoveAdsProductDetails();
                 }
                 if (pendingSupporterPurchaseLaunch && supporterProductDetails == null) {
                     querySupporterProductDetails();
                 }
+                retryPendingAcknowledgements();
                 return;
             }
             billingReady = false;
@@ -1698,32 +2040,37 @@ public class MainActivity extends Activity {
                     billingConnecting = false;
                     billingReady = billingResult != null && billingResult.getResponseCode() == BillingClient.BillingResponseCode.OK;
                     if (billingReady) {
+                        resetBillingConnectionRetry();
                         queryRemoveAdsProductDetails();
                         querySupporterProductDetails();
                         queryRemoveAdsPurchases();
                         querySupporterPurchases();
+                        retryPendingAcknowledgements();
                         if (pendingRemoveAdsPurchaseLaunch && removeAdsProductDetails != null) runOnUiThread(() -> launchRemoveAdsPurchase());
                         if (pendingSupporterPurchaseLaunch && supporterProductDetails != null) runOnUiThread(() -> launchSupporterPurchase());
                     } else {
-                        boolean purchaseWasPending = pendingRemoveAdsPurchaseLaunch || pendingSupporterPurchaseLaunch;
-                        pendingRemoveAdsPurchaseLaunch = false;
-                        pendingSupporterPurchaseLaunch = false;
-                        if (purchaseWasPending) showBillingFailure("onBillingSetupFinished", billingResult);
+                        if (isRetriableBillingResult(billingResult)) {
+                            scheduleBillingConnectionRetry(billingResult);
+                        } else {
+                            boolean purchaseWasPending = pendingRemoveAdsPurchaseLaunch || pendingSupporterPurchaseLaunch;
+                            pendingRemoveAdsPurchaseLaunch = false;
+                            pendingSupporterPurchaseLaunch = false;
+                            if (purchaseWasPending) showBillingFailure("onBillingSetupFinished", billingResult);
+                            else logBillingResult("onBillingSetupFinished", billingResult);
+                        }
                     }
                 }
                 @Override public void onBillingServiceDisconnected() {
                     billingConnecting = false;
                     billingReady = false;
+                    scheduleBillingConnectionRetry(null);
                 }
             });
         } catch(Exception e) {
             billingConnecting = false;
             billingReady = false;
-            boolean purchaseWasPending = pendingRemoveAdsPurchaseLaunch || pendingSupporterPurchaseLaunch;
-            pendingRemoveAdsPurchaseLaunch = false;
-            pendingSupporterPurchaseLaunch = false;
             android.util.Log.w("ToxicBilling", "startConnection exception", e);
-            if (purchaseWasPending) showBillingFailure("startConnection", null);
+            scheduleBillingConnectionRetry(null);
         }
     }
 
@@ -1743,14 +2090,16 @@ public class MainActivity extends Activity {
                 @Override public void onProductDetailsResponse(BillingResult billingResult, QueryProductDetailsResult result) {
                     removeAdsProductDetailsQueryRunning = false;
                     if (billingResult == null || billingResult.getResponseCode() != BillingClient.BillingResponseCode.OK || result == null) {
+                        logBillingResult("queryRemoveAdsProductDetails", billingResult);
+                        if (scheduleRemoveAdsProductDetailsRetry(billingResult)) return;
+                        resetRemoveAdsProductDetailsRetry();
                         if (pendingRemoveAdsPurchaseLaunch) {
                             pendingRemoveAdsPurchaseLaunch = false;
                             showBillingFailure("queryRemoveAdsProductDetails", billingResult);
-                        } else {
-                            logBillingResult("queryRemoveAdsProductDetails", billingResult);
                         }
                         return;
                     }
+                    resetRemoveAdsProductDetailsRetry();
                     List<ProductDetails> list = result.getProductDetailsList();
                     ProductDetails matchingProduct = null;
                     if (list != null) {
@@ -1784,7 +2133,8 @@ public class MainActivity extends Activity {
         } catch(Exception e) {
             removeAdsProductDetailsQueryRunning = false;
             android.util.Log.w("ToxicBilling", "queryRemoveAdsProductDetails exception", e);
-            if (pendingRemoveAdsPurchaseLaunch) {
+            if (!scheduleRemoveAdsProductDetailsRetry(null) && pendingRemoveAdsPurchaseLaunch) {
+                resetRemoveAdsProductDetailsRetry();
                 pendingRemoveAdsPurchaseLaunch = false;
                 showBillingFailure("queryRemoveAdsProductDetails", null);
             }
@@ -1807,6 +2157,9 @@ public class MainActivity extends Activity {
                 @Override public void onProductDetailsResponse(BillingResult billingResult, QueryProductDetailsResult result) {
                     supporterProductDetailsQueryRunning = false;
                     if (billingResult == null || billingResult.getResponseCode() != BillingClient.BillingResponseCode.OK || result == null) {
+                        logBillingResult("querySupporterProductDetails", billingResult);
+                        if (scheduleSupporterProductDetailsRetry(billingResult)) return;
+                        resetSupporterProductDetailsRetry();
                         if (pendingSupporterPurchaseLaunch) {
                             pendingSupporterPurchaseLaunch = false;
                             if (billingResult != null
@@ -1815,11 +2168,10 @@ public class MainActivity extends Activity {
                             } else {
                                 showBillingFailure("querySupporterProductDetails", billingResult);
                             }
-                        } else {
-                            logBillingResult("querySupporterProductDetails", billingResult);
                         }
                         return;
                     }
+                    resetSupporterProductDetailsRetry();
                     ProductDetails matchingSupporter = null;
                     List<ProductDetails> list = result.getProductDetailsList();
                     if (list != null) {
@@ -1854,7 +2206,8 @@ public class MainActivity extends Activity {
         } catch(Exception e) {
             supporterProductDetailsQueryRunning = false;
             android.util.Log.w("ToxicBilling", "querySupporterProductDetails exception", e);
-            if (pendingSupporterPurchaseLaunch) {
+            if (!scheduleSupporterProductDetailsRetry(null) && pendingSupporterPurchaseLaunch) {
+                resetSupporterProductDetailsRetry();
                 pendingSupporterPurchaseLaunch = false;
                 showBillingFailure("querySupporterProductDetails", null);
             }
@@ -1863,57 +2216,117 @@ public class MainActivity extends Activity {
 
     private void queryRemoveAdsPurchases() {
         try {
-            if (billingClient == null || !billingClient.isReady()) return;
+            if (billingClient == null || !billingClient.isReady()) {
+                ensureBillingReady();
+                return;
+            }
+            if (removeAdsPurchaseQueryRunning) return;
+            removeAdsPurchaseQueryRunning = true;
+            final long queryGeneration = removeAdsEntitlementGeneration;
             QueryPurchasesParams params = QueryPurchasesParams.newBuilder()
                     .setProductType(BillingClient.ProductType.INAPP)
                     .build();
             billingClient.queryPurchasesAsync(params, (billingResult, purchases) -> {
-                if (billingResult == null || billingResult.getResponseCode() != BillingClient.BillingResponseCode.OK) return;
-                boolean owned = false;
+                removeAdsPurchaseQueryRunning = false;
+                if (billingResult == null
+                        || billingResult.getResponseCode() != BillingClient.BillingResponseCode.OK) {
+                    scheduleRemoveAdsPurchaseQueryRetry(billingResult);
+                    return;
+                }
+                if (queryGeneration != removeAdsEntitlementGeneration) {
+                    resetRemoveAdsPurchaseQueryRetry();
+                    android.util.Log.i("ToxicBilling", "Ignored stale remove_ads purchase query");
+                    return;
+                }
+                Purchase latestPurchase = null;
                 if (purchases != null) {
                     for (Purchase purchase : purchases) {
-                        if (isRemoveAdsPurchase(purchase) && purchase.getPurchaseState() == Purchase.PurchaseState.PURCHASED) {
-                            owned = true;
+                        if (isRemoveAdsPurchase(purchase)
+                                && purchase.getPurchaseState() == Purchase.PurchaseState.PURCHASED
+                                && (latestPurchase == null
+                                || purchase.getPurchaseTime() > latestPurchase.getPurchaseTime())) {
+                            latestPurchase = purchase;
                         }
                     }
-                    handleRemoveAdsPurchases(purchases, false);
                 }
-                setRemoveAdsPurchased(owned);
+                if (latestPurchase != null) {
+                    resetRemoveAdsPurchaseQueryRetry();
+                    handleRemoveAdsPurchases(Collections.singletonList(latestPurchase), false);
+                } else if (System.currentTimeMillis() - removeAdsLastPurchaseEventAtMs
+                        < PURCHASE_EVENT_STABILIZATION_MS) {
+                    android.util.Log.i("ToxicBilling", "Delaying empty remove_ads result after purchase event");
+                    scheduleRemoveAdsPurchaseQueryRetry(null);
+                } else if (queryGeneration == removeAdsEntitlementGeneration) {
+                    resetRemoveAdsPurchaseQueryRetry();
+                    removeAdsEntitlementGeneration++;
+                    removeAdsPurchaseToken = "";
+                    setRemoveAdsPurchased(false);
+                }
             });
-        } catch(Exception ignored) {}
+        } catch(Exception error) {
+            removeAdsPurchaseQueryRunning = false;
+            android.util.Log.w("ToxicBilling", "queryRemoveAdsPurchases exception", error);
+            scheduleRemoveAdsPurchaseQueryRetry(null);
+        }
     }
 
     private void querySupporterPurchases() {
         try {
-            if (billingClient == null || !billingClient.isReady() || supporterPurchaseQueryRunning) return;
+            if (billingClient == null || !billingClient.isReady()) {
+                ensureBillingReady();
+                return;
+            }
+            if (supporterPurchaseQueryRunning) return;
             supporterPurchaseQueryRunning = true;
+            final long queryGeneration = supporterEntitlementGeneration;
             QueryPurchasesParams params = QueryPurchasesParams.newBuilder()
                     .setProductType(BillingClient.ProductType.SUBS)
                     .build();
             billingClient.queryPurchasesAsync(params, (billingResult, purchases) -> {
                 supporterPurchaseQueryRunning = false;
-                if (billingResult == null || billingResult.getResponseCode() != BillingClient.BillingResponseCode.OK) return;
-                boolean owned = false;
+                if (billingResult == null
+                        || billingResult.getResponseCode() != BillingClient.BillingResponseCode.OK) {
+                    scheduleSupporterPurchaseQueryRetry(billingResult);
+                    return;
+                }
+                if (queryGeneration != supporterEntitlementGeneration) {
+                    resetSupporterPurchaseQueryRetry();
+                    android.util.Log.i("ToxicBilling", "Ignored stale supporter purchase query");
+                    return;
+                }
+                Purchase latestPurchase = null;
                 if (purchases != null) {
                     for (Purchase purchase : purchases) {
                         if (isSupporterPurchase(purchase)
-                                && purchase.getPurchaseState() == Purchase.PurchaseState.PURCHASED) {
-                            owned = true;
-                            break;
+                                && purchase.getPurchaseState() == Purchase.PurchaseState.PURCHASED
+                                && (latestPurchase == null
+                                || purchase.getPurchaseTime() > latestPurchase.getPurchaseTime())) {
+                            latestPurchase = purchase;
                         }
                     }
-                    handleSupporterPurchases(purchases, false);
                 }
-                if (!owned) {
+                if (latestPurchase != null) {
+                    resetSupporterPurchaseQueryRetry();
+                    handleSupporterPurchases(Collections.singletonList(latestPurchase), false);
+                } else if (System.currentTimeMillis() - supporterLastPurchaseEventAtMs
+                        < PURCHASE_EVENT_STABILIZATION_MS) {
+                    android.util.Log.i("ToxicBilling", "Delaying empty supporter result after purchase event");
+                    scheduleSupporterPurchaseQueryRetry(null);
+                } else if (queryGeneration == supporterEntitlementGeneration) {
+                    resetSupporterPurchaseQueryRetry();
+                    supporterEntitlementGeneration++;
                     cancelSupporterStatusRetry();
                     supporterPurchaseToken = "";
                     supporterExpiresAtMs = 0L;
                     supporterNextVerificationAtMs = 0L;
+                    clearCachedSupporterEntitlement();
                     finishBillingEntitlementCheck(false);
                 }
             });
-        } catch(Exception ignored) {
+        } catch(Exception error) {
             supporterPurchaseQueryRunning = false;
+            android.util.Log.w("ToxicBilling", "querySupporterPurchases exception", error);
+            scheduleSupporterPurchaseQueryRetry(null);
         }
     }
 
@@ -1929,47 +2342,53 @@ public class MainActivity extends Activity {
 
     private void handleSupporterPurchases(List<Purchase> purchases, boolean showToast) {
         if (purchases == null) return;
+        Purchase latestPurchase = null;
+        boolean hasPendingPurchase = false;
         for (Purchase purchase : purchases) {
             if (!isSupporterPurchase(purchase)) continue;
-            if (purchase.getPurchaseState() == Purchase.PurchaseState.PURCHASED) {
-                String purchaseToken = purchase.getPurchaseToken() == null
-                        ? ""
-                        : purchase.getPurchaseToken().trim();
-                if (purchaseToken.isEmpty()) continue;
-                if (!purchaseToken.equals(supporterPurchaseToken)) cancelSupporterStatusRetry();
-                supporterPurchaseToken = purchaseToken;
-                billingEntitlementCheckPending = true;
-                if (billingEntitlementTimeoutRunnable != null) {
-                    uiHandler.removeCallbacks(billingEntitlementTimeoutRunnable);
-                    billingEntitlementTimeoutRunnable = null;
-                }
-                if (showToast) {
-                    getSharedPreferences(PREFS, MODE_PRIVATE)
-                            .edit()
-                            .putBoolean(PREF_SUPPORTER_TUTORIAL_PENDING, true)
-                            .apply();
-                }
-                if (!purchase.isAcknowledged() && billingClient != null) {
-                    try {
-                        AcknowledgePurchaseParams params = AcknowledgePurchaseParams.newBuilder()
-                                .setPurchaseToken(purchase.getPurchaseToken())
-                                .build();
-                        billingClient.acknowledgePurchase(params, billingResult -> {});
-                    } catch(Exception ignored) {}
-                }
-                syncSupporterStatusWithBackend(supporterPurchaseToken, showToast);
-            } else if (purchase.getPurchaseState() == Purchase.PurchaseState.PENDING && showToast) {
-                runOnUiThread(() -> toast(t(R.string.supporter_pending)));
+            if (purchase.getPurchaseState() == Purchase.PurchaseState.PURCHASED
+                    && (latestPurchase == null
+                    || purchase.getPurchaseTime() > latestPurchase.getPurchaseTime())) {
+                latestPurchase = purchase;
+            } else if (purchase.getPurchaseState() == Purchase.PurchaseState.PENDING) {
+                hasPendingPurchase = true;
             }
         }
+        if (latestPurchase == null) {
+            if (hasPendingPurchase && showToast) {
+                runOnUiThread(() -> toast(t(R.string.supporter_pending)));
+            }
+            return;
+        }
+
+        String purchaseToken = latestPurchase.getPurchaseToken() == null
+                ? ""
+                : latestPurchase.getPurchaseToken().trim();
+        if (purchaseToken.isEmpty()) return;
+        boolean newerPurchaseEvent = showToast || !purchaseToken.equals(supporterPurchaseToken);
+        if (newerPurchaseEvent) {
+            supporterEntitlementGeneration++;
+            cancelSupporterStatusRetry();
+        }
+        if (showToast) supporterLastPurchaseEventAtMs = System.currentTimeMillis();
+        supporterPurchaseToken = purchaseToken;
+        if (latestPurchase.isAcknowledged()) {
+            markPurchaseAcknowledged(purchaseToken);
+        } else {
+            supporterTokensNeedingAcknowledgement.add(purchaseToken);
+        }
+        markSupporterEntitlementPending();
+        if (showToast) {
+            getSharedPreferences(PREFS, MODE_PRIVATE)
+                    .edit()
+                    .putBoolean(PREF_SUPPORTER_TUTORIAL_PENDING, true)
+                    .apply();
+        }
+        syncSupporterStatusWithBackend(purchaseToken, showToast);
     }
 
     private void finishBillingEntitlementCheck(boolean supporterOwned) {
         billingEntitlementCheckPending = false;
-        if (billingEntitlementTimeoutRunnable != null) {
-            uiHandler.removeCallbacks(billingEntitlementTimeoutRunnable);
-            billingEntitlementTimeoutRunnable = null;
-        }
         setSupporterActive(supporterOwned);
         if (!hasAdFreeAccess()) {
             preloadBannerAds();
@@ -2018,17 +2437,26 @@ public class MainActivity extends Activity {
     }
 
     private void refreshSupporterEntitlementIfNeeded() {
-        if (!supporterActive || !appInForeground) return;
+        if (!appInForeground) return;
         long now = System.currentTimeMillis();
-        if (supporterExpiresAtMs > 0L && now >= supporterExpiresAtMs) {
+        if (supporterActive && supporterExpiresAtMs > 0L && now >= supporterExpiresAtMs) {
             supporterExpiresAtMs = 0L;
             supporterNextVerificationAtMs = now + 60_000L;
+            clearCachedSupporterEntitlement();
+            markSupporterEntitlementPending();
             setSupporterActive(false);
             querySupporterPurchases();
             return;
         }
-        if (now >= supporterNextVerificationAtMs) {
+        if (supporterActive && supporterCachedAccessUntilMs > 0L
+                && now >= supporterCachedAccessUntilMs) {
+            supporterNextVerificationAtMs = now;
+            markSupporterEntitlementPending();
+            setSupporterActive(false);
+        }
+        if (!supporterPurchaseToken.isEmpty() && now >= supporterNextVerificationAtMs) {
             supporterNextVerificationAtMs = now + SUPPORTER_REVERIFY_INTERVAL_MS;
+            markSupporterEntitlementPending();
             querySupporterPurchases();
         }
     }
@@ -2064,6 +2492,11 @@ public class MainActivity extends Activity {
                 showSupporterManageDialog();
                 return;
             }
+            if (isSupporterValidationPending()) {
+                toast(t(R.string.supporter_validation_pending));
+                querySupporterPurchases();
+                return;
+            }
             if (billingClient == null || !billingClient.isReady()) {
                 pendingSupporterPurchaseLaunch = true;
                 ensureBillingReady();
@@ -2076,6 +2509,7 @@ public class MainActivity extends Activity {
             }
             if (supporterProductDetails == null) {
                 pendingSupporterPurchaseLaunch = true;
+                resetSupporterProductDetailsRetry();
                 querySupporterProductDetails();
                 return;
             }
@@ -2096,6 +2530,7 @@ public class MainActivity extends Activity {
             BillingResult result = billingClient.launchBillingFlow(this, flowParams);
             if (result == null || result.getResponseCode() != BillingClient.BillingResponseCode.OK) {
                 if (result != null && result.getResponseCode() == BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED) {
+                    supporterLastPurchaseEventAtMs = System.currentTimeMillis();
                     querySupporterPurchases();
                 } else {
                     showBillingFailure("launchSupporterBillingFlow", result);
@@ -2114,23 +2549,43 @@ public class MainActivity extends Activity {
 
     private void handleRemoveAdsPurchases(List<Purchase> purchases, boolean showToast) {
         if (purchases == null) return;
+        Purchase latestPurchase = null;
+        boolean hasPendingPurchase = false;
         for (Purchase purchase : purchases) {
             if (!isRemoveAdsPurchase(purchase)) continue;
-            if (purchase.getPurchaseState() == Purchase.PurchaseState.PURCHASED) {
-                setRemoveAdsPurchased(true);
-                if (!purchase.isAcknowledged()) {
-                    try {
-                        AcknowledgePurchaseParams params = AcknowledgePurchaseParams.newBuilder()
-                                .setPurchaseToken(purchase.getPurchaseToken())
-                                .build();
-                        billingClient.acknowledgePurchase(params, billingResult -> {});
-                    } catch(Exception ignored) {}
-                }
-                if (showToast) runOnUiThread(() -> toast(t(R.string.remove_ads_purchased)));
-            } else if (purchase.getPurchaseState() == Purchase.PurchaseState.PENDING && showToast) {
-                runOnUiThread(() -> toast(t(R.string.purchase_pending)));
+            if (purchase.getPurchaseState() == Purchase.PurchaseState.PURCHASED
+                    && (latestPurchase == null
+                    || purchase.getPurchaseTime() > latestPurchase.getPurchaseTime())) {
+                latestPurchase = purchase;
+            } else if (purchase.getPurchaseState() == Purchase.PurchaseState.PENDING) {
+                hasPendingPurchase = true;
             }
         }
+        if (latestPurchase == null) {
+            if (hasPendingPurchase && showToast) {
+                runOnUiThread(() -> toast(t(R.string.purchase_pending)));
+            }
+            return;
+        }
+
+        String purchaseToken = latestPurchase.getPurchaseToken() == null
+                ? ""
+                : latestPurchase.getPurchaseToken().trim();
+        if (showToast || !purchaseToken.equals(removeAdsPurchaseToken)) {
+            removeAdsEntitlementGeneration++;
+        }
+        if (showToast) removeAdsLastPurchaseEventAtMs = System.currentTimeMillis();
+        removeAdsPurchaseToken = purchaseToken;
+        setRemoveAdsPurchased(true);
+        if (!purchaseToken.isEmpty()) {
+            if (latestPurchase.isAcknowledged()) {
+                markPurchaseAcknowledged(purchaseToken);
+            } else {
+                removeAdsTokensNeedingAcknowledgement.add(purchaseToken);
+                acknowledgePurchaseWithRetry(purchaseToken, "acknowledgeRemoveAds", 0);
+            }
+        }
+        if (showToast) runOnUiThread(() -> toast(t(R.string.remove_ads_purchased)));
     }
 
     private void setRemoveAdsPurchased(boolean purchased) {
@@ -2172,6 +2627,7 @@ public class MainActivity extends Activity {
             }
             if (removeAdsProductDetails == null) {
                 pendingRemoveAdsPurchaseLaunch = true;
+                resetRemoveAdsProductDetailsRetry();
                 queryRemoveAdsProductDetails();
                 return;
             }
@@ -2193,6 +2649,7 @@ public class MainActivity extends Activity {
             BillingResult result = billingClient.launchBillingFlow(this, flowParams);
             if (result == null || result.getResponseCode() != BillingClient.BillingResponseCode.OK) {
                 if (result != null && result.getResponseCode() == BillingClient.BillingResponseCode.ITEM_ALREADY_OWNED) {
+                    removeAdsLastPurchaseEventAtMs = System.currentTimeMillis();
                     queryRemoveAdsPurchases();
                 } else {
                     pendingRemoveAdsPurchaseLaunch = false;
@@ -2590,12 +3047,23 @@ public class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        activityDestroyed = true;
         saveAdFreeUntil();
         cancelTutorialPulseAnimation();
         stopAccessGateMonitoring();
         if (suggestionDebounceTask != null) uiHandler.removeCallbacks(suggestionDebounceTask);
-        if (billingEntitlementTimeoutRunnable != null) uiHandler.removeCallbacks(billingEntitlementTimeoutRunnable);
         cancelSupporterStatusRetry();
+        resetBillingConnectionRetry();
+        resetRemoveAdsProductDetailsRetry();
+        resetSupporterProductDetailsRetry();
+        resetRemoveAdsPurchaseQueryRetry();
+        resetSupporterPurchaseQueryRetry();
+        for (Runnable retry : new ArrayList<>(acknowledgementRetryRunnables.values())) {
+            uiHandler.removeCallbacks(retry);
+        }
+        acknowledgementRetryRunnables.clear();
+        acknowledgementRequestsInFlight.clear();
+        supporterStatusRequestsInFlight.clear();
         uiHandler.removeCallbacks(adFreeTicker);
         cancelInterstitialAdRetry();
         cancelInterstitialHealthCheck();
@@ -3290,14 +3758,18 @@ public class MainActivity extends Activity {
 
     private void updateSponsorsSubscribeButton() {
         if (sponsorsSubscribeButton == null) return;
+        boolean validationPending = isSupporterValidationPending();
         if (sponsorsActionIcon != null) {
-            sponsorsActionIcon.setText(supporterActive ? "✦" : "+");
-            sponsorsActionIcon.setTextSize(supporterActive ? 26 : 34);
+            sponsorsActionIcon.setText(supporterActive ? "✦" : (validationPending ? "…" : "+"));
+            sponsorsActionIcon.setTextSize(supporterActive ? 26 : (validationPending ? 28 : 34));
         }
         if (sponsorsActionGlow != null) sponsorsActionGlow.invalidate();
-        sponsorsSubscribeButton.setContentDescription(t(supporterActive
+        int description = supporterActive
                 ? R.string.supporter_manage
-                : R.string.supporter_subscribe));
+                : (validationPending
+                ? R.string.supporter_validation_pending
+                : R.string.supporter_subscribe);
+        sponsorsSubscribeButton.setContentDescription(t(description));
     }
 
     private void refreshSponsors() {
@@ -3434,7 +3906,13 @@ public class MainActivity extends Activity {
         FrameLayout.LayoutParams glowParams = new FrameLayout.LayoutParams(dp(74), dp(74), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
         avatarHost.addView(glow, glowParams);
 
-        sponsorsActionIcon = text(supporterActive ? "✦" : "+", supporterActive ? 26 : 34, Color.WHITE, true);
+        boolean validationPending = isSupporterValidationPending();
+        sponsorsActionIcon = text(
+                supporterActive ? "✦" : (validationPending ? "…" : "+"),
+                supporterActive ? 26 : (validationPending ? 28 : 34),
+                Color.WHITE,
+                true
+        );
         sponsorsActionIcon.setGravity(Gravity.CENTER);
         sponsorsActionIcon.setIncludeFontPadding(false);
         FrameLayout.LayoutParams iconParams = new FrameLayout.LayoutParams(dp(70), dp(70), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
@@ -3445,7 +3923,10 @@ public class MainActivity extends Activity {
         updateSponsorsSubscribeButton();
         item.setOnClickListener(v -> {
             if (supporterActive) showSupporterManageDialog();
-            else showSupporterOfferDialog();
+            else if (isSupporterValidationPending()) {
+                toast(t(R.string.supporter_validation_pending));
+                querySupporterPurchases();
+            } else showSupporterOfferDialog();
         });
         return item;
     }
@@ -3453,6 +3934,11 @@ public class MainActivity extends Activity {
     private void showSupporterOfferDialog() {
         if (supporterActive) {
             showSupporterManageDialog();
+            return;
+        }
+        if (isSupporterValidationPending()) {
+            toast(t(R.string.supporter_validation_pending));
+            querySupporterPurchases();
             return;
         }
         final Dialog dialog = new Dialog(this);
@@ -3720,76 +4206,179 @@ public class MainActivity extends Activity {
     }
 
     private void syncSupporterStatusWithBackend(String purchaseToken, boolean showActivation) {
+        if (purchaseToken == null || purchaseToken.trim().isEmpty()) return;
+        long generation = supporterEntitlementGeneration;
+        if (supporterStatusRequestsInFlight.contains(generation)) return;
         cancelSupporterStatusRetry();
-        syncSupporterStatusWithBackend(purchaseToken, showActivation, 0);
+        syncSupporterStatusWithBackend(purchaseToken.trim(), showActivation, 0, generation);
     }
 
-    private void syncSupporterStatusWithBackend(String purchaseToken, boolean showActivation, int attempt) {
-        if (purchaseToken == null || purchaseToken.trim().isEmpty() || supporterStatusRequestRunning) return;
+    private boolean isCurrentSupporterRequest(String purchaseToken, long generation) {
+        return !activityDestroyed
+                && purchaseToken != null
+                && purchaseToken.equals(supporterPurchaseToken)
+                && generation == supporterEntitlementGeneration;
+    }
+
+    private void syncSupporterStatusWithBackend(
+            String purchaseToken,
+            boolean showActivation,
+            int attempt,
+            long generation
+    ) {
+        if (purchaseToken == null || purchaseToken.trim().isEmpty()
+                || !isCurrentSupporterRequest(purchaseToken.trim(), generation)
+                || supporterStatusRequestsInFlight.contains(generation)) return;
         final String cleanToken = purchaseToken.trim();
-        supporterStatusRequestRunning = true;
-        executor.execute(() -> {
-            try {
-                JSONObject payload = new JSONObject();
-                payload.put("purchaseToken", cleanToken);
-                JSONObject response = postJsonObject(PROFILE_API + "/sponsors/status", payload);
-                boolean active = response.optBoolean("active", false);
-                applySupporterStatus(response);
-                if (!active && scheduleSupporterStatusRetry(cleanToken, showActivation, attempt)) return;
-                cancelSupporterStatusRetry();
-                supporterNextVerificationAtMs = System.currentTimeMillis() + SUPPORTER_REVERIFY_INTERVAL_MS;
-                runOnUiThread(() -> {
-                    // A compra local apenas fornece o token. O direito e a
-                    // remoção de anúncios dependem desta confirmação segura.
-                    finishBillingEntitlementCheck(active);
-                    if (active && showActivation) toast(t(R.string.supporter_activated));
-                    refreshSponsors();
-                    if (active) uiHandler.postDelayed(this::maybeShowSupporterTutorial, 650L);
-                });
-            } catch(ApiHttpException error) {
-                boolean definitiveRejection = error.statusCode == 401
-                        || error.statusCode == 403
-                        || error.statusCode == 410;
-                if (!definitiveRejection
-                        && scheduleSupporterStatusRetry(cleanToken, showActivation, attempt)) {
-                    android.util.Log.i(
-                            "ToxicBilling",
-                            "Supporter validation retry scheduled after HTTP " + error.statusCode
-                    );
-                    return;
+        supporterStatusRequestsInFlight.add(generation);
+        try {
+            executor.execute(() -> {
+                try {
+                    JSONObject payload = new JSONObject();
+                    payload.put("purchaseToken", cleanToken);
+                    JSONObject response = postJsonObject(PROFILE_API + "/sponsors/status", payload);
+                    runOnUiThread(() -> handleSupporterStatusResponse(
+                            cleanToken,
+                            showActivation,
+                            attempt,
+                            generation,
+                            response
+                    ));
+                } catch(ApiHttpException error) {
+                    runOnUiThread(() -> handleSupporterStatusHttpFailure(
+                            cleanToken,
+                            showActivation,
+                            attempt,
+                            generation,
+                            error
+                    ));
+                } catch(Exception error) {
+                    runOnUiThread(() -> handleSupporterStatusFailure(
+                            cleanToken,
+                            showActivation,
+                            attempt,
+                            generation,
+                            error
+                    ));
                 }
-                cancelSupporterStatusRetry();
-                supporterNextVerificationAtMs = System.currentTimeMillis() + 2L * 60L * 1000L;
-                if (definitiveRejection) {
-                    runOnUiThread(() -> finishBillingEntitlementCheck(false));
-                } else {
-                    runOnUiThread(() -> {
-                        // Em uma falha temporária, conserva somente um direito
-                        // que já havia sido confirmado nesta execução.
-                        finishBillingEntitlementCheck(supporterActive);
-                        if (showActivation) toast(t(R.string.supporter_server_unavailable));
-                    });
-                }
-            } catch(Exception error) {
-                if (scheduleSupporterStatusRetry(cleanToken, showActivation, attempt)) {
-                    android.util.Log.i("ToxicBilling", "Supporter validation retry scheduled", error);
-                    return;
-                }
-                cancelSupporterStatusRetry();
-                supporterNextVerificationAtMs = System.currentTimeMillis() + 2L * 60L * 1000L;
-                runOnUiThread(() -> {
-                    finishBillingEntitlementCheck(supporterActive);
-                    if (showActivation) toast(t(R.string.supporter_server_unavailable));
-                });
-            } finally {
-                supporterStatusRequestRunning = false;
-            }
-        });
+            });
+        } catch(Exception error) {
+            supporterStatusRequestsInFlight.remove(generation);
+            handleSupporterStatusFailure(cleanToken, showActivation, attempt, generation, error);
+        }
     }
 
-    private boolean scheduleSupporterStatusRetry(String purchaseToken, boolean showActivation, int attempt) {
+    private void handleSupporterStatusResponse(
+            String purchaseToken,
+            boolean showActivation,
+            int attempt,
+            long generation,
+            JSONObject response
+    ) {
+        supporterStatusRequestsInFlight.remove(generation);
+        if (!isCurrentSupporterRequest(purchaseToken, generation)) return;
+        boolean active = response != null && response.optBoolean("active", false);
+        if (!active && scheduleSupporterStatusRetry(purchaseToken, showActivation, attempt, generation)) {
+            return;
+        }
+
+        cancelSupporterStatusRetry();
+        applySupporterStatus(response);
+        supporterEntitlementGeneration++;
+        long acceptedGeneration = supporterEntitlementGeneration;
+        if (active) {
+            cacheConfirmedSupporterEntitlement(purchaseToken);
+            supporterNextVerificationAtMs = System.currentTimeMillis() + SUPPORTER_REVERIFY_INTERVAL_MS;
+            finishBillingEntitlementCheck(true);
+            if (supporterTokensNeedingAcknowledgement.contains(purchaseToken)) {
+                acknowledgePurchaseWithRetry(purchaseToken, "acknowledgeSupporter", 0);
+            }
+            if (showActivation) toast(t(R.string.supporter_activated));
+            refreshSponsors();
+            uiHandler.postDelayed(this::maybeShowSupporterTutorial, 650L);
+        } else {
+            clearCachedSupporterEntitlement();
+            markSupporterEntitlementPending();
+            setSupporterActive(false);
+            scheduleDeferredSupporterReverification(purchaseToken, acceptedGeneration);
+        }
+    }
+
+    private void handleSupporterStatusHttpFailure(
+            String purchaseToken,
+            boolean showActivation,
+            int attempt,
+            long generation,
+            ApiHttpException error
+    ) {
+        supporterStatusRequestsInFlight.remove(generation);
+        if (!isCurrentSupporterRequest(purchaseToken, generation)) return;
+        boolean definitiveRejection = error.statusCode == 401
+                || error.statusCode == 403
+                || error.statusCode == 410;
+        if (!definitiveRejection
+                && scheduleSupporterStatusRetry(purchaseToken, showActivation, attempt, generation)) {
+            android.util.Log.i(
+                    "ToxicBilling",
+                    "Supporter validation retry scheduled after HTTP " + error.statusCode
+            );
+            return;
+        }
+        if (definitiveRejection) {
+            cancelSupporterStatusRetry();
+            supporterEntitlementGeneration++;
+            clearCachedSupporterEntitlement();
+            supporterNextVerificationAtMs = System.currentTimeMillis() + SUPPORTER_REVERIFY_INTERVAL_MS;
+            finishBillingEntitlementCheck(false);
+            return;
+        }
+        finishTemporarySupporterValidationFailure(purchaseToken, showActivation, generation);
+    }
+
+    private void handleSupporterStatusFailure(
+            String purchaseToken,
+            boolean showActivation,
+            int attempt,
+            long generation,
+            Exception error
+    ) {
+        supporterStatusRequestsInFlight.remove(generation);
+        if (!isCurrentSupporterRequest(purchaseToken, generation)) return;
+        if (scheduleSupporterStatusRetry(purchaseToken, showActivation, attempt, generation)) {
+            android.util.Log.i("ToxicBilling", "Supporter validation retry scheduled", error);
+            return;
+        }
+        android.util.Log.w("ToxicBilling", "Supporter validation failed", error);
+        finishTemporarySupporterValidationFailure(purchaseToken, showActivation, generation);
+    }
+
+    private void finishTemporarySupporterValidationFailure(
+            String purchaseToken,
+            boolean showActivation,
+            long generation
+    ) {
+        if (!isCurrentSupporterRequest(purchaseToken, generation)) return;
+        cancelSupporterStatusRetry();
+        boolean keepConfirmedAccess = hasUsableCachedSupporterEntitlement(purchaseToken);
+        if (keepConfirmedAccess) {
+            finishBillingEntitlementCheck(true);
+        } else {
+            clearCachedSupporterEntitlement();
+            markSupporterEntitlementPending();
+            setSupporterActive(false);
+        }
+        if (showActivation) toast(t(R.string.supporter_validation_pending));
+        scheduleDeferredSupporterReverification(purchaseToken, generation);
+    }
+
+    private boolean scheduleSupporterStatusRetry(
+            String purchaseToken,
+            boolean showActivation,
+            int attempt,
+            long generation
+    ) {
         if (purchaseToken == null
-                || !purchaseToken.equals(supporterPurchaseToken)
+                || !isCurrentSupporterRequest(purchaseToken, generation)
                 || attempt >= SUPPORTER_STATUS_RETRY_DELAYS_MS.length) return false;
 
         cancelSupporterStatusRetry();
@@ -3797,11 +4386,25 @@ public class MainActivity extends Activity {
         supporterNextVerificationAtMs = System.currentTimeMillis() + delay;
         supporterStatusRetryRunnable = () -> {
             supporterStatusRetryRunnable = null;
-            if (!appInForeground || !purchaseToken.equals(supporterPurchaseToken)) return;
-            syncSupporterStatusWithBackend(purchaseToken, showActivation, attempt + 1);
+            if (!isCurrentSupporterRequest(purchaseToken, generation)) return;
+            syncSupporterStatusWithBackend(purchaseToken, showActivation, attempt + 1, generation);
         };
         uiHandler.postDelayed(supporterStatusRetryRunnable, delay);
         return true;
+    }
+
+    private void scheduleDeferredSupporterReverification(String purchaseToken, long generation) {
+        if (!isCurrentSupporterRequest(purchaseToken, generation)) return;
+        cancelSupporterStatusRetry();
+        markSupporterEntitlementPending();
+        supporterNextVerificationAtMs = System.currentTimeMillis() + SUPPORTER_DEFERRED_REVERIFY_MS;
+        supporterStatusRetryRunnable = () -> {
+            supporterStatusRetryRunnable = null;
+            if (!isCurrentSupporterRequest(purchaseToken, generation) || !appInForeground) return;
+            markSupporterEntitlementPending();
+            querySupporterPurchases();
+        };
+        uiHandler.postDelayed(supporterStatusRetryRunnable, SUPPORTER_DEFERRED_REVERIFY_MS);
     }
 
     private void cancelSupporterStatusRetry() {
