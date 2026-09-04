@@ -77,10 +77,13 @@
     <string name="history_cleared">History cleared.</string>
     <string name="loading_details">Loading profile details...</string>
     <string name="loading_history">Loading history...</string>
+    <string name="not_available">Not available</string>
+    <string name="security_verification_title">Security verification</string>
+    <string name="security_verification_body">Complete the verification to continue. Toxic will then continue automatically.</string>
     <string name="loading_styles_friends">Loading looks and friends...</string>
     <string name="loading_rooms_groups">Loading rooms and groups...</string>
     <string name="loading_clothes">Loading clothing...</string>
-    <string name="cannot_load_clothes">Couldn\'t load the items.</string>
+    <string name="cannot_load_clothes">Not available</string>
     <string name="no_clothes_found">No items found</string>
     <string name="current_look">Current look</string>
     <string name="looks">Looks</string>
@@ -178,7 +181,7 @@
     <string name="male">Male</string>
     <string name="female">Female</string>
     <string name="loading_visuals">Loading visual editor...</string>
-    <string name="cannot_load_visuals">Couldn\'t load the visual editor.</string>
+    <string name="cannot_load_visuals">Not available</string>
     <string name="not_found_simple">Profile not found.</string>
     <string name="no_items_found">No items found.</string>
     <string name="remove_item">Remove</string>
