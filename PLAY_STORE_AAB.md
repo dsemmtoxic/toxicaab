@@ -78,8 +78,8 @@ applicationId 'com.toxic.search'
 2. Aumente o `versionCode` em `app/build.gradle`:
 
 ```gradle
-versionCode 82
-versionName '1.3.7'
+versionCode 90
+versionName '1.4.6'
 ```
 
 O `versionCode` precisa sempre aumentar. O `versionName` é o texto exibido para você/usuário.
@@ -87,23 +87,24 @@ O `versionCode` precisa sempre aumentar. O `versionName` é o texto exibido para
 3. Gere outro AAB pelo mesmo workflow **2 - Build Signed Android AAB**.
 4. Use sempre a mesma chave/secrets.
 
-## 6. Unity Ads
+## 6. AdMob
 
-Esta versão usa Unity Ads no lugar do AdMob. O projeto está configurado com o Game ID
-Android e com os placements `Banner_Android`, `Interstitial_Android` e
-`Rewarded_Android`.
+Esta versão usa o Google Mobile Ads SDK com o App ID AdMob configurado no
+`AndroidManifest.xml`.
 
-- Builds `debug` inicializam a Unity em modo de teste.
-- Builds `release` inicializam em modo de produção.
-- O antigo anúncio nativo da tela inicial foi substituído por um banner 320x50.
-- Os demais banners, o intersticial e o rewarded mantêm os mesmos pontos e regras
-  de exibição do aplicativo.
+- Builds `debug` usam exclusivamente os IDs de teste oficiais do Google.
+- Builds `release` usam os blocos de anúncios de produção.
+- A tela inicial exibe um anúncio nativo abaixo de Patrocinadores.
+- Permanecem os banners de Visuais, Amigos e do topo do guarda-roupa.
+- O banner que ficava abaixo das cores no guarda-roupa foi removido.
+- O intersticial e o anúncio premiado mantêm os mesmos pontos e regras de exibição
+  do aplicativo.
 - O intersticial continua respeitando o intervalo mínimo de 2 minutos.
 - A lógica Premium/Supporter continua impedindo a exibição de anúncios quando válida.
 
-Antes de publicar, confirme no Unity Monetization Dashboard que os placements Android
-existem com exatamente esses nomes, inclusive maiúsculas/minúsculas. Também revise
-as configurações de privacidade/consentimento e o `app-ads.txt` da aplicação.
+Antes de publicar, confirme no painel da AdMob que o aplicativo e todos os blocos de
+anúncios estão ativos. Também revise as configurações de privacidade/consentimento e
+o `app-ads.txt` da aplicação.
 
 ## 7. Configure a compra Premium `remove_ads`
 
