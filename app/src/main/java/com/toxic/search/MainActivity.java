@@ -18,14 +18,24 @@ import android.webkit.*;
 import org.json.*;
 import com.bumptech.glide.Glide;
 import com.bumptech.glide.load.engine.DiskCacheStrategy;
-import com.unity3d.ads.IUnityAdsInitializationListener;
-import com.unity3d.ads.IUnityAdsLoadListener;
-import com.unity3d.ads.IUnityAdsShowListener;
-import com.unity3d.ads.UnityAds;
-import com.unity3d.ads.UnityAdsShowOptions;
-import com.unity3d.services.banners.BannerErrorInfo;
-import com.unity3d.services.banners.BannerView;
-import com.unity3d.services.banners.UnityBannerSize;
+import com.google.android.gms.ads.AdError;
+import com.google.android.gms.ads.AdListener;
+import com.google.android.gms.ads.AdLoader;
+import com.google.android.gms.ads.AdRequest;
+import com.google.android.gms.ads.AdSize;
+import com.google.android.gms.ads.AdView;
+import com.google.android.gms.ads.FullScreenContentCallback;
+import com.google.android.gms.ads.LoadAdError;
+import com.google.android.gms.ads.MobileAds;
+import com.google.android.gms.ads.VideoOptions;
+import com.google.android.gms.ads.interstitial.InterstitialAd;
+import com.google.android.gms.ads.interstitial.InterstitialAdLoadCallback;
+import com.google.android.gms.ads.nativead.MediaView;
+import com.google.android.gms.ads.nativead.NativeAd;
+import com.google.android.gms.ads.nativead.NativeAdOptions;
+import com.google.android.gms.ads.nativead.NativeAdView;
+import com.google.android.gms.ads.rewarded.RewardedAd;
+import com.google.android.gms.ads.rewarded.RewardedAdLoadCallback;
 import com.android.billingclient.api.AcknowledgePurchaseParams;
 import com.android.billingclient.api.BillingClient;
 import com.android.billingclient.api.BillingClientStateListener;
@@ -57,7 +67,7 @@ public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_BASE = "https://habbodex.com/api/v1/habboinfo";
     private static final String HABBODEX_FURNIDEX_API = "https://habbodex.com/api/v1/furnidex/furni/from-figure-string";
-    private static final String APP_VERSION = "1.4.5";
+    private static final String APP_VERSION = "1.4.6";
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -322,10 +332,10 @@ public class MainActivity extends Activity {
     private Dialog activeFavoriteProfilesDialog;
     private String currentHotelKey = "br";
 
-    private Object interstitialAd;
+    private InterstitialAd interstitialAd;
     private boolean interstitialLoading = false;
     private boolean interstitialShowing = false;
-    private boolean unityAdsInitialized = false;
+    private boolean admobInitialized = false;
     private long lastInterstitialShownAt = 0L;
     private int profileOpenActionsSinceAd = 0;
     private boolean pendingProfileInterstitialAction = false;
@@ -352,45 +362,53 @@ public class MainActivity extends Activity {
     private Runnable interstitialWarmPreloadRunnable = null;
     private boolean interstitialNeedsWarmPreload = true;
     private static final long INTERSTITIAL_WARM_PRELOAD_DELAY_MS = 650L;
-    private static final String UNITY_GAME_ID = "800079422";
-    // Unity Monetization placement names for Android. The supplied UUID is the same for
-    // all three formats, so it is an app-level reference, not a format-specific placement ID.
-    private static final String UNITY_REFERENCE_ID = "aa63a27e-302f-4040-989c-44e5012d1f11";
-    private static final String INTERSTITIAL_AD_UNIT_ID = "Interstitial_Android";
-    private static final String REWARDED_AD_UNIT_ID = "Rewarded_Android";
-    private static final String BANNER_AD_UNIT_ID = "Banner_Android";
-    private static final boolean USE_TEST_ADS = BuildConfig.UNITY_USE_TEST_ADS;
-    private static final String ADS_LOG_TAG = "ToxicUnityAds";
+    private static final boolean USE_TEST_ADS = BuildConfig.ADMOB_USE_TEST_ADS;
+    private static final String INTERSTITIAL_AD_UNIT_ID = USE_TEST_ADS
+            ? "ca-app-pub-3940256099942544/1033173712"
+            : "ca-app-pub-4397762973704779/5063275863";
+    private static final String REWARDED_AD_UNIT_ID = USE_TEST_ADS
+            ? "ca-app-pub-3940256099942544/5224354917"
+            : "ca-app-pub-4397762973704779/7864699023";
+    private static final String NATIVE_AD_UNIT_ID = USE_TEST_ADS
+            ? "ca-app-pub-3940256099942544/2247696110"
+            : "ca-app-pub-4397762973704779/3687343963";
+    private static final String VISUALS_BANNER_AD_UNIT_ID = USE_TEST_ADS
+            ? "ca-app-pub-3940256099942544/6300978111"
+            : "ca-app-pub-4397762973704779/2572843891";
+    private static final String FRIENDS_BANNER_AD_UNIT_ID = USE_TEST_ADS
+            ? "ca-app-pub-3940256099942544/6300978111"
+            : "ca-app-pub-4397762973704779/8810949186";
+    private static final String WARDROBE_TOP_BANNER_AD_UNIT_ID = USE_TEST_ADS
+            ? "ca-app-pub-3940256099942544/6300978111"
+            : "ca-app-pub-4397762973704779/2070281018";
+    private static final String ADS_LOG_TAG = "ToxicAdMob";
     private static final String HABBODEX_GROUP_OWNER_KEY = "__habbodex_group_owner";
 
-    private BannerView previousStylesBannerAdView;
+    private AdView previousStylesBannerAdView;
     private FrameLayout previousStylesBannerAdContainer;
     private boolean previousStylesBannerLoadStarted = false;
-    private BannerView friendsRemovedBannerAdView;
+    private AdView friendsRemovedBannerAdView;
     private FrameLayout friendsRemovedBannerAdContainer;
     private boolean friendsRemovedBannerLoadStarted = false;
     private FrameLayout selectedBadgesLiveHost = null;
     private int selectedBadgesLiveToken = 0;
     private volatile int selectedBadgeDateLookupRunningToken = 0;
-    private BannerView visualColorsBannerAdView;
-    private FrameLayout visualColorsBannerAdContainer;
-    private boolean visualColorsBannerLoadStarted = false;
-    private BannerView visualNickSearchBannerAdView;
+    private AdView visualNickSearchBannerAdView;
     private FrameLayout visualNickSearchBannerAdContainer;
     private boolean visualNickSearchBannerLoadStarted = false;
     private static final long BANNER_RETRY_BASE_DELAY_MS = 60L * 1000L;
     private static final long BANNER_RETRY_MAX_DELAY_MS = 10L * 60L * 1000L;
     private static final int BANNER_RETRY_MAX_SHIFT = 4;
-    private final Map<BannerView, Integer> bannerLoadFailureCounts = new IdentityHashMap<>();
-    private final Map<BannerView, Runnable> bannerRetryRunnables = new IdentityHashMap<>();
-    private final Set<BannerView> bannerHasLoadedAds = Collections.newSetFromMap(new IdentityHashMap<>());
+    private final Map<AdView, Integer> bannerLoadFailureCounts = new IdentityHashMap<>();
+    private final Map<AdView, Runnable> bannerRetryRunnables = new IdentityHashMap<>();
+    private final Set<AdView> bannerHasLoadedAds = Collections.newSetFromMap(new IdentityHashMap<>());
     private static final long INTERSTITIAL_COOLDOWN_MS = 120L * 1000L;
     private static final int ACTIONS_BETWEEN_INTERSTITIALS = 1;
     private static final long AD_RETRY_BASE_DELAY_MS = 30L * 1000L;
     private static final long AD_RETRY_MAX_DELAY_MS = 5L * 60L * 1000L;
     private static final long REWARDED_POST_SHOW_PRELOAD_DELAY_MS = 10L * 1000L;
     private static final int AD_RETRY_MAX_SHIFT = 4;
-    private Object rewardedAd;
+    private RewardedAd rewardedAd;
     private boolean rewardedLoading = false;
     private int rewardedLoadFailureCount = 0;
     private long nextRewardedLoadAllowedAt = 0L;
@@ -411,9 +429,13 @@ public class MainActivity extends Activity {
     private View sponsorsActionGlow;
     private static final long SPONSOR_GLOW_CYCLE_MS = 7_000L;
     private FrameLayout startNativeAdContainer;
-    private BannerView startNativeAd;
+    private NativeAd startNativeAd;
+    private NativeAdView startNativeAdView;
     private boolean startNativeAdLoading = false;
     private long startNativeAdRetryAfterMs = 0L;
+    private int startNativeAdLoadFailureCount = 0;
+    private int startNativeAdRequestGeneration = 0;
+    private Runnable startNativeAdRetryRunnable = null;
     private boolean startScreenVisible = true;
     private volatile boolean sponsorsLoading = false;
     private volatile boolean sponsorsRefreshPending = false;
@@ -553,12 +575,12 @@ public class MainActivity extends Activity {
     };
     private static final String[][] ACCESS_GATE_AD_PROBES = new String[][] {
             {
-                    "configv2.unityads.unity3d.com",
-                    "https://configv2.unityads.unity3d.com/"
+                    "googleads.g.doubleclick.net",
+                    "https://googleads.g.doubleclick.net/"
             },
             {
-                    "webview.unityads.unity3d.com",
-                    "https://webview.unityads.unity3d.com/"
+                    "pagead2.googlesyndication.com",
+                    "https://pagead2.googlesyndication.com/"
             }
     };
     private ConnectivityManager accessConnectivityManager;
@@ -673,11 +695,12 @@ public class MainActivity extends Activity {
         ));
         removeAdsPurchased = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(PREF_REMOVE_ADS_PURCHASED, false);
         loadCachedSupporterEntitlement();
-        UnityAds.initialize(getApplicationContext(), UNITY_GAME_ID, USE_TEST_ADS, new IUnityAdsInitializationListener() {
-            @Override public void onInitializationComplete() {
-                android.util.Log.i(ADS_LOG_TAG, "Unity Ads initialized");
-                runOnUiThread(() -> {
-                    unityAdsInitialized = true;
+        new Thread(() -> {
+            try {
+                MobileAds.initialize(getApplicationContext(), initializationStatus -> runOnUiThread(() -> {
+                    if (activityDestroyed) return;
+                    admobInitialized = true;
+                    android.util.Log.i(ADS_LOG_TAG, "AdMob initialized");
                     if (!billingEntitlementCheckPending) {
                         if (!hasConfirmedAdFreeAccess()) {
                             preloadBannerAds();
@@ -689,14 +712,13 @@ public class MainActivity extends Activity {
                             loadRewardedAd();
                         }
                     }
-                });
+                }));
+            } catch (Exception initializationError) {
+                android.util.Log.w(ADS_LOG_TAG,
+                        "AdMob initialization failed: " + initializationError.getMessage());
+                admobInitialized = false;
             }
-
-            @Override public void onInitializationFailed(UnityAds.UnityAdsInitializationError error, String message) {
-                android.util.Log.w(ADS_LOG_TAG, "Unity Ads initialization failed: " + error + " / " + message);
-                unityAdsInitialized = false;
-            }
-        });
+        }, "ToxicAdMobInit").start();
         buildUi();
         startAccessGateMonitoring();
         initBillingClient();
@@ -804,7 +826,7 @@ public class MainActivity extends Activity {
             interstitialLoadedAt = 0L;
             return;
         }
-        if (!unityAdsInitialized) return;
+        if (!admobInitialized) return;
 
         long now = System.currentTimeMillis();
         // Repair a rare lifecycle state where control returned to this Activity but the
@@ -912,22 +934,18 @@ public class MainActivity extends Activity {
         cancelRewardedAdRetry();
     }
 
-    private boolean isCurrentBannerAdView(BannerView adView) {
+    private boolean isCurrentBannerAdView(AdView adView) {
         return adView != null && (
                 adView == previousStylesBannerAdView
                         || adView == friendsRemovedBannerAdView
-                        || adView == visualColorsBannerAdView
                         || adView == visualNickSearchBannerAdView
-                        || adView == startNativeAd
         );
     }
 
-    private void setBannerLoadStarted(BannerView adView, boolean started) {
+    private void setBannerLoadStarted(AdView adView, boolean started) {
         if (adView == previousStylesBannerAdView) previousStylesBannerLoadStarted = started;
         else if (adView == friendsRemovedBannerAdView) friendsRemovedBannerLoadStarted = started;
-        else if (adView == visualColorsBannerAdView) visualColorsBannerLoadStarted = started;
         else if (adView == visualNickSearchBannerAdView) visualNickSearchBannerLoadStarted = started;
-        else if (adView == startNativeAd) startNativeAdLoading = started;
     }
 
     private long calculateBannerRetryDelayMs(int failureCount) {
@@ -937,7 +955,7 @@ public class MainActivity extends Activity {
         return Math.min(delay, BANNER_RETRY_MAX_DELAY_MS);
     }
 
-    private void cancelBannerAdRetry(BannerView adView) {
+    private void cancelBannerAdRetry(AdView adView) {
         if (adView == null) return;
         Runnable retry = bannerRetryRunnables.remove(adView);
         if (retry != null) uiHandler.removeCallbacks(retry);
@@ -950,7 +968,7 @@ public class MainActivity extends Activity {
         bannerRetryRunnables.clear();
     }
 
-    private void scheduleBannerAdRetry(final BannerView adView, final FrameLayout container) {
+    private void scheduleBannerAdRetry(final AdView adView, final FrameLayout container) {
         if (adView == null || container == null || !isCurrentBannerAdView(adView)) return;
         if (bannerHasLoadedAds.contains(adView)) {
             cancelBannerAdRetry(adView);
@@ -984,11 +1002,10 @@ public class MainActivity extends Activity {
                 || container == friendsRemovedBannerAdContainer);
     }
 
-    private void setBannerContainerIdleVisibility(BannerView adView, FrameLayout container) {
+    private void setBannerContainerIdleVisibility(AdView adView, FrameLayout container) {
         if (container == null) return;
         if (bannerHasLoadedAds.contains(adView)) {
-            if (adView == startNativeAd) updateStartNativeAdVisibility();
-            else container.setVisibility(View.VISIBLE);
+            container.setVisibility(View.VISIBLE);
             return;
         }
         if (isProfileBannerContainer(container)
@@ -1000,12 +1017,11 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void handleBannerLoadFailure(BannerView adView, FrameLayout container) {
+    private void handleBannerLoadFailure(AdView adView, FrameLayout container) {
         if (!isCurrentBannerAdView(adView)) return;
         if (bannerHasLoadedAds.contains(adView)) {
             setBannerLoadStarted(adView, true);
-            if (adView == startNativeAd) updateStartNativeAdVisibility();
-            else if (container != null && !hasAdFreeAccess()) container.setVisibility(View.VISIBLE);
+            if (container != null && !hasAdFreeAccess()) container.setVisibility(View.VISIBLE);
             cancelBannerAdRetry(adView);
             return;
         }
@@ -1029,40 +1045,39 @@ public class MainActivity extends Activity {
         return container;
     }
 
-    private BannerView newBannerAdView(String placementId, FrameLayout container) {
-        final BannerView adView = new BannerView(this, placementId, new UnityBannerSize(320, 50));
-        adView.setListener(new BannerView.IListener() {
-            @Override public void onBannerLoaded(BannerView bannerAdView) {
-                android.util.Log.i(ADS_LOG_TAG, "Banner loaded: " + bannerAdView.getPlacementId());
-                cancelBannerAdRetry(bannerAdView);
-                bannerLoadFailureCounts.remove(bannerAdView);
-                bannerHasLoadedAds.add(bannerAdView);
-                setBannerLoadStarted(bannerAdView, true);
-                if (bannerAdView == startNativeAd) {
-                    updateStartNativeAdVisibility();
-                } else if (container != null && !hasAdFreeAccess()) {
-                    container.setVisibility(View.VISIBLE);
+    private AdView newBannerAdView(String adUnitId, FrameLayout container) {
+        final AdView adView = new AdView(this);
+        adView.setAdSize(AdSize.BANNER);
+        adView.setAdUnitId(adUnitId);
+        adView.setAdListener(new AdListener() {
+            @Override public void onAdLoaded() {
+                if (!isCurrentBannerAdView(adView) || removeAdsPurchased || hasAdFreeAccess()) {
+                    if (container != null) container.setVisibility(View.GONE);
+                    try { adView.destroy(); } catch(Exception ignored) {}
+                    return;
                 }
+                android.util.Log.i(ADS_LOG_TAG, "Banner loaded: " + adView.getAdUnitId());
+                cancelBannerAdRetry(adView);
+                bannerLoadFailureCounts.remove(adView);
+                bannerHasLoadedAds.add(adView);
+                setBannerLoadStarted(adView, true);
+                if (container != null && !hasAdFreeAccess()) container.setVisibility(View.VISIBLE);
             }
 
-            @Override public void onBannerFailedToLoad(BannerView bannerAdView, BannerErrorInfo errorInfo) {
+            @Override public void onAdFailedToLoad(LoadAdError error) {
                 android.util.Log.w(ADS_LOG_TAG,
-                        "Banner failed: " + bannerAdView.getPlacementId()
-                                + " error=" + (errorInfo == null ? "unknown" : errorInfo.errorCode)
-                                + " message=" + (errorInfo == null ? "" : errorInfo.errorMessage));
-                handleBannerLoadFailure(bannerAdView, container);
+                        "Banner failed: " + adView.getAdUnitId()
+                                + " code=" + (error == null ? "unknown" : error.getCode())
+                                + " message=" + (error == null ? "" : error.getMessage()));
+                handleBannerLoadFailure(adView, container);
             }
 
-            @Override public void onBannerShown(BannerView bannerAdView) {
-                android.util.Log.i(ADS_LOG_TAG, "Banner shown: " + bannerAdView.getPlacementId());
+            @Override public void onAdImpression() {
+                android.util.Log.i(ADS_LOG_TAG, "Banner impression: " + adView.getAdUnitId());
             }
 
-            @Override public void onBannerClick(BannerView bannerAdView) {
-                android.util.Log.i(ADS_LOG_TAG, "Banner clicked: " + bannerAdView.getPlacementId());
-            }
-
-            @Override public void onBannerLeftApplication(BannerView bannerAdView) {
-                android.util.Log.i(ADS_LOG_TAG, "Banner left app: " + bannerAdView.getPlacementId());
+            @Override public void onAdClicked() {
+                android.util.Log.i(ADS_LOG_TAG, "Banner clicked: " + adView.getAdUnitId());
             }
         });
         if (container != null) {
@@ -1072,19 +1087,17 @@ public class MainActivity extends Activity {
         return adView;
     }
 
-    private void loadBannerAfterAttach(final BannerView adView, final FrameLayout container) {
+    private void loadBannerAfterAttach(final AdView adView, final FrameLayout container) {
         if (adView == null || container == null || removeAdsPurchased || hasAdFreeAccess()) return;
-        if (!unityAdsInitialized) {
+        if (!admobInitialized) {
             setBannerLoadStarted(adView, false);
             return;
         }
         if (bannerHasLoadedAds.contains(adView)) {
-            if (adView == startNativeAd) updateStartNativeAdVisibility();
-            else container.setVisibility(View.VISIBLE);
+            container.setVisibility(View.VISIBLE);
             return;
         }
-        if (adView == startNativeAd) container.setVisibility(View.GONE);
-        else container.setVisibility(View.INVISIBLE);
+        container.setVisibility(View.INVISIBLE);
         container.post(() -> {
             try {
                 if (removeAdsPurchased || hasAdFreeAccess()) {
@@ -1096,7 +1109,7 @@ public class MainActivity extends Activity {
                     setBannerLoadStarted(adView, false);
                     return;
                 }
-                adView.load();
+                adView.loadAd(new AdRequest.Builder().build());
             } catch (Exception e) {
                 android.util.Log.w(ADS_LOG_TAG, "Banner load exception: " + e.getMessage());
                 handleBannerLoadFailure(adView, container);
@@ -1105,28 +1118,21 @@ public class MainActivity extends Activity {
     }
 
     private void requestPreviousStylesBannerLoadIfNeeded() {
-        if (billingEntitlementCheckPending || hasConfirmedAdFreeAccess() || !unityAdsInitialized) return;
+        if (billingEntitlementCheckPending || hasConfirmedAdFreeAccess() || !admobInitialized) return;
         if (previousStylesBannerLoadStarted || previousStylesBannerAdView == null || previousStylesBannerAdContainer == null) return;
         previousStylesBannerLoadStarted = true;
         loadBannerAfterAttach(previousStylesBannerAdView, previousStylesBannerAdContainer);
     }
 
     private void requestFriendsRemovedBannerLoadIfNeeded() {
-        if (billingEntitlementCheckPending || hasConfirmedAdFreeAccess() || !unityAdsInitialized) return;
+        if (billingEntitlementCheckPending || hasConfirmedAdFreeAccess() || !admobInitialized) return;
         if (friendsRemovedBannerLoadStarted || friendsRemovedBannerAdView == null || friendsRemovedBannerAdContainer == null) return;
         friendsRemovedBannerLoadStarted = true;
         loadBannerAfterAttach(friendsRemovedBannerAdView, friendsRemovedBannerAdContainer);
     }
 
-    private void requestVisualColorsBannerLoadIfNeeded() {
-        if (billingEntitlementCheckPending || hasConfirmedAdFreeAccess() || !unityAdsInitialized) return;
-        if (visualColorsBannerLoadStarted || visualColorsBannerAdView == null || visualColorsBannerAdContainer == null) return;
-        visualColorsBannerLoadStarted = true;
-        loadBannerAfterAttach(visualColorsBannerAdView, visualColorsBannerAdContainer);
-    }
-
     private void requestVisualNickSearchBannerLoadIfNeeded() {
-        if (billingEntitlementCheckPending || hasConfirmedAdFreeAccess() || !unityAdsInitialized) return;
+        if (billingEntitlementCheckPending || hasConfirmedAdFreeAccess() || !admobInitialized) return;
         if (visualNickSearchBannerLoadStarted || visualNickSearchBannerAdView == null || visualNickSearchBannerAdContainer == null) return;
         visualNickSearchBannerLoadStarted = true;
         loadBannerAfterAttach(visualNickSearchBannerAdView, visualNickSearchBannerAdContainer);
@@ -1135,7 +1141,6 @@ public class MainActivity extends Activity {
     private void requestBannerLoadForContainer(View banner) {
         if (banner == previousStylesBannerAdContainer) requestPreviousStylesBannerLoadIfNeeded();
         else if (banner == friendsRemovedBannerAdContainer) requestFriendsRemovedBannerLoadIfNeeded();
-        else if (banner == visualColorsBannerAdContainer) requestVisualColorsBannerLoadIfNeeded();
         else if (banner == visualNickSearchBannerAdContainer) requestVisualNickSearchBannerLoadIfNeeded();
         else if (banner == startNativeAdContainer) loadStartNativeAdIfNeeded();
     }
@@ -1144,7 +1149,7 @@ public class MainActivity extends Activity {
         if (hasConfirmedAdFreeAccess()) return;
         if (previousStylesBannerAdContainer == null || previousStylesBannerAdView == null) {
             previousStylesBannerAdContainer = newBannerContainer();
-            previousStylesBannerAdView = newBannerAdView(BANNER_AD_UNIT_ID, previousStylesBannerAdContainer);
+            previousStylesBannerAdView = newBannerAdView(VISUALS_BANNER_AD_UNIT_ID, previousStylesBannerAdContainer);
             previousStylesBannerLoadStarted = false;
         }
     }
@@ -1153,17 +1158,8 @@ public class MainActivity extends Activity {
         if (hasConfirmedAdFreeAccess()) return;
         if (friendsRemovedBannerAdContainer == null || friendsRemovedBannerAdView == null) {
             friendsRemovedBannerAdContainer = newBannerContainer();
-            friendsRemovedBannerAdView = newBannerAdView(BANNER_AD_UNIT_ID, friendsRemovedBannerAdContainer);
+            friendsRemovedBannerAdView = newBannerAdView(FRIENDS_BANNER_AD_UNIT_ID, friendsRemovedBannerAdContainer);
             friendsRemovedBannerLoadStarted = false;
-        }
-    }
-
-    private void ensureVisualColorsBannerAd() {
-        if (hasConfirmedAdFreeAccess()) return;
-        if (visualColorsBannerAdContainer == null || visualColorsBannerAdView == null) {
-            visualColorsBannerAdContainer = newBannerContainer();
-            visualColorsBannerAdView = newBannerAdView(BANNER_AD_UNIT_ID, visualColorsBannerAdContainer);
-            visualColorsBannerLoadStarted = false;
         }
     }
 
@@ -1171,7 +1167,7 @@ public class MainActivity extends Activity {
         if (hasConfirmedAdFreeAccess()) return;
         if (visualNickSearchBannerAdContainer == null || visualNickSearchBannerAdView == null) {
             visualNickSearchBannerAdContainer = newBannerContainer();
-            visualNickSearchBannerAdView = newBannerAdView(BANNER_AD_UNIT_ID, visualNickSearchBannerAdContainer);
+            visualNickSearchBannerAdView = newBannerAdView(WARDROBE_TOP_BANNER_AD_UNIT_ID, visualNickSearchBannerAdContainer);
             visualNickSearchBannerLoadStarted = false;
         }
     }
@@ -1188,13 +1184,6 @@ public class MainActivity extends Activity {
         if (friendsRemovedBannerAdContainer == null) return null;
         detachViewFromParent(friendsRemovedBannerAdContainer);
         return friendsRemovedBannerAdContainer;
-    }
-
-    private View buildVisualColorsBannerAd() {
-        ensureVisualColorsBannerAd();
-        if (visualColorsBannerAdContainer == null) return null;
-        detachViewFromParent(visualColorsBannerAdContainer);
-        return visualColorsBannerAdContainer;
     }
 
     private View buildVisualNickSearchBannerAd() {
@@ -1235,23 +1224,26 @@ public class MainActivity extends Activity {
         if (removeAdsPurchased || hasAdFreeAccess()) return;
         ensurePreviousStylesBannerAd();
         ensureFriendsRemovedBannerAd();
-        ensureVisualColorsBannerAd();
         ensureVisualNickSearchBannerAd();
     }
 
     private void pauseBannerAds() {
-        // Unity BannerView has no pause/resume API. Retry callbacks are paused by onPause().
+        try { if (previousStylesBannerAdView != null) previousStylesBannerAdView.pause(); } catch(Exception ignored) {}
+        try { if (friendsRemovedBannerAdView != null) friendsRemovedBannerAdView.pause(); } catch(Exception ignored) {}
+        try { if (visualNickSearchBannerAdView != null) visualNickSearchBannerAdView.pause(); } catch(Exception ignored) {}
     }
 
     private void resumeBannerAds() {
+        try { if (previousStylesBannerAdView != null) previousStylesBannerAdView.resume(); } catch(Exception ignored) {}
+        try { if (friendsRemovedBannerAdView != null) friendsRemovedBannerAdView.resume(); } catch(Exception ignored) {}
+        try { if (visualNickSearchBannerAdView != null) visualNickSearchBannerAdView.resume(); } catch(Exception ignored) {}
         if (previousStylesBannerAdContainer != null && previousStylesBannerAdContainer.getParent() != null) requestPreviousStylesBannerLoadIfNeeded();
         if (friendsRemovedBannerAdContainer != null && friendsRemovedBannerAdContainer.getParent() != null) requestFriendsRemovedBannerLoadIfNeeded();
-        if (visualColorsBannerAdContainer != null && visualColorsBannerAdContainer.getParent() != null) requestVisualColorsBannerLoadIfNeeded();
         if (visualNickSearchBannerAdContainer != null && visualNickSearchBannerAdContainer.getParent() != null) requestVisualNickSearchBannerLoadIfNeeded();
         if (startNativeAdContainer != null && startNativeAdContainer.getParent() != null) loadStartNativeAdIfNeeded();
     }
 
-    private void destroyBannerAd(BannerView adView, FrameLayout container) {
+    private void destroyBannerAd(AdView adView, FrameLayout container) {
         cancelBannerAdRetry(adView);
         bannerLoadFailureCounts.remove(adView);
         bannerHasLoadedAds.remove(adView);
@@ -1263,7 +1255,6 @@ public class MainActivity extends Activity {
         cancelAllBannerAdRetries();
         destroyBannerAd(previousStylesBannerAdView, previousStylesBannerAdContainer);
         destroyBannerAd(friendsRemovedBannerAdView, friendsRemovedBannerAdContainer);
-        destroyBannerAd(visualColorsBannerAdView, visualColorsBannerAdContainer);
         destroyBannerAd(visualNickSearchBannerAdView, visualNickSearchBannerAdContainer);
         previousStylesBannerAdView = null;
         previousStylesBannerAdContainer = null;
@@ -1271,23 +1262,43 @@ public class MainActivity extends Activity {
         friendsRemovedBannerAdView = null;
         friendsRemovedBannerAdContainer = null;
         friendsRemovedBannerLoadStarted = false;
-        visualColorsBannerAdView = null;
-        visualColorsBannerAdContainer = null;
-        visualColorsBannerLoadStarted = false;
         visualNickSearchBannerAdView = null;
         visualNickSearchBannerAdContainer = null;
         visualNickSearchBannerLoadStarted = false;
         destroyStartNativeAd();
     }
 
+    private void cancelStartNativeAdRetry() {
+        if (startNativeAdRetryRunnable != null) {
+            uiHandler.removeCallbacks(startNativeAdRetryRunnable);
+            startNativeAdRetryRunnable = null;
+        }
+    }
+
+    private void scheduleStartNativeAdRetry() {
+        cancelStartNativeAdRetry();
+        if (!appInForeground
+                || !startScreenVisible
+                || removeAdsPurchased
+                || hasAdFreeAccess()
+                || startNativeAdContainer == null) return;
+        long delay = Math.max(0L, startNativeAdRetryAfterMs - System.currentTimeMillis());
+        startNativeAdRetryRunnable = () -> {
+            startNativeAdRetryRunnable = null;
+            loadStartNativeAdIfNeeded();
+        };
+        uiHandler.postDelayed(startNativeAdRetryRunnable, delay);
+    }
+
     private void destroyStartNativeAd() {
-        cancelBannerAdRetry(startNativeAd);
-        bannerLoadFailureCounts.remove(startNativeAd);
-        bannerHasLoadedAds.remove(startNativeAd);
+        cancelStartNativeAdRetry();
+        startNativeAdRequestGeneration++;
         try { if (startNativeAd != null) startNativeAd.destroy(); } catch(Exception ignored) {}
         startNativeAd = null;
+        startNativeAdView = null;
         startNativeAdLoading = false;
         startNativeAdRetryAfterMs = 0L;
+        startNativeAdLoadFailureCount = 0;
         if (startNativeAdContainer != null) {
             startNativeAdContainer.removeAllViews();
             startNativeAdContainer.setVisibility(View.GONE);
@@ -1298,29 +1309,173 @@ public class MainActivity extends Activity {
         if (startNativeAdContainer == null) return;
         boolean visible = startScreenVisible
                 && startNativeAd != null
-                && bannerHasLoadedAds.contains(startNativeAd)
+                && startNativeAdView != null
                 && !removeAdsPurchased
                 && !hasAdFreeAccess();
         startNativeAdContainer.setVisibility(visible ? View.VISIBLE : View.GONE);
     }
 
+    private NativeAdView buildStartNativeAdView(NativeAd nativeAd) {
+        NativeAdView adView = new NativeAdView(this);
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(12), dp(10), dp(12), dp(12));
+        card.setBackground(round(
+                lightTheme ? Color.WHITE : Color.rgb(20, 17, 29),
+                dp(18),
+                lightTheme ? Color.rgb(222, 218, 230) : Color.rgb(55, 47, 72),
+                1
+        ));
+        adView.addView(card, new FrameLayout.LayoutParams(-1, -2));
+
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.HORIZONTAL);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        card.addView(header, new LinearLayout.LayoutParams(-1, -2));
+
+        ImageView icon = new ImageView(this);
+        icon.setScaleType(ImageView.ScaleType.CENTER_CROP);
+        LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(dp(46), dp(46));
+        iconLp.rightMargin = dp(10);
+        header.addView(icon, iconLp);
+
+        LinearLayout heading = new LinearLayout(this);
+        heading.setOrientation(LinearLayout.VERTICAL);
+        header.addView(heading, new LinearLayout.LayoutParams(0, -2, 1f));
+
+        TextView adBadge = text("Ad", 9, Color.WHITE, true);
+        adBadge.setGravity(Gravity.CENTER);
+        adBadge.setPadding(dp(6), dp(1), dp(6), dp(1));
+        adBadge.setBackground(round(Color.rgb(244, 167, 35), dp(4), Color.TRANSPARENT, 0));
+        heading.addView(adBadge, new LinearLayout.LayoutParams(-2, -2));
+
+        TextView headline = text(nativeAd.getHeadline(), 15,
+                lightTheme ? Color.rgb(38, 33, 45) : Color.WHITE, true);
+        headline.setMaxLines(2);
+        headline.setEllipsize(TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams headlineLp = new LinearLayout.LayoutParams(-1, -2);
+        headlineLp.topMargin = dp(4);
+        heading.addView(headline, headlineLp);
+
+        TextView advertiser = text(nativeAd.getAdvertiser(), 11,
+                lightTheme ? Color.rgb(100, 93, 109) : muted, false);
+        advertiser.setSingleLine(true);
+        advertiser.setEllipsize(TextUtils.TruncateAt.END);
+        heading.addView(advertiser, new LinearLayout.LayoutParams(-1, -2));
+
+        TextView body = text(nativeAd.getBody(), 12,
+                lightTheme ? Color.rgb(77, 70, 85) : muted, false);
+        body.setMaxLines(3);
+        body.setEllipsize(TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams bodyLp = new LinearLayout.LayoutParams(-1, -2);
+        bodyLp.topMargin = dp(8);
+        card.addView(body, bodyLp);
+
+        MediaView media = new MediaView(this);
+        LinearLayout.LayoutParams mediaLp = new LinearLayout.LayoutParams(-1, dp(170));
+        mediaLp.topMargin = dp(10);
+        card.addView(media, mediaLp);
+
+        Button callToAction = new Button(this);
+        callToAction.setAllCaps(false);
+        callToAction.setTextColor(Color.WHITE);
+        callToAction.setTextSize(13);
+        callToAction.setTypeface(Typeface.DEFAULT_BOLD);
+        callToAction.setBackground(grad(dp(12), purple2, purple));
+        LinearLayout.LayoutParams ctaLp = new LinearLayout.LayoutParams(-1, dp(44));
+        ctaLp.topMargin = dp(10);
+        card.addView(callToAction, ctaLp);
+
+        NativeAd.Image nativeIcon = nativeAd.getIcon();
+        if (nativeIcon == null) icon.setVisibility(View.GONE);
+        else icon.setImageDrawable(nativeIcon.getDrawable());
+        if (TextUtils.isEmpty(nativeAd.getAdvertiser())) advertiser.setVisibility(View.GONE);
+        if (TextUtils.isEmpty(nativeAd.getBody())) body.setVisibility(View.GONE);
+        if (nativeAd.getMediaContent() == null) media.setVisibility(View.GONE);
+        else media.setMediaContent(nativeAd.getMediaContent());
+        if (TextUtils.isEmpty(nativeAd.getCallToAction())) callToAction.setVisibility(View.GONE);
+        else callToAction.setText(nativeAd.getCallToAction());
+
+        adView.setIconView(icon);
+        adView.setHeadlineView(headline);
+        adView.setAdvertiserView(advertiser);
+        adView.setBodyView(body);
+        adView.setMediaView(media);
+        adView.setCallToActionView(callToAction);
+        adView.setNativeAd(nativeAd);
+        return adView;
+    }
+
     private void loadStartNativeAdIfNeeded() {
-        if (!startScreenVisible || removeAdsPurchased || hasAdFreeAccess()) {
+        if (!appInForeground || !startScreenVisible || removeAdsPurchased || hasAdFreeAccess()) {
             updateStartNativeAdVisibility();
             return;
         }
-        if (billingEntitlementCheckPending || !unityAdsInitialized || startNativeAdContainer == null) return;
-        if (startNativeAd == null) {
-            startNativeAd = newBannerAdView(BANNER_AD_UNIT_ID, startNativeAdContainer);
-            startNativeAdLoading = false;
-        }
-        if (bannerHasLoadedAds.contains(startNativeAd)) {
+        if (billingEntitlementCheckPending || !admobInitialized || startNativeAdContainer == null) return;
+        if (startNativeAd != null && startNativeAdView != null) {
             updateStartNativeAdVisibility();
             return;
         }
         if (startNativeAdLoading) return;
+        if (System.currentTimeMillis() < startNativeAdRetryAfterMs) {
+            scheduleStartNativeAdRetry();
+            return;
+        }
+
         startNativeAdLoading = true;
-        loadBannerAfterAttach(startNativeAd, startNativeAdContainer);
+        final int requestGeneration = ++startNativeAdRequestGeneration;
+        android.util.Log.i(ADS_LOG_TAG, "Native request #" + requestGeneration + ": " + NATIVE_AD_UNIT_ID);
+        AdLoader loader = new AdLoader.Builder(this, NATIVE_AD_UNIT_ID)
+                .forNativeAd(nativeAd -> {
+                    if (requestGeneration != startNativeAdRequestGeneration
+                            || activityDestroyed
+                            || removeAdsPurchased
+                            || hasAdFreeAccess()) {
+                        nativeAd.destroy();
+                        return;
+                    }
+                    NativeAd oldAd = startNativeAd;
+                    startNativeAd = nativeAd;
+                    startNativeAdView = buildStartNativeAdView(nativeAd);
+                    startNativeAdLoading = false;
+                    startNativeAdRetryAfterMs = 0L;
+                    startNativeAdLoadFailureCount = 0;
+                    cancelStartNativeAdRetry();
+                    startNativeAdContainer.removeAllViews();
+                    startNativeAdContainer.addView(startNativeAdView,
+                            new FrameLayout.LayoutParams(-1, -2, Gravity.CENTER));
+                    if (oldAd != null && oldAd != nativeAd) oldAd.destroy();
+                    updateStartNativeAdVisibility();
+                    android.util.Log.i(ADS_LOG_TAG, "Native loaded #" + requestGeneration);
+                })
+                .withAdListener(new AdListener() {
+                    @Override public void onAdFailedToLoad(LoadAdError error) {
+                        if (requestGeneration != startNativeAdRequestGeneration) return;
+                        startNativeAdLoading = false;
+                        startNativeAdLoadFailureCount++;
+                        startNativeAdRetryAfterMs = System.currentTimeMillis()
+                                + calculateAdRetryDelayMs(startNativeAdLoadFailureCount);
+                        android.util.Log.w(ADS_LOG_TAG,
+                                "Native failed #" + requestGeneration
+                                        + " code=" + (error == null ? "unknown" : error.getCode())
+                                        + " message=" + (error == null ? "" : error.getMessage()));
+                        updateStartNativeAdVisibility();
+                        scheduleStartNativeAdRetry();
+                    }
+
+                    @Override public void onAdImpression() {
+                        android.util.Log.i(ADS_LOG_TAG, "Native impression");
+                    }
+
+                    @Override public void onAdClicked() {
+                        android.util.Log.i(ADS_LOG_TAG, "Native clicked");
+                    }
+                })
+                .withNativeAdOptions(new NativeAdOptions.Builder()
+                        .setVideoOptions(new VideoOptions.Builder().setStartMuted(true).build())
+                        .build())
+                .build();
+        loader.loadAd(new AdRequest.Builder().build());
     }
 
     private void registerInterstitialLoadFailure() {
@@ -1398,7 +1553,7 @@ public class MainActivity extends Activity {
     }
 
     private void loadInterstitialAd() {
-        // Keep one Unity interstitial preloaded. The two-minute rule only controls showing.
+        // Keep one AdMob interstitial preloaded. The two-minute rule only controls showing.
         if (removeAdsPurchased || hasConfirmedAdFreeAccess()) {
             cancelInterstitialAdRetry();
             if (interstitialLoading) interstitialRequestGeneration++;
@@ -1410,7 +1565,7 @@ public class MainActivity extends Activity {
             interstitialShowStartedAt = 0L;
             return;
         }
-        if (!unityAdsInitialized) return;
+        if (!admobInitialized) return;
 
         long now = System.currentTimeMillis();
         if (interstitialLoading && interstitialLoadStartedAt > 0L
@@ -1443,8 +1598,9 @@ public class MainActivity extends Activity {
         final int requestGeneration = ++interstitialRequestGeneration;
         android.util.Log.i(ADS_LOG_TAG, "Interstitial request #" + requestGeneration + ": " + INTERSTITIAL_AD_UNIT_ID);
 
-        UnityAds.load(INTERSTITIAL_AD_UNIT_ID, new IUnityAdsLoadListener() {
-            @Override public void onUnityAdsAdLoaded(String placementId) {
+        InterstitialAd.load(this, INTERSTITIAL_AD_UNIT_ID, new AdRequest.Builder().build(),
+                new InterstitialAdLoadCallback() {
+            @Override public void onAdLoaded(InterstitialAd loadedAd) {
                 if (requestGeneration != interstitialRequestGeneration) {
                     android.util.Log.i(ADS_LOG_TAG, "Ignoring stale interstitial callback #" + requestGeneration);
                     return;
@@ -1452,25 +1608,22 @@ public class MainActivity extends Activity {
                 interstitialLoading = false;
                 interstitialLoadStartedAt = 0L;
                 interstitialLoadedAt = System.currentTimeMillis();
-                interstitialAd = Boolean.TRUE;
+                interstitialAd = loadedAd;
                 resetInterstitialBackoff();
                 clearPendingProfileInterstitial();
-                android.util.Log.i(ADS_LOG_TAG, "Interstitial loaded #" + requestGeneration + ": " + placementId);
+                android.util.Log.i(ADS_LOG_TAG, "Interstitial loaded #" + requestGeneration);
             }
 
-            @Override public void onUnityAdsFailedToLoad(
-                    String placementId,
-                    UnityAds.UnityAdsLoadError error,
-                    String message
-            ) {
+            @Override public void onAdFailedToLoad(LoadAdError error) {
                 if (requestGeneration != interstitialRequestGeneration) return;
                 interstitialLoading = false;
                 interstitialLoadStartedAt = 0L;
                 interstitialLoadedAt = 0L;
                 interstitialAd = null;
                 android.util.Log.w(ADS_LOG_TAG,
-                        "Interstitial failed #" + requestGeneration + ": " + placementId
-                                + " error=" + error + " message=" + message);
+                        "Interstitial failed #" + requestGeneration
+                                + " code=" + (error == null ? "unknown" : error.getCode())
+                                + " message=" + (error == null ? "" : error.getMessage()));
                 registerInterstitialLoadFailure();
             }
         });
@@ -1506,18 +1659,19 @@ public class MainActivity extends Activity {
         }
 
         clearPendingProfileInterstitial();
+        final InterstitialAd adToShow = interstitialAd;
+        interstitialAd = null;
+        interstitialLoadedAt = 0L;
         try {
             interstitialShowing = true;
             interstitialShowStartedAt = System.currentTimeMillis();
             android.util.Log.i(ADS_LOG_TAG, "Interstitial immediate show requested: " + INTERSTITIAL_AD_UNIT_ID);
-            UnityAds.show(this, INTERSTITIAL_AD_UNIT_ID, new UnityAdsShowOptions(), new IUnityAdsShowListener() {
-                @Override public void onUnityAdsShowFailure(
-                        String placementId,
-                        UnityAds.UnityAdsShowError error,
-                        String message
-                ) {
+            adToShow.setFullScreenContentCallback(new FullScreenContentCallback() {
+                @Override public void onAdFailedToShowFullScreenContent(AdError error) {
                     android.util.Log.w(ADS_LOG_TAG,
-                            "Interstitial show failed: " + placementId + " error=" + error + " message=" + message);
+                            "Interstitial show failed: code="
+                                    + (error == null ? "unknown" : error.getCode())
+                                    + " message=" + (error == null ? "" : error.getMessage()));
                     interstitialShowing = false;
                     interstitialShowStartedAt = 0L;
                     interstitialAd = null;
@@ -1525,7 +1679,7 @@ public class MainActivity extends Activity {
                     registerInterstitialLoadFailure();
                 }
 
-                @Override public void onUnityAdsShowStart(String placementId) {
+                @Override public void onAdShowedFullScreenContent() {
                     lastInterstitialShownAt = System.currentTimeMillis();
                     interstitialShowStartedAt = lastInterstitialShownAt;
                     nextInterstitialLoadAllowedAt = lastInterstitialShownAt + INTERSTITIAL_POST_SHOW_PRELOAD_DELAY_MS;
@@ -1533,18 +1687,15 @@ public class MainActivity extends Activity {
                     interstitialAd = null;
                     interstitialLoadedAt = 0L;
                     clearPendingProfileInterstitial();
-                    android.util.Log.i(ADS_LOG_TAG, "Interstitial shown: " + placementId);
+                    android.util.Log.i(ADS_LOG_TAG, "Interstitial shown");
                 }
 
-                @Override public void onUnityAdsShowClick(String placementId) {
-                    android.util.Log.i(ADS_LOG_TAG, "Interstitial clicked: " + placementId);
+                @Override public void onAdClicked() {
+                    android.util.Log.i(ADS_LOG_TAG, "Interstitial clicked");
                 }
 
-                @Override public void onUnityAdsShowComplete(
-                        String placementId,
-                        UnityAds.UnityAdsShowCompletionState state
-                ) {
-                    android.util.Log.i(ADS_LOG_TAG, "Interstitial dismissed: " + placementId + " state=" + state);
+                @Override public void onAdDismissedFullScreenContent() {
+                    android.util.Log.i(ADS_LOG_TAG, "Interstitial dismissed");
                     interstitialShowing = false;
                     interstitialShowStartedAt = 0L;
                     interstitialAd = null;
@@ -1555,6 +1706,7 @@ public class MainActivity extends Activity {
                     scheduleInterstitialAdRetry();
                 }
             });
+            adToShow.show(this);
         } catch (Exception showError) {
             android.util.Log.w(ADS_LOG_TAG, "Interstitial immediate show exception: " + showError.getMessage());
             interstitialShowing = false;
@@ -1598,47 +1750,41 @@ public class MainActivity extends Activity {
         }
 
         clearPendingRewardedShow();
+        final RewardedAd adToShow = rewardedAd;
         rewardedAd = null;
         android.util.Log.i(ADS_LOG_TAG, "Rewarded show requested: " + REWARDED_AD_UNIT_ID);
         try {
-            UnityAds.show(this, REWARDED_AD_UNIT_ID, new UnityAdsShowOptions(), new IUnityAdsShowListener() {
-                @Override public void onUnityAdsShowFailure(
-                        String placementId,
-                        UnityAds.UnityAdsShowError error,
-                        String message
-                ) {
+            adToShow.setFullScreenContentCallback(new FullScreenContentCallback() {
+                @Override public void onAdFailedToShowFullScreenContent(AdError error) {
                     android.util.Log.w(ADS_LOG_TAG,
-                            "Rewarded show failed: " + placementId + " error=" + error + " message=" + message);
+                            "Rewarded show failed: code="
+                                    + (error == null ? "unknown" : error.getCode())
+                                    + " message=" + (error == null ? "" : error.getMessage()));
                     rewardedAd = null;
                     registerRewardedLoadFailure();
                     toast(t(R.string.cannot_show_video));
                 }
 
-                @Override public void onUnityAdsShowStart(String placementId) {
+                @Override public void onAdShowedFullScreenContent() {
                     rewardedAd = null;
                     nextRewardedLoadAllowedAt = System.currentTimeMillis() + REWARDED_POST_SHOW_PRELOAD_DELAY_MS;
-                    android.util.Log.i(ADS_LOG_TAG, "Rewarded shown: " + placementId);
+                    android.util.Log.i(ADS_LOG_TAG, "Rewarded shown");
                 }
 
-                @Override public void onUnityAdsShowClick(String placementId) {
-                    android.util.Log.i(ADS_LOG_TAG, "Rewarded clicked: " + placementId);
+                @Override public void onAdClicked() {
+                    android.util.Log.i(ADS_LOG_TAG, "Rewarded clicked");
                 }
 
-                @Override public void onUnityAdsShowComplete(
-                        String placementId,
-                        UnityAds.UnityAdsShowCompletionState state
-                ) {
-                    android.util.Log.i(ADS_LOG_TAG, "Rewarded dismissed: " + placementId + " state=" + state);
+                @Override public void onAdDismissedFullScreenContent() {
+                    android.util.Log.i(ADS_LOG_TAG, "Rewarded dismissed");
                     rewardedAd = null;
                     rewardedLoadFailureCount = 0;
                     cancelRewardedAdRetry();
                     nextRewardedLoadAllowedAt = System.currentTimeMillis() + REWARDED_POST_SHOW_PRELOAD_DELAY_MS;
-                    if (state == UnityAds.UnityAdsShowCompletionState.COMPLETED) {
-                        handleRewardedAdEarned();
-                    }
                     scheduleRewardedAdRetry();
                 }
             });
+            adToShow.show(this, rewardItem -> handleRewardedAdEarned());
         } catch (Exception showError) {
             android.util.Log.w(ADS_LOG_TAG, "Rewarded show exception: " + showError.getMessage());
             rewardedAd = null;
@@ -1653,7 +1799,7 @@ public class MainActivity extends Activity {
             if (removeAdsPurchased || supporterActive) clearPendingRewardedShow();
             return;
         }
-        if (!unityAdsInitialized) return;
+        if (!admobInitialized) return;
         if (rewardedLoading || rewardedAd != null) {
             if (rewardedAd != null) uiHandler.post(this::maybeShowPendingRewardedAd);
             return;
@@ -1665,22 +1811,21 @@ public class MainActivity extends Activity {
 
         rewardedLoading = true;
         android.util.Log.i(ADS_LOG_TAG, "Rewarded request: " + REWARDED_AD_UNIT_ID);
-        UnityAds.load(REWARDED_AD_UNIT_ID, new IUnityAdsLoadListener() {
-            @Override public void onUnityAdsAdLoaded(String placementId) {
-                android.util.Log.i(ADS_LOG_TAG, "Rewarded loaded: " + placementId);
+        RewardedAd.load(this, REWARDED_AD_UNIT_ID, new AdRequest.Builder().build(),
+                new RewardedAdLoadCallback() {
+            @Override public void onAdLoaded(RewardedAd loadedAd) {
+                android.util.Log.i(ADS_LOG_TAG, "Rewarded loaded");
                 rewardedLoading = false;
-                rewardedAd = Boolean.TRUE;
+                rewardedAd = loadedAd;
                 resetRewardedBackoff();
                 uiHandler.post(MainActivity.this::maybeShowPendingRewardedAd);
             }
 
-            @Override public void onUnityAdsFailedToLoad(
-                    String placementId,
-                    UnityAds.UnityAdsLoadError error,
-                    String message
-            ) {
+            @Override public void onAdFailedToLoad(LoadAdError error) {
                 android.util.Log.w(ADS_LOG_TAG,
-                        "Rewarded failed: " + placementId + " error=" + error + " message=" + message);
+                        "Rewarded failed: code="
+                                + (error == null ? "unknown" : error.getCode())
+                                + " message=" + (error == null ? "" : error.getMessage()));
                 rewardedLoading = false;
                 rewardedAd = null;
                 registerRewardedLoadFailure();
@@ -3049,6 +3194,7 @@ public class MainActivity extends Activity {
         uiHandler.removeCallbacks(accessGateRecheckRunnable);
         pauseBannerAds();
         cancelAllBannerAdRetries();
+        cancelStartNativeAdRetry();
         saveAdFreeUntil();
         uiHandler.removeCallbacks(adFreeTicker);
         cancelInterstitialAdRetry();
@@ -3665,14 +3811,14 @@ public class MainActivity extends Activity {
         startNativeAdContainer = new FrameLayout(this);
         startNativeAdContainer.setVisibility(View.GONE);
         root.addView(startNativeAdContainer, lp(-1, -2, 0, 0, 0, 16));
-        if (startNativeAd != null) {
-            detachViewFromParent(startNativeAd);
+        if (startNativeAd != null && startNativeAdView != null) {
+            detachViewFromParent(startNativeAdView);
             FrameLayout.LayoutParams startAdLp = new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.WRAP_CONTENT,
                     Gravity.CENTER
             );
-            startNativeAdContainer.addView(startNativeAd, startAdLp);
+            startNativeAdContainer.addView(startNativeAdView, startAdLp);
             updateStartNativeAdVisibility();
         }
 
@@ -14794,11 +14940,6 @@ private int loadingProgressFor(String message) {
         colorPanel.setVisibility(View.GONE);
         bindColorPanelTouchLock(colorPanel);
         wrap.addView(colorPanel, lp(-1, -2, 0, 6, 0, 8));
-        View visualColorsBanner = buildVisualColorsBannerAd();
-        if (visualColorsBanner != null) {
-            wrap.addView(visualColorsBanner, lp(-1, dp(68), 0, 0, 0, 10));
-            requestVisualColorsBannerLoadIfNeeded();
-        }
 
         Runnable updatePreview = () -> {
             visualEditorCachedFigure = currentFigure[0];
