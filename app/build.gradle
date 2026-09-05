@@ -18,8 +18,8 @@ android {
         applicationId 'com.toxic.search'
         minSdk 23
         targetSdk 36
-        versionCode 89
-        versionName '1.4.5'
+        versionCode 90
+        versionName '1.4.6'
         buildConfigField 'String', 'HABBODEX_PROXY_KEY', "\"${escapedHabbodexProxyKey}\""
     }
 
@@ -54,11 +54,11 @@ android {
     buildTypes {
         debug {
             // Development APKs must never request production ads.
-            buildConfigField 'boolean', 'UNITY_USE_TEST_ADS', 'true'
+            buildConfigField 'boolean', 'ADMOB_USE_TEST_ADS', 'true'
         }
         release {
-            // Google Play / production builds use the real Unity ad units.
-            buildConfigField 'boolean', 'UNITY_USE_TEST_ADS', 'false'
+            // Google Play / production builds use the real AdMob ad units.
+            buildConfigField 'boolean', 'ADMOB_USE_TEST_ADS', 'false'
             if (hasReleaseSigning) {
                 signingConfig signingConfigs.release
             }
@@ -71,6 +71,6 @@ android {
 dependencies {
     implementation 'androidx.core:core:1.18.0'
     implementation 'com.github.bumptech.glide:glide:4.16.0'
-    implementation 'com.unity3d.ads:unity-ads:4.19.0'
+    implementation 'com.google.android.gms:play-services-ads:25.4.0'
     implementation 'com.android.billingclient:billing:9.1.0'
 }
