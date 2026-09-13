@@ -67,7 +67,7 @@ public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_BASE = "https://habbodex.com/api/v1/habboinfo";
     private static final String HABBODEX_FURNIDEX_API = "https://habbodex.com/api/v1/furnidex/furni/from-figure-string";
-    private static final String APP_VERSION = "1.4.6";
+    private static final String APP_VERSION = BuildConfig.VERSION_NAME;
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
     // A API fornece apenas o hash; o APK usa estes arquivos locais para que
@@ -193,7 +193,11 @@ public class MainActivity extends Activity {
     private static final long EMPTY_SUGGESTION_CACHE_TTL_MS = 30L * 1000L;
     private static final int SUGGESTION_CACHE_MAX_ENTRIES = 64;
     private final ExecutorService executor = Executors.newFixedThreadPool(10);
-    private final ExecutorService profileSectionsExecutor = Executors.newFixedThreadPool(6);
+    private final ProfileTaskScope profileSectionsExecutor = new ProfileTaskScope(6);
+    private final ProfileTaskScope profileRequestsExecutor = new ProfileTaskScope(4);
+    private final ExecutorService favoritesExecutor = Executors.newSingleThreadExecutor();
+    private final FriendPresenceController friendPresence = new FriendPresenceController();
+    private final BackNavigationController backNavigation = new BackNavigationController();
     private final ConcurrentHashMap<String, CachedJsonResponse> jsonResponseCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, CachedSuggestionResult> suggestionResultCache = new ConcurrentHashMap<>();
     private static volatile JSONObject habbonewsRarityItemsMemory;
@@ -204,10 +208,10 @@ public class MainActivity extends Activity {
     private FrameLayout habbodexWebHiddenHost;
     private Dialog habbodexVerificationDialog;
     private final Object habbodexWebSessionLock = new Object();
-    private volatile CompletableFuture<Boolean> habbodexWebSessionFuture = new CompletableFuture<>();
+    private volatile SettableFuture<Boolean> habbodexWebSessionFuture = new SettableFuture<>();
     private volatile boolean habbodexWebChallengeDetected = false;
     private volatile String habbodexWebLastChallengeUrl = "";
-    private final ConcurrentHashMap<String, CompletableFuture<String>> habbodexWebRequests = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, SettableFuture<String>> habbodexWebRequests = new ConcurrentHashMap<>();
     private final String habbodexWebBridgeToken = UUID.randomUUID().toString();
     private final AtomicInteger habbodexWebRequestSeq = new AtomicInteger(0);
     private static final long HABBODEX_WEB_BOOT_TIMEOUT_MS = 12_000L;
@@ -258,6 +262,11 @@ public class MainActivity extends Activity {
     private ProfileResult pendingProgressiveSnapshot = null;
     private int pendingProgressiveToken = 0;
     private volatile ProfileResult activeRenderedProfile = null;
+    private ProfileSectionsView profileSectionsView;
+    private String renderedSectionsKey = "";
+    private ProfileUiState pendingProfileRestore;
+    private boolean restoringProfile;
+    private int restoredPageLoads;
     // Fonte viva do perfil atual. Estados de UI que mudam durante um carregamento
     // progressivo também são gravados aqui, evitando que um snapshot posterior
     // reverta a escolha do usuário.
@@ -542,7 +551,7 @@ public class MainActivity extends Activity {
     private boolean billingConnecting = false;
     private boolean billingReady = false;
     private boolean pendingRemoveAdsPurchaseLaunch = false;
-    private boolean activityDestroyed = false;
+    private volatile boolean activityDestroyed = false;
     private int billingConnectionRetryAttempt = 0;
     private int removeAdsProductDetailsRetryAttempt = 0;
     private int supporterProductDetailsRetryAttempt = 0;
@@ -562,7 +571,7 @@ public class MainActivity extends Activity {
     private static final int REWARDED_ADS_REQUIRED = 3;
     private int rewardedAdsWatched = 0;
     private long lastFavoritesPullRefreshAt = 0L;
-    private boolean appInForeground = true;
+    private volatile boolean appInForeground = true;
     private static final long FAVORITE_ONLINE_FOREGROUND_INTERVAL_MS = 15L * 1000L;
     private static final long FAVORITE_ONLINE_BACKGROUND_INTERVAL_MS = 60L * 1000L;
     private static final long ACCESS_GATE_BLOCKED_RECHECK_MS = 3L * 1000L;
@@ -667,6 +676,7 @@ public class MainActivity extends Activity {
     @Override public void onCreate(Bundle b) {
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         super.onCreate(b);
+        pendingProfileRestore = ProfileUiState.read(b);
         try {
             if (getActionBar() != null) getActionBar().hide();
         } catch (Exception ignored) {}
@@ -676,6 +686,7 @@ public class MainActivity extends Activity {
             currentHotelKey = defaultHotelForDeviceLocale();
             getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PREF_HOTEL, currentHotelKey).apply();
         }
+        if (pendingProfileRestore != null) currentHotelKey = normalizeHotelKey(pendingProfileRestore.hotel);
         clearLegacyApiProfileCache();
         try {
             habboFont = Typeface.createFromAsset(getAssets(), "fonts/ubuntu_habbo.ttf");
@@ -729,6 +740,7 @@ public class MainActivity extends Activity {
         requestFavoriteNotificationPermissionIfNeeded();
         startFavoriteOnlineWatcher();
         updateFavoriteOnlineAlarm();
+        if (pendingProfileRestore != null) uiHandler.post(this::restoreProfileScreen);
     }
     private void requestFavoriteNotificationPermissionIfNeeded() {
         try {
@@ -791,17 +803,13 @@ public class MainActivity extends Activity {
     }
 
     private long calculateAdRetryDelayMs(int failureCount) {
-        int safeFailureCount = Math.max(1, failureCount);
-        int shift = Math.min(AD_RETRY_MAX_SHIFT, safeFailureCount - 1);
-        long delay = AD_RETRY_BASE_DELAY_MS << shift;
-        return Math.min(delay, AD_RETRY_MAX_DELAY_MS);
+        return AdPolicy.retryDelay(failureCount, AD_RETRY_BASE_DELAY_MS,
+                AD_RETRY_MAX_SHIFT, AD_RETRY_MAX_DELAY_MS);
     }
 
     private long calculateInterstitialRetryDelayMs(int failureCount) {
-        int safeFailureCount = Math.max(1, failureCount);
-        int shift = Math.min(INTERSTITIAL_RETRY_MAX_SHIFT, safeFailureCount - 1);
-        long delay = INTERSTITIAL_RETRY_BASE_DELAY_MS << shift;
-        return Math.min(delay, INTERSTITIAL_RETRY_MAX_DELAY_MS);
+        return AdPolicy.retryDelay(failureCount, INTERSTITIAL_RETRY_BASE_DELAY_MS,
+                INTERSTITIAL_RETRY_MAX_SHIFT, INTERSTITIAL_RETRY_MAX_DELAY_MS);
     }
 
     private void cancelInterstitialHealthCheck() {
@@ -861,7 +869,7 @@ public class MainActivity extends Activity {
         }
 
         if (interstitialAd != null && interstitialLoadedAt > 0L
-                && now - interstitialLoadedAt >= INTERSTITIAL_CACHE_MAX_AGE_MS) {
+                && AdPolicy.expired(interstitialLoadedAt, now, INTERSTITIAL_CACHE_MAX_AGE_MS)) {
             android.util.Log.i(ADS_LOG_TAG, "Interstitial cached ad expired; refreshing (" + reason + ")");
             interstitialAd = null;
             interstitialLoadedAt = 0L;
@@ -949,10 +957,8 @@ public class MainActivity extends Activity {
     }
 
     private long calculateBannerRetryDelayMs(int failureCount) {
-        int safeFailureCount = Math.max(1, failureCount);
-        int shift = Math.min(BANNER_RETRY_MAX_SHIFT, safeFailureCount - 1);
-        long delay = BANNER_RETRY_BASE_DELAY_MS << shift;
-        return Math.min(delay, BANNER_RETRY_MAX_DELAY_MS);
+        return AdPolicy.retryDelay(failureCount, BANNER_RETRY_BASE_DELAY_MS,
+                BANNER_RETRY_MAX_SHIFT, BANNER_RETRY_MAX_DELAY_MS);
     }
 
     private void cancelBannerAdRetry(AdView adView) {
@@ -1579,7 +1585,7 @@ public class MainActivity extends Activity {
         }
 
         if (interstitialAd != null) {
-            if (interstitialLoadedAt > 0L && now - interstitialLoadedAt >= INTERSTITIAL_CACHE_MAX_AGE_MS) {
+            if (interstitialLoadedAt > 0L && AdPolicy.expired(interstitialLoadedAt, now, INTERSTITIAL_CACHE_MAX_AGE_MS)) {
                 android.util.Log.i(ADS_LOG_TAG, "Interstitial preload expired; refreshing");
                 interstitialAd = null;
                 interstitialLoadedAt = 0L;
@@ -2069,21 +2075,17 @@ public class MainActivity extends Activity {
     }
 
     private void loadCachedSupporterEntitlement() {
-        SharedPreferences preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
-        String token = preferences.getString(PREF_SUPPORTER_VERIFIED_TOKEN, "");
-        long verifiedUntil = preferences.getLong(PREF_SUPPORTER_VERIFIED_UNTIL_MS, 0L);
-        long expiresAt = preferences.getLong(PREF_SUPPORTER_VERIFIED_EXPIRES_AT_MS, 0L);
-        long now = System.currentTimeMillis();
-        if (token != null && !token.trim().isEmpty()
-                && verifiedUntil > now && (expiresAt <= 0L || expiresAt > now)) {
-            supporterPurchaseToken = token.trim();
-            supporterCachedAccessUntilMs = verifiedUntil;
-            supporterExpiresAtMs = expiresAt;
-            supporterActive = true;
-            supporterNextVerificationAtMs = now;
-            return;
-        }
-        clearCachedSupporterEntitlement();
+        PurchaseEntitlementStore.Entitlement value = entitlementStore().read(System.currentTimeMillis());
+        if (value == null) { supporterCachedAccessUntilMs = 0L; return; }
+        supporterPurchaseToken = value.token;
+        supporterCachedAccessUntilMs = value.verifiedUntil;
+        supporterExpiresAtMs = value.expiresAt;
+        supporterActive = true;
+        supporterNextVerificationAtMs = System.currentTimeMillis();
+    }
+
+    private PurchaseEntitlementStore entitlementStore() {
+        return new PurchaseEntitlementStore(getSharedPreferences(PREFS, MODE_PRIVATE));
     }
 
     private boolean hasUsableCachedSupporterEntitlement(String purchaseToken) {
@@ -2095,24 +2097,13 @@ public class MainActivity extends Activity {
     }
 
     private void cacheConfirmedSupporterEntitlement(String purchaseToken) {
-        long now = System.currentTimeMillis();
-        long verifiedUntil = now + SUPPORTER_VERIFIED_CACHE_TTL_MS;
-        if (supporterExpiresAtMs > now) verifiedUntil = Math.min(verifiedUntil, supporterExpiresAtMs);
-        supporterCachedAccessUntilMs = verifiedUntil;
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                .putString(PREF_SUPPORTER_VERIFIED_TOKEN, purchaseToken)
-                .putLong(PREF_SUPPORTER_VERIFIED_UNTIL_MS, verifiedUntil)
-                .putLong(PREF_SUPPORTER_VERIFIED_EXPIRES_AT_MS, supporterExpiresAtMs)
-                .apply();
+        supporterCachedAccessUntilMs = entitlementStore().save(purchaseToken,
+                System.currentTimeMillis(), supporterExpiresAtMs, SUPPORTER_VERIFIED_CACHE_TTL_MS);
     }
 
     private void clearCachedSupporterEntitlement() {
         supporterCachedAccessUntilMs = 0L;
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                .remove(PREF_SUPPORTER_VERIFIED_TOKEN)
-                .remove(PREF_SUPPORTER_VERIFIED_UNTIL_MS)
-                .remove(PREF_SUPPORTER_VERIFIED_EXPIRES_AT_MS)
-                .apply();
+        entitlementStore().clear();
     }
 
     private void markSupporterEntitlementPending() {
@@ -3162,6 +3153,9 @@ public class MainActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         appInForeground = true;
+        FavoriteRefreshCoordinator.foreground = true;
+        friendPresence.resume();
+        backNavigation.install(this, this::handleAppBack);
         if (!accessProbeRunning) requestAccessGateCheck();
         resumeBannerAds();
         if (removeAdsPurchased || hasAdFreeAccess()) destroyAllBannerAds();
@@ -3191,6 +3185,9 @@ public class MainActivity extends Activity {
 
     @Override protected void onPause() {
         appInForeground = false;
+        FavoriteRefreshCoordinator.foreground = false;
+        friendPresence.pause();
+        if (favoriteOnlineWatcher != null) uiHandler.removeCallbacks(favoriteOnlineWatcher);
         uiHandler.removeCallbacks(accessGateRecheckRunnable);
         pauseBannerAds();
         cancelAllBannerAdRetries();
@@ -3203,6 +3200,71 @@ public class MainActivity extends Activity {
         cancelRewardedAdRetry();
         startFavoriteOnlineWatcher();
         super.onPause();
+    }
+
+    @Override protected void onSaveInstanceState(Bundle out) {
+        super.onSaveInstanceState(out);
+        ProfileResult profile = activeRenderedProfile;
+        if (profile == null || startScreenVisible) return;
+        ProfileUiState state = new ProfileUiState();
+        state.id = profile.uniqueId; state.name = profile.name;
+        state.figure = profile.figure; state.hotel = profile.hotelKey;
+        state.friendsPage = profile.friendsTabPage; state.removed = profile.friendsTabShowingRemoved;
+        state.badgesPage = profile.badgesTabPage; state.hideAchievements = profile.hideAchievementBadges;
+        state.mottoIndex = profile.previousMottosSlideIndex; state.avatarDirection = avatarDirection;
+        state.scrollY = mainScroll == null ? 0 : mainScroll.getScrollY();
+        state.photosX = photosHsv == null ? photosScrollX : photosHsv.getScrollX();
+        state.stylesX = stylesHsv == null ? stylesScrollX : stylesHsv.getScrollX();
+        state.write(out);
+    }
+
+    private void restoreProfileScreen() {
+        ProfileUiState state = pendingProfileRestore;
+        if (state == null || activityDestroyed) return;
+        restoringProfile = true;
+        try {
+            loadingProfileFigureHint = state.figure;
+            loadingProfileUniqueIdHint = state.id;
+            loadingProfileHotelHint = state.hotel;
+            setSearchTextProgrammatically(state.name);
+            if (!state.id.isEmpty()) searchByUniqueId(state.id, state.name, true);
+            else search(true);
+        } finally { restoringProfile = false; }
+    }
+
+    private void applyRestoredProfilePosition(ProfileResult profile) {
+        ProfileUiState state = pendingProfileRestore;
+        if (state == null || !state.matches(profile)) return;
+        avatarDirection = state.avatarDirection;
+        updateProfileAvatar();
+        photosScrollX = state.photosX; stylesScrollX = state.stylesX;
+        if (profileSectionsInProgress) return;
+        if (profile.friendsLoadFailed || profile.removedFriendsLoadFailed || profile.badgesLoadFailed) {
+            pendingProfileRestore = null;
+            return;
+        }
+        int friendCount = state.removed ? profile.oldFriends.size() : profile.friends.size();
+        boolean moreFriends = state.removed ? profile.removedFriendsHasMore : profile.friendsHasMore;
+        if (state.friendsPage > Math.max(1, (friendCount + 9) / 10) && moreFriends && restoredPageLoads < 20) {
+            if (!profile.friendsLoading && !profile.removedFriendsLoading) {
+                restoredPageLoads++;
+                uiHandler.post(() -> { if (pendingProfileRestore != state) return;
+                    if (state.removed) loadMoreRemovedFriends(profile); else loadMoreFriends(profile); });
+            }
+            return;
+        }
+        int badgeCount = state.hideAchievements ? withoutAchievementBadges(profile.badgesWithAchievements).size() : profile.badgesWithAchievements.size();
+        if (state.badgesPage > Math.max(1, (badgeCount + 23) / 24) && profile.badgesHasMore && restoredPageLoads < 20) {
+            if (!profile.badgesLoading) {
+                restoredPageLoads++;
+                uiHandler.post(() -> { if (pendingProfileRestore == state) loadMoreBadges(profile); });
+            }
+            return;
+        }
+        pendingProfileRestore = null;
+        if (mainScroll != null) mainScroll.post(() -> {
+            if (activeRenderedProfile == profile && mainScroll != null) mainScroll.scrollTo(0, state.scrollY);
+        });
     }
 
     @Override public void onConfigurationChanged(Configuration newConfig) {
@@ -3248,6 +3310,10 @@ public class MainActivity extends Activity {
         destroyAllBannerAds();
         if (favoriteOnlineWatcher != null) uiHandler.removeCallbacks(favoriteOnlineWatcher);
         try { if (billingClient != null && billingClient.isReady()) billingClient.endConnection(); } catch(Exception ignored) {}
+        friendPresence.close();
+        backNavigation.dispose(this);
+        favoritesExecutor.shutdown();
+        profileRequestsExecutor.shutdownNow();
         profileSectionsExecutor.shutdownNow();
         executor.shutdownNow();
         destroyHabbodexWebTransport();
@@ -5698,7 +5764,7 @@ public class MainActivity extends Activity {
         clearSearchFocus();
         setSuggestionsVisible(false);
 
-        final int token = ++activeSearchToken;
+        final int token = beginProfileRequest();
         activeSearchNick = nickKey;
         searchInProgress = true;
         startScreenVisible = false;
@@ -5717,9 +5783,9 @@ public class MainActivity extends Activity {
         final long loadingStartedAt = SystemClock.elapsedRealtime();
         resultWrap.removeAllViews();
         setLoading(true, t(R.string.searching_profile) + " " + nick + "...");
-        maybeShowProfileInterstitial();
+        if (!restoringProfile) maybeShowProfileInterstitial();
 
-        executor.execute(() -> {
+        profileRequestsExecutor.execute(() -> {
             try {
                 ProfileResult fresh = loadProfile(nick, false, token);
                 if (!isActiveToken(token)) return;
@@ -5755,7 +5821,8 @@ public class MainActivity extends Activity {
                     setLoading(false, "");
                     hidePullRefreshIndicator();
                     hidePullRefreshIndicator();
-                    showError(e.getMessage() == null ? t(R.string.error_search_profile) : e.getMessage());
+                    AppDiagnostics.failure("profile_load", e);
+                    showError(t(R.string.error_search_profile));
                 });
             }
         });
@@ -5765,8 +5832,18 @@ public class MainActivity extends Activity {
         return raw == null ? "" : raw.trim().toLowerCase(Locale.ROOT);
     }
 
+    private int beginProfileRequest() {
+        if (!restoringProfile) pendingProfileRestore = null;
+        profileSectionsView = null;
+        renderedSectionsKey = "";
+        profileSectionsExecutor.cancelPending();
+        profileRequestsExecutor.cancelPending();
+        friendPresence.beginPage("navigation:" + (activeSearchToken + 1));
+        return ++activeSearchToken;
+    }
+
     private boolean isActiveToken(int token) {
-        return token == activeSearchToken;
+        return !activityDestroyed && token == activeSearchToken;
     }
 
     private int boundProfileToken(ProfileResult profile) {
@@ -5892,7 +5969,7 @@ public class MainActivity extends Activity {
         if (blockRepeatedProfileOpen(name, uniqueId, hotel)) return;
         if (!claimProfileSearchSlot()) return;
 
-        activeSearchToken++;
+        beginProfileRequest();
         activeSearchNick = "";
         searchInProgress = false;
         profileSectionsInProgress = false;
@@ -5994,7 +6071,7 @@ public class MainActivity extends Activity {
         clearSearchFocus();
         setSuggestionsVisible(false);
 
-        final int token = ++activeSearchToken;
+        final int token = beginProfileRequest();
         activeSearchNick = idKey;
         searchInProgress = true;
         startScreenVisible = false;
@@ -6013,9 +6090,9 @@ public class MainActivity extends Activity {
         final long loadingStartedAt = SystemClock.elapsedRealtime();
         resultWrap.removeAllViews();
         setLoading(true, t(R.string.searching_profile) + " " + shownNick + "...");
-        maybeShowProfileInterstitial();
+        if (!restoringProfile) maybeShowProfileInterstitial();
 
-        executor.execute(() -> {
+        profileRequestsExecutor.execute(() -> {
             try {
                 ProfileResult fresh = loadProfileByUniqueId(id, shownNick, false, token);
                 if (!isActiveToken(token)) return;
@@ -6049,7 +6126,8 @@ public class MainActivity extends Activity {
                     inlineProgressMessage = "";
                     setLoading(false, "");
                     hidePullRefreshIndicator();
-                    showError(e.getMessage() == null ? t(R.string.error_search_profile) : e.getMessage());
+                    AppDiagnostics.failure("profile_load", e);
+                    showError(t(R.string.error_search_profile));
                 });
             }
         });
@@ -6251,7 +6329,7 @@ public class MainActivity extends Activity {
         // quando elas chegam, os itens são enriquecidos normalmente.
         final Future<JSONObject> officialProfileFuture = restrictedProfile
                 ? null
-                : executor.submit(() -> fetchOfficialProfileCollections(uniqueId));
+                : profileRequestsExecutor.submit(() -> fetchOfficialProfileCollections(uniqueId));
 
         // 1) Nomes anteriores são críticos. Não aceita uma resposta vazia transitória
         // do cache como confirmação definitiva: tenta rota dedicada, perfil completo
@@ -6365,8 +6443,7 @@ public class MainActivity extends Activity {
                 if (firstFriends != null
                         && firstFriends.success
                         && firstFriends.items != null
-                        && !firstFriends.items.isEmpty()
-                        && allFriendsHaveAddedDates(firstFriends.items)) {
+                        && !firstFriends.items.isEmpty()) {
                     synchronized (r) {
                         if (!restrictedProfile) {
                             r.officialProfileAttempted = true;
@@ -6379,9 +6456,9 @@ public class MainActivity extends Activity {
                         ArrayList<JSONObject> officialFriends = officialForFriends == null
                                 ? new ArrayList<>()
                                 : extractList(officialForFriends, "friends");
-                        // Mantém apenas os amigos já validados pelo HabboDex; a API oficial
-                        // apenas enriquece os mesmos registros e nunca adiciona amigos sem data.
+                        // Enriquece a página atual; datas ausentes não escondem amigos.
                         datedPage = mergeListsEnrichingPrimary(datedPage, officialFriends, false);
+                        FriendRecords.applyCurrentPresence(datedPage, officialFriends);
 
                         r.friendsPagedMode = true;
                         r.friends = datedPage;
@@ -6656,6 +6733,10 @@ public class MainActivity extends Activity {
         if (future == null) return null;
         try {
             return future.get();
+        } catch(InterruptedException cancelled) {
+            Thread.currentThread().interrupt();
+            future.cancel(true);
+            return null;
         } catch(Exception ignored) {
             future.cancel(true);
             return null;
@@ -7254,12 +7335,8 @@ public class MainActivity extends Activity {
                     || !normalizeHotelKey(activeRenderedProfile.hotelKey).equals(
                             normalizeHotelKey(pending.hotelKey)
                     )) return;
-            final int scrollY = mainScroll == null ? 0 : mainScroll.getScrollY();
             renderProfile(pending);
             uiHandler.postDelayed(this::refreshAttachedProfileBannerAds, 160L);
-            if (mainScroll != null && scrollY > 0) {
-                mainScroll.post(() -> mainScroll.scrollTo(0, scrollY));
-            }
         }, delay);
     }
 
@@ -7487,6 +7564,7 @@ public class MainActivity extends Activity {
             // Emblemas paginados já carregados pelo HabboDex permanecem soberanos.
         }
 
+        if (official != null) FriendRecords.applyCurrentPresence(r.friends, extractList(official, "friends"));
         r.badges = withoutAchievementBadges(r.badgesWithAchievements);
         if (r.badgesWithAchievements != null && !r.badgesWithAchievements.isEmpty()) {
             int declared = 0;
@@ -8327,8 +8405,8 @@ public class MainActivity extends Activity {
         boolean loading;
         long retryAfter;
         synchronized (source) {
-            photos = new ArrayList<>(source.photos);
-            allPhotos = new ArrayList<>(source.allPhotosSource);
+            photos = ProfileSnapshots.list(source.photos);
+            allPhotos = ProfileSnapshots.list(source.allPhotosSource);
             nextPage = source.photosNextPage;
             total = source.photosTotal;
             hasMore = source.photosHasMore;
@@ -8361,8 +8439,8 @@ public class MainActivity extends Activity {
         boolean fromComplement;
         long retryAfter;
         synchronized (source) {
-            styles = new ArrayList<>(source.previousStyles);
-            allStyles = new ArrayList<>(source.allStylesSource);
+            styles = ProfileSnapshots.list(source.previousStyles);
+            allStyles = ProfileSnapshots.list(source.allStylesSource);
             nextPage = source.stylesNextPage;
             total = source.stylesTotal;
             remoteNextPage = source.stylesRemoteNextPage;
@@ -8520,7 +8598,7 @@ public class MainActivity extends Activity {
         photosScrollX = photosHsv == null ? 0 : photosHsv.getScrollX();
         syncPhotosPaginationToRendered(state);
         setHorizontalCarouselLoading(TAG_PHOTOS_CAROUSEL_ROW, true, 165);
-        executor.execute(() -> {
+        profileRequestsExecutor.execute(() -> {
             try {
                 PageResult next = fetchPageChunk(
                         state.uniqueId,
@@ -8607,7 +8685,7 @@ public class MainActivity extends Activity {
             }
             syncStylesPaginationToRendered(state);
             setHorizontalCarouselLoading(TAG_STYLES_CAROUSEL_ROW, true, 162);
-            executor.execute(() -> {
+            profileRequestsExecutor.execute(() -> {
                 try {
                     PageResult next = fetchStylesRemoteChunk(
                             state.uniqueId,
@@ -8732,43 +8810,115 @@ public class MainActivity extends Activity {
         return out;
     }
 
-    private void renderProfile(ProfileResult r) {
-        // Never allow a delayed callback from an older search to take the screen back.
-        if (r != null && r.searchToken > 0 && r.searchToken != activeSearchToken) return;
-        loadingSkeletonProgressBar = null;
-        profilePrimaryProgressAnchor = null;
-        String renderedHotel = r == null ? "" : normalizeHotelKey(r.hotelKey);
-        if (!renderedHotel.isEmpty() && !renderedHotel.equals(currentHotelKey)) {
-            currentHotelKey = renderedHotel;
-            getSharedPreferences(PREFS, MODE_PRIVATE).edit()
-                    .putString(PREF_HOTEL, currentHotelKey)
-                    .apply();
+    private void renderProfile(ProfileResult incoming) {
+        if (incoming == null || !isActiveToken(boundProfileToken(incoming))) return;
+        String hotel = normalizeHotelKey(incoming.hotelKey);
+        if (!hotel.isEmpty() && !hotel.equals(currentHotelKey)) {
+            currentHotelKey = hotel;
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PREF_HOTEL, hotel).apply();
         }
-        updateSelectedHotelHeaderFlag();
-        normalizeProfileState(r);
-        activeRenderedProfile = r;
+        normalizeProfileState(incoming);
+        String key = activeSearchToken + ":" + profileIdentityKey(incoming.hotelKey, incoming.uniqueId, incoming.name);
+        boolean reuse = profileSectionsView != null && profileSectionsView.owns(resultWrap) && key.equals(renderedSectionsKey);
+        if (reuse) {
+            if (photosHsv != null) photosScrollX = photosHsv.getScrollX();
+            if (stylesHsv != null) stylesScrollX = stylesHsv.getScrollX();
+        }
+        if (reuse && activeRenderedProfile != null) {
+            if (!ProfileStateMerger.update(activeRenderedProfile, incoming)) return;
+        } else activeRenderedProfile = incoming;
+        final ProfileResult r = activeRenderedProfile;
+        if (pendingProfileRestore != null && pendingProfileRestore.matches(r)) {
+            pendingProfileRestore.apply(r);
+            photosScrollX = pendingProfileRestore.photosX;
+            stylesScrollX = pendingProfileRestore.stylesX;
+        }
+        if (!reuse) {
+            profileSectionsView = new ProfileSectionsView(resultWrap);
+            renderedSectionsKey = key;
+            profilePrimaryProgressAnchor = null;
+            profileFriendTutorialTarget = null;
+        }
+        ProfileSectionsView.Anchor anchor = reuse ? profileSectionsView.anchor(mainScroll) : null;
         startScreenVisible = false;
+        currentProfilePrivate = r.privateProfile || r.banned;
+        updateSelectedHotelHeaderFlag();
         updateStartNativeAdVisibility();
         rememberOpenedProfile(r);
-        currentProfilePrivate = r != null && (r.privateProfile || r.banned);
-        profileAvatarTutorialTarget = null;
-        profileFavoriteTutorialTarget = null;
-        profileFriendTutorialTarget = null;
         if (!searchInProgress) setLoading(false, "");
+        final boolean unavailable = !profileSectionsInProgress && isHabbodexTemporarilyUnavailable();
+        final boolean restricted = r.privateProfile || r.banned;
+        final String theme = ":" + lightTheme + ":" + currentProfilePrivate + ":" + hasAdFreeAccess();
+        renderProfileSection("progress", profileSectionsInProgress + ":" + inlineProgressPct + ":" + inlineProgressMessage, () -> {
+            profilePrimaryProgressAnchor = null;
+            if (profileSectionsInProgress && inlineProgressMessage != null && !inlineProgressMessage.isEmpty()) {
+                LinearLayout progressCard = loadingProgressCard(inlineProgressMessage, inlineProgressPct);
+                profilePrimaryProgressAnchor = progressCard;
+                resultWrap.addView(progressCard, lp(-1, -2, 0, 0, 0, 12));
+            }
+        });
+        renderProfileSection("header", r.name + ":" + r.figure + ":" + r.motto + ":" + r.banned
+                + ":" + recordsSignature(r.selectedBadges) + theme, () -> renderProfileHeader(r));
+        renderProfileSection("names", recordsSignature(r.previousNames) + theme, () -> addPreviousNames(r.previousNames));
+        renderProfileSection("mottos", recordsSignature(r.previousMottos) + theme, () -> addPreviousMottos(r, r.previousMottos));
+        renderProfileSection("styles", recordsSignature(r.previousStyles) + ":" + r.stylesHasMore + ":" + r.stylesLoading + ":" + r.stylesTotal + theme, () -> {
+            if (!r.previousStyles.isEmpty() || r.stylesHasMore || r.stylesLoading) addPreviousStyles(r);
+        });
+        renderProfileSection("photos", recordsSignature(r.photos) + ":" + r.photosHasMore + ":" + r.photosLoading + ":" + r.photosTotal + ":" + unavailable + theme, () -> {
+            if (!r.photos.isEmpty() || r.photosHasMore || r.photosLoading) addPhotos(r);
+            else if (unavailable && restricted) addUnavailableSection(R.string.user_photos);
+        });
+        renderProfileSection("stats", r.online + ":" + r.lastAccess + ":" + r.memberSince + ":" + r.starGems + ":" + r.level + theme, () -> addStats(r));
+        renderProfileSection("friends", recordsSignature(r.friends) + ":" + recordsSignature(r.oldFriends)
+                + ":" + r.friendsTotal + ":" + r.removedFriendsTotal + ":" + r.friendsDatesReady
+                + ":" + r.friendsLoading + ":" + r.removedFriendsLoading + ":" + r.removedFriendsDataAvailable
+                + ":" + r.friendsLoadFailed + ":" + r.removedFriendsLoadFailed + ":" + r.friendsHasMore + ":" + r.removedFriendsHasMore + ":" + profileSectionsInProgress
+                + ":" + unavailable + theme, () -> {
+            if (r.friendsDatesReady || !r.oldFriends.isEmpty() || r.removedFriendsLoading) addFriendsTabs(r);
+            else if (unavailable) addUnavailableSection(R.string.friends);
+        });
+        renderProfileSection("rooms", recordsSignature(r.rooms) + ":" + unavailable + theme, () -> {
+            if (!r.rooms.isEmpty()) addRoomsTabs(r.rooms);
+            else if (unavailable && restricted) addUnavailableSection(R.string.rooms);
+        });
+        renderProfileSection("groups", recordsSignature(r.groups) + ":" + unavailable + theme, () -> {
+            if (!r.groups.isEmpty()) addGroups(r.groups);
+            else if (unavailable && restricted) addUnavailableSection(R.string.groups);
+        });
+        renderProfileSection("badges", recordsSignature(r.badgesWithAchievements) + ":" + recordsSignature(r.badges)
+                + ":" + r.badgesLoadFailed + ":" + r.badgesTotal + ":" + r.badgesHasMore + ":" + r.badgesLoading + ":" + r.badgesPagedMode
+                + ":" + unavailable + theme, () -> {
+            boolean hasBadges = !r.badgesWithAchievements.isEmpty() || !r.badges.isEmpty();
+            boolean known = r.officialProfile != null && hasNamedListDeep(r.officialProfile, "badges");
+            if (hasBadges || !unavailable) addBadgesSection(r);
+            else if (!known) addUnavailableSection(R.string.badges);
+        });
+        updateFloatingProfileProgressIndicators();
+        friendPresence.requestSoon();
+        if (anchor != null && mainScroll != null) anchor.restore(mainScroll);
+        applyRestoredProfilePosition(r);
+    }
+
+    private void renderProfileSection(String key, String signature, Runnable build) {
+        profileSectionsView.render(key, signature, target -> {
+            LinearLayout root = resultWrap;
+            resultWrap = target;
+            try { build.run(); } finally { resultWrap = root; }
+        });
+    }
+
+    private String recordsSignature(ArrayList<JSONObject> records) {
+        if (records == null) return "0";
+        long hash = 1125899906842597L;
+        for (JSONObject record : records) hash = 31L * hash + (record == null ? 0 : record.toString().hashCode());
+        return records.size() + ":" + Long.toHexString(hash);
+    }
+
+    private void renderProfileHeader(ProfileResult r) {
         selectedBadgesLiveHost = null;
         selectedBadgesLiveToken = 0;
-        resultWrap.removeAllViews();
-
-        if (profileSectionsInProgress
-                && inlineProgressMessage != null
-                && !inlineProgressMessage.trim().isEmpty()) {
-            LinearLayout progressCard = loadingProgressCard(inlineProgressMessage, inlineProgressPct);
-            profilePrimaryProgressAnchor = progressCard;
-            resultWrap.addView(progressCard, lp(-1, -2, 0, 0, 0, 12));
-            progressCard.post(this::updateFloatingProfileProgressIndicators);
-        }
-        updateFloatingProfileProgressIndicators();
-
+        profileAvatarTutorialTarget = null;
+        profileFavoriteTutorialTarget = null;
         LinearLayout profile = card(dp(26));
         applyProfilePrivateBorder(profile, dp(26));
         profile.setPadding(dp(20), dp(20), dp(20), dp(20));
@@ -8833,63 +8983,8 @@ public class MainActivity extends Activity {
         }
 
         addSelectedBadges(r.selectedBadges);
-        boolean additionalDataUnavailable = !profileSectionsInProgress
-                && isHabbodexTemporarilyUnavailable();
-        boolean restrictedProfile = r.privateProfile || r.banned;
-
-        if (r.previousNames != null && !r.previousNames.isEmpty()) {
-            addPreviousNames(r.previousNames);
-        }
-
-        if (r.previousMottos != null && !r.previousMottos.isEmpty()) {
-            addPreviousMottos(r, r.previousMottos);
-        }
-
-        if ((r.previousStyles != null && !r.previousStyles.isEmpty())
-                || r.stylesHasMore || r.stylesLoading) {
-            addPreviousStyles(r);
-        }
-
-        if ((r.photos != null && !r.photos.isEmpty())
-                || r.photosHasMore || r.photosLoading) {
-            addPhotos(r);
-        } else if (additionalDataUnavailable && restrictedProfile) {
-            addUnavailableSection(R.string.user_photos);
-        }
-        addStats(r);
-
-        boolean hasFriendsArea = r.friendsDatesReady
-                || (r.oldFriends != null && !r.oldFriends.isEmpty())
-                || r.removedFriendsLoading;
-        if (hasFriendsArea) {
-            addFriendsTabs(r);
-        } else if (additionalDataUnavailable) {
-            addUnavailableSection(R.string.friends);
-        }
-
-        if (r.rooms != null && !r.rooms.isEmpty()) {
-            addRoomsTabs(r.rooms);
-        } else if (additionalDataUnavailable && restrictedProfile) {
-            addUnavailableSection(R.string.rooms);
-        }
-
-        if (r.groups != null && !r.groups.isEmpty()) {
-            addGroups(r.groups);
-        } else if (additionalDataUnavailable && restrictedProfile) {
-            addUnavailableSection(R.string.groups);
-        }
-
-        boolean hasBadges = (r.badgesWithAchievements != null
-                && !r.badgesWithAchievements.isEmpty())
-                || (r.badges != null && !r.badges.isEmpty());
-        boolean officialBadgesKnown = r.officialProfile != null
-                && hasNamedListDeep(r.officialProfile, "badges");
-        if (hasBadges || !additionalDataUnavailable) {
-            addBadgesSection(r);
-        } else if (!officialBadgesKnown) {
-            addUnavailableSection(R.string.badges);
-        }
     }
+
 
     private LinearLayout profileBadge(String label, String icon, int color) {
         LinearLayout row = new LinearLayout(this);
@@ -10537,52 +10632,64 @@ public class MainActivity extends Activity {
         loadMoreBadges(r, null);
     }
 
-    private void loadMoreBadges(ProfileResult r, Runnable sectionRefresh) {
-        if (r == null || r.badgesLoading || !r.badgesHasMore
-                || r.uniqueId == null || r.uniqueId.trim().isEmpty()) return;
+    private void loadMoreBadges(ProfileResult rendered, Runnable sectionRefresh) {
+        final ProfileResult r = livePaginationProfile(rendered);
+        if (r == null || r.badgesLoading || !r.badgesHasMore || r.uniqueId.trim().isEmpty()) return;
         final int token = boundProfileToken(r);
         if (!isCurrentProfileResult(r, token)) return;
         final int nextPage = r.badgesNextPage <= 1 ? 2 : r.badgesNextPage;
         r.badgesLoading = true;
-        executor.execute(() -> {
+        r.badgesLoadFailed = false;
+        if (activeRenderedProfile != null) activeRenderedProfile.badgesLoading = true;
+        profileRequestsExecutor.execute(() -> {
+            boolean succeeded = false;
             try {
-                PageResult next = fetchCriticalBadgesPage(
-                        r.uniqueId, nextPage, 100, false
-                );
+                PageResult next = fetchCriticalBadgesPage(r.uniqueId, nextPage, 100, false);
                 if (!isCurrentProfileResult(r, token) || next == null || !next.success) return;
+                if (next.items.isEmpty() && next.hasMore) return;
                 synchronized (r) {
+                    int previousCount = r.badgesWithAchievements.size();
                     applyBadgesPage(r, next, false);
+                    if (r.badgesWithAchievements.size() == previousCount) {
+                        r.badgesHasMore = next.hasMore;
+                        r.badgesNextPage = next.hasMore ? nextPage : 0;
+                        if (next.hasMore) return;
+                    }
                     reconcileProfileSources(r);
                     enrichSelectedBadgesWithOwnership(r);
                 }
+                succeeded = true;
+            } catch (Exception error) {
+                AppDiagnostics.failure("badges_page", error);
             } finally {
                 r.badgesLoading = false;
-                runOnUiThread(() -> {
-                    if (!isCurrentProfileResult(r, token)) return;
-                    // Automatic pagination only refreshes the badge section. Rebuilding
-                    // the whole profile here made rooms/styles/mottos visibly blink.
-                    if (sectionRefresh != null) {
-                        sectionRefresh.run();
-                    } else {
-                        final int scrollY = mainScroll == null ? 0 : mainScroll.getScrollY();
-                        renderProfile(r);
-                        if (mainScroll != null && scrollY > 0) {
-                            mainScroll.post(() -> mainScroll.scrollTo(0, scrollY));
-                        }
-                    }
-                });
+                r.badgesLoadFailed = !succeeded;
+                publishPaginationResult(r, token);
             }
         });
     }
 
-    private void loadMoreFriends(ProfileResult r) {
+    private void publishPaginationResult(ProfileResult source, int token) {
+        if (!isActiveToken(token)) return;
+        final ProfileResult snapshot;
+        synchronized (source) { snapshot = copyProfileResult(source); }
+        runOnUiThread(() -> {
+            if (isCurrentProfileResult(source, token)) renderProfile(snapshot);
+        });
+    }
+
+    private void loadMoreFriends(ProfileResult rendered) {
+        final ProfileResult r = livePaginationProfile(rendered);
         if (r == null || r.friendsLoading || !r.friendsHasMore
                 || r.uniqueId == null || r.uniqueId.trim().isEmpty()) return;
         final int token = boundProfileToken(r);
         if (!isCurrentProfileResult(r, token)) return;
         final int nextPage = r.friendsNextPage <= 1 ? 2 : r.friendsNextPage;
         r.friendsLoading = true;
-        executor.execute(() -> {
+        r.friendsLoadFailed = false;
+        if (activeRenderedProfile != null) activeRenderedProfile.friendsLoading = true;
+        profileRequestsExecutor.execute(() -> {
+            boolean succeeded = false;
             try {
                 PageResult next = fetchCriticalFriendsPage(
                         r.uniqueId,
@@ -10594,8 +10701,11 @@ public class MainActivity extends Activity {
                         || next == null
                         || !next.success
                         || next.items == null
-                        || next.items.isEmpty()
-                        || !allFriendsHaveAddedDates(next.items)) return;
+                        ) return;
+                if (next.items.isEmpty()) {
+                    if (!next.hasMore) { r.friendsHasMore = false; r.friendsNextPage = 0; succeeded = true; }
+                    return;
+                }
 
                 synchronized (r) {
                     ArrayList<JSONObject> officialFriends = r.officialProfile == null
@@ -10606,9 +10716,16 @@ public class MainActivity extends Activity {
                             officialFriends,
                             false
                     );
+                    int previousCount = r.friends.size();
                     r.friends = mergeListsEnrichingPrimary(r.friends, datedPage, true);
+                    if (r.friends.size() == previousCount) {
+                        r.friendsHasMore = next.hasMore;
+                        r.friendsNextPage = next.hasMore ? nextPage : 0;
+                        succeeded = !next.hasMore;
+                        return;
+                    }
                     r.friendsPagedMode = true;
-                    r.friendsDatesReady = allFriendsHaveAddedDates(r.friends);
+                    r.friendsDatesReady = !r.friends.isEmpty();
                     if (next.total > 0) r.friendsTotal = Math.max(r.friendsTotal, next.total);
                     if (!officialFriends.isEmpty()) r.friendsTotal = Math.max(r.friendsTotal, officialFriends.size());
                     r.friendsNextPage = next.nextPage;
@@ -10620,24 +10737,29 @@ public class MainActivity extends Activity {
                     reconcileProfileSources(r);
                     enrichPhotoRoomInfo(r);
                 }
+                succeeded = true;
+            } catch (Exception error) {
+                AppDiagnostics.failure("friends_page", error);
             } finally {
                 r.friendsLoading = false;
-                runOnUiThread(() -> {
-                    if (!isCurrentProfileResult(r, token)) return;
-                    renderProfile(r);
-                });
+                r.friendsLoadFailed = !succeeded;
+                publishPaginationResult(r, token);
             }
         });
     }
 
-    private void loadMoreRemovedFriends(ProfileResult r) {
+    private void loadMoreRemovedFriends(ProfileResult rendered) {
+        final ProfileResult r = livePaginationProfile(rendered);
         if (r == null || r.removedFriendsLoading || !r.removedFriendsHasMore
                 || r.uniqueId == null || r.uniqueId.trim().isEmpty()) return;
         final int token = boundProfileToken(r);
         if (!isCurrentProfileResult(r, token)) return;
         final int nextPage = r.removedFriendsNextPage <= 1 ? 2 : r.removedFriendsNextPage;
         r.removedFriendsLoading = true;
-        executor.execute(() -> {
+        r.removedFriendsLoadFailed = false;
+        if (activeRenderedProfile != null) activeRenderedProfile.removedFriendsLoading = true;
+        profileRequestsExecutor.execute(() -> {
+            boolean succeeded = false;
             try {
                 PageResult next = fetchPage(
                         r.uniqueId,
@@ -10646,9 +10768,21 @@ public class MainActivity extends Activity {
                         nextPage,
                         100
                 );
-                if (!isActiveToken(token) || !next.success) return;
+                if (!isCurrentProfileResult(r, token) || next == null || !next.success) return;
+                if (next.items.isEmpty()) {
+                    if (!next.hasMore) { r.removedFriendsHasMore = false; r.removedFriendsNextPage = 0; succeeded = true; }
+                    return;
+                }
                 synchronized (r) {
+                    int previousCount = r.oldFriends.size();
                     r.oldFriends = mergeLists(r.oldFriends, next.items);
+                    if (r.oldFriends.size() == previousCount) {
+                        r.removedFriendsHasMore = next.hasMore;
+                        r.removedFriendsNextPage = next.hasMore ? nextPage : 0;
+                        succeeded = !next.hasMore;
+                        return;
+                    }
+                    r.removedFriendsDataAvailable = true;
                     if (next.total > 0) r.removedFriendsTotal = Math.max(r.removedFriendsTotal, next.total);
                     r.removedFriendsNextPage = next.nextPage;
                     r.removedFriendsHasMore = next.hasMore
@@ -10657,12 +10791,13 @@ public class MainActivity extends Activity {
                         r.removedFriendsNextPage = nextPage + 1;
                     }
                 }
+                succeeded = true;
+            } catch (Exception error) {
+                AppDiagnostics.failure("removed_friends_page", error);
             } finally {
                 r.removedFriendsLoading = false;
-                runOnUiThread(() -> {
-                    if (!isCurrentProfileResult(r, token)) return;
-                    renderProfile(r);
-                });
+                r.removedFriendsLoadFailed = !succeeded;
+                publishPaginationResult(r, token);
             }
         });
     }
@@ -10744,6 +10879,24 @@ public class MainActivity extends Activity {
                     }
                 });
             }
+            boolean failed = showingRemoved[0] ? profileResult.removedFriendsLoadFailed : profileResult.friendsLoadFailed;
+            boolean loading = showingRemoved[0] ? profileResult.removedFriendsLoading : profileResult.friendsLoading;
+            boolean hasMore = showingRemoved[0] ? profileResult.removedFriendsHasMore : profileResult.friendsHasMore;
+            if (!profileSectionsInProgress && data.size() <= 10 && hasMore && !loading && !failed) {
+                final int token = boundProfileToken(profileResult);
+                uiHandler.post(() -> {
+                    if (!isCurrentProfileResult(profileResult, token)) return;
+                    if (showingRemoved[0]) loadMoreRemovedFriends(profileResult); else loadMoreFriends(profileResult);
+                });
+            }
+            if (failed && !loading) {
+                TextView retry = dialogButton(t(R.string.retry_section));
+                retry.setOnClickListener(v -> {
+                    retry.setEnabled(false);
+                    if (showingRemoved[0]) loadMoreRemovedFriends(profileResult); else loadMoreFriends(profileResult);
+                });
+                content.addView(retry, lp(-1, dp(42), 0, 8, 0, 0));
+            } else if (loading) content.addView(centerNote(t(R.string.loading_history)));
         };
         btFriends.setOnClickListener(v -> {
             showingRemoved[0] = false;
@@ -10787,6 +10940,7 @@ public class MainActivity extends Activity {
     private Drawable tabBg(boolean active) { return active ? grad(dp(13), purple2, purple) : round(lightTheme ? Color.rgb(244,244,246) : Color.rgb(18,17,25), dp(13), lightTheme ? Color.rgb(210,210,214) : Color.rgb(55,50,70), 1); }
 
     private void renderFriendsPage(LinearLayout content, ArrayList<JSONObject> data, int page, int per, boolean removed) {
+        friendPresence.beginPage(activeSearchToken + ":" + currentHotelKey + ":" + removed + ":" + page);
         if (data.isEmpty()) { content.addView(centerNote(removed ? t(R.string.no_removed_friend_found) : t(R.string.no_friend_found))); return; }
         int start = Math.max(0, (page-1)*per), end = Math.min(data.size(), start+per);
         for (int i=start; i<end; i+=2) {
@@ -10830,12 +10984,18 @@ public class MainActivity extends Activity {
             FrameLayout.LayoutParams np = new FrameLayout.LayoutParams(dp(48), dp(18), Gravity.TOP|Gravity.CENTER_HORIZONTAL);
             headWrap.addView(novo,np);
         }
-        if (optBoolAny(f, false, "online", "isOnline")) {
-            IconView dot = new IconView(this, "dot");
-            FrameLayout.LayoutParams dpv = new FrameLayout.LayoutParams(dp(22), dp(22), Gravity.RIGHT|Gravity.TOP);
-            dpv.topMargin=dp(8); dpv.rightMargin=dp(8);
-            headWrap.addView(dot, dpv);
-        }
+        IconView dot = new IconView(this, "dot");
+        FrameLayout.LayoutParams indicatorParams = new FrameLayout.LayoutParams(dp(22), dp(22), Gravity.RIGHT | Gravity.TOP);
+        indicatorParams.topMargin = dp(8); indicatorParams.rightMargin = dp(8);
+        headWrap.addView(dot, indicatorParams);
+        final String presenceName = n;
+        friendPresence.bind(card, currentHotelKey, fid, n, state -> {
+            dot.setVisibility(state == PresenceRepository.State.ONLINE ? View.VISIBLE : View.INVISIBLE);
+            String status = state == PresenceRepository.State.ONLINE ? t(R.string.online)
+                    : state == PresenceRepository.State.OFFLINE ? t(R.string.offline) : t(R.string.not_available);
+            dot.setContentDescription(status);
+            card.setContentDescription(presenceName + ", " + status);
+        });
 
         TextView name = habboText(n, 14, true);
         name.setGravity(Gravity.CENTER);
@@ -11211,12 +11371,17 @@ public class MainActivity extends Activity {
             if (!profileSectionsInProgress
                     && r.badgesHasMore
                     && currentData.size() <= 24
-                    && !r.badgesLoading) {
+                    && !r.badgesLoading && !r.badgesLoadFailed) {
                 final int badgeProfileToken = boundProfileToken(r);
                 uiHandler.post(() -> {
                     if (!isCurrentProfileResult(r, badgeProfileToken)) return;
                     loadMoreBadges(r, render[0]);
                 });
+            }
+            if (r.badgesLoadFailed && !r.badgesLoading) {
+                TextView retry = dialogButton(t(R.string.retry_section));
+                retry.setOnClickListener(v -> { retry.setEnabled(false); loadMoreBadges(r); });
+                content.addView(retry, lp(-1, dp(42), 0, 8, 0, 0));
             }
             if (r.badgesLoading) {
                 content.addView(centerNote(t(R.string.loading_history)));
@@ -11313,28 +11478,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    private int groupAccessKind(JSONObject g) {
-        String raw = firstText(
-                g,
-                "accessType", "groupAccess", "joinType", "membershipType",
-                "type", "groupType", "status"
-        );
-        String value = raw == null ? "" : raw.trim().toUpperCase(Locale.ROOT);
-        value = value.replace('-', '_').replace(' ', '_');
-        if (value.contains("EXCLUSIVE") || value.contains("REQUEST")
-                || value.contains("APPROVAL") || value.contains("LOCKED")) {
-            return 2; // solicitação
-        }
-        if (value.contains("PRIVATE") || value.contains("CLOSED")
-                || value.contains("CLOSE")) {
-            return 3; // fechado
-        }
-        if (value.contains("NORMAL") || value.contains("REGULAR") || value.contains("OPEN")
-                || value.contains("FREE") || value.contains("PUBLIC")) {
-            return 1; // aberto
-        }
-        return 0;
-    }
+    private int groupAccessKind(JSONObject group) { return GroupMetadata.access(group); }
 
     private String groupAccessLabel(JSONObject g) {
         int kind = groupAccessKind(g);
@@ -11370,41 +11514,19 @@ public class MainActivity extends Activity {
         return false;
     }
 
-    private String groupUserRoleLabel(JSONObject g) {
-        JSONObject membership = g == null ? null : g.optJSONObject("membership");
-        if (membership == null && g != null) membership = g.optJSONObject("member");
-        if (membership == null && g != null) membership = g.optJSONObject("userMembership");
+    private String groupUserRoleLabel(JSONObject group) {
+        int role = GroupMetadata.role(group);
+        return t(role == GroupMetadata.OWNER ? R.string.group_role_creator
+                : role == GroupMetadata.ADMIN ? R.string.group_role_admin : R.string.group_role_member);
+    }
 
-        // Regra autoritativa: somente a rota /groups do HabboDex fornece owner.
-        // Nenhum campo da API oficial é usado para inferir Criador.
-        if (g != null && g.optBoolean(HABBODEX_GROUP_OWNER_KEY, false)) {
-            return t(R.string.group_role_creator);
-        }
-
-        String rawRole = firstText(
-                g,
-                "memberRole", "membershipRole", "userRole", "role", "rank", "membershipStatus"
-        ).toUpperCase(Locale.ROOT);
-        if (membership != null) {
-            String nestedRole = firstText(
-                    membership, "memberRole", "membershipRole", "userRole", "role", "rank", "status"
-            ).toUpperCase(Locale.ROOT);
-            if (!nestedRole.isEmpty()) rawRole = rawRole + " " + nestedRole;
-        }
-
-        boolean admin = jsonAnyTrue(
-                g,
-                "isAdmin", "admin", "administrator", "isAdministrator", "groupAdmin",
-                "userIsAdmin", "isGroupAdmin"
-        );
-        admin = admin || jsonAnyTrue(
-                membership,
-                "isAdmin", "admin", "administrator", "isAdministrator", "groupAdmin"
-        );
-        if (rawRole.contains("ADMIN") || rawRole.contains("MODERATOR")
-                || rawRole.contains("STAFF")) admin = true;
-        if (admin) return t(R.string.group_role_admin);
-        return t(R.string.group_role_member);
+    private ImageView groupMetadataIcon(int resource, String description) {
+        ImageView icon = new ImageView(this);
+        icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        icon.setContentDescription(description);
+        // Automatic decoding also plays animated GIFs when original assets are supplied.
+        Glide.with(this).load(resource).override(dp(40), dp(36)).into(icon);
+        return icon;
     }
 
     private LinearLayout groupRow(JSONObject g) {
@@ -11470,33 +11592,17 @@ public class MainActivity extends Activity {
         meta.setGravity(Gravity.CENTER_VERTICAL);
         txt.addView(meta, new LinearLayout.LayoutParams(-1, dp(18)));
 
-        String access = groupAccessLabel(g);
-        int accessSize = access.length() > 10 ? 9 : 10;
-        TextView accessValue = text(
-                access,
-                accessSize,
-                groupAccessTextColor(g),
-                true
-        );
-        accessValue.setIncludeFontPadding(false);
-        accessValue.setGravity(Gravity.LEFT | Gravity.CENTER_VERTICAL);
-        accessValue.setSingleLine(true);
-        accessValue.setEllipsize(TextUtils.TruncateAt.END);
-        meta.addView(accessValue, new LinearLayout.LayoutParams(0, -1, 1f));
-
-        String role = groupUserRoleLabel(g);
-        int roleSize = role.length() > 9 ? 9 : 10;
-        TextView roleValue = text(
-                role,
-                roleSize,
-                lightTheme ? Color.rgb(91, 54, 135) : Color.rgb(226, 203, 255),
-                true
-        );
-        roleValue.setIncludeFontPadding(false);
-        roleValue.setGravity(Gravity.RIGHT | Gravity.CENTER_VERTICAL);
-        roleValue.setSingleLine(true);
-        roleValue.setEllipsize(TextUtils.TruncateAt.END);
-        meta.addView(roleValue, new LinearLayout.LayoutParams(0, -1, 1f));
+        int accessKind = GroupMetadata.access(g);
+        if (accessKind != GroupMetadata.UNKNOWN) {
+            int resource = accessKind == GroupMetadata.OPEN ? R.raw.open
+                    : accessKind == GroupMetadata.REQUEST ? R.raw.exclusive : R.raw.closed;
+            meta.addView(groupMetadataIcon(resource, groupAccessLabel(g)), new LinearLayout.LayoutParams(dp(20), dp(18)));
+        }
+        meta.addView(new Space(this), new LinearLayout.LayoutParams(0, 1, 1f));
+        int roleKind = GroupMetadata.role(g);
+        int roleResource = roleKind == GroupMetadata.OWNER ? R.raw.owner
+                : roleKind == GroupMetadata.ADMIN ? R.raw.admin : R.raw.member;
+        meta.addView(groupMetadataIcon(roleResource, groupUserRoleLabel(g)), new LinearLayout.LayoutParams(dp(20), dp(18)));
         return row;
     }
 
@@ -12581,11 +12687,11 @@ private int loadingProgressFor(String message) {
 
         HabbodexUnavailableException unavailable = new HabbodexUnavailableException();
         synchronized (habbodexWebSessionLock) {
-            CompletableFuture<Boolean> session = habbodexWebSessionFuture;
+            SettableFuture<Boolean> session = habbodexWebSessionFuture;
             if (session != null && !session.isDone()) session.complete(false);
         }
-        for (Map.Entry<String, CompletableFuture<String>> entry : habbodexWebRequests.entrySet()) {
-            CompletableFuture<String> pending = entry.getValue();
+        for (Map.Entry<String, SettableFuture<String>> entry : habbodexWebRequests.entrySet()) {
+            SettableFuture<String> pending = entry.getValue();
             if (pending != null && habbodexWebRequests.remove(entry.getKey(), pending)
                     && !pending.isDone()) {
                 pending.completeExceptionally(unavailable);
@@ -12699,7 +12805,7 @@ private int loadingProgressFor(String message) {
             ) {
                 if (request != null && request.isForMainFrame()) {
                     synchronized (habbodexWebSessionLock) {
-                        CompletableFuture<Boolean> future = habbodexWebSessionFuture;
+                        SettableFuture<Boolean> future = habbodexWebSessionFuture;
                         if (future != null && !future.isDone()) future.complete(false);
                     }
                 }
@@ -12736,9 +12842,9 @@ private int loadingProgressFor(String message) {
         } catch(Exception ignored) {}
     }
 
-    private CompletableFuture<Boolean> resetHabbodexWebSessionFuture() {
+    private SettableFuture<Boolean> resetHabbodexWebSessionFuture() {
         synchronized (habbodexWebSessionLock) {
-            habbodexWebSessionFuture = new CompletableFuture<>();
+            habbodexWebSessionFuture = new SettableFuture<>();
             habbodexWebChallengeDetected = false;
             return habbodexWebSessionFuture;
         }
@@ -12794,7 +12900,7 @@ private int loadingProgressFor(String message) {
                     habbodexWebChallengeDetected = false;
                     try { android.webkit.CookieManager.getInstance().flush(); } catch(Exception ignored) {}
                     synchronized (habbodexWebSessionLock) {
-                        CompletableFuture<Boolean> future = habbodexWebSessionFuture;
+                        SettableFuture<Boolean> future = habbodexWebSessionFuture;
                         boolean alreadyReady = false;
                         try {
                             alreadyReady = future != null && future.isDone()
@@ -12802,7 +12908,7 @@ private int loadingProgressFor(String message) {
                         } catch(Exception ignored) {}
                         if (!alreadyReady) {
                             if (future == null || future.isDone()) {
-                                future = new CompletableFuture<>();
+                                future = new SettableFuture<>();
                                 habbodexWebSessionFuture = future;
                             }
                             future.complete(true);
@@ -12824,7 +12930,7 @@ private int loadingProgressFor(String message) {
             throw new HabbodexUnavailableException();
         }
 
-        CompletableFuture<Boolean> created = new CompletableFuture<>();
+        SettableFuture<Boolean> created = new SettableFuture<>();
         uiHandler.post(() -> {
             try {
                 ensureHabbodexWebViewCreatedOnUiThread();
@@ -12835,19 +12941,19 @@ private int loadingProgressFor(String message) {
         });
         if (!Boolean.TRUE.equals(created.get(5, TimeUnit.SECONDS))) return false;
 
-        CompletableFuture<Boolean> session;
+        SettableFuture<Boolean> session;
         boolean reload = false;
         synchronized (habbodexWebSessionLock) {
             session = habbodexWebSessionFuture;
             if (session == null) {
-                session = new CompletableFuture<>();
+                session = new SettableFuture<>();
                 habbodexWebSessionFuture = session;
                 reload = true;
             } else if (session.isDone()) {
                 boolean ready = false;
                 try { ready = Boolean.TRUE.equals(session.getNow(false)); } catch(Exception ignored) {}
                 if (!ready) {
-                    session = new CompletableFuture<>();
+                    session = new SettableFuture<>();
                     habbodexWebSessionFuture = session;
                     reload = true;
                 }
@@ -12885,17 +12991,17 @@ private int loadingProgressFor(String message) {
         }
     }
 
-    private CompletableFuture<Boolean> beginHabbodexInteractiveVerification(String url) {
+    private SettableFuture<Boolean> beginHabbodexInteractiveVerification(String url) {
         if (isHabbodexTemporarilyUnavailable()) {
-            return CompletableFuture.completedFuture(false);
+            return SettableFuture.completedFuture(false);
         }
-        final CompletableFuture<Boolean> session;
+        final SettableFuture<Boolean> session;
         synchronized (habbodexWebSessionLock) {
-            CompletableFuture<Boolean> current = habbodexWebSessionFuture;
+            SettableFuture<Boolean> current = habbodexWebSessionFuture;
             if (habbodexWebChallengeDetected && current != null && !current.isDone()) {
                 return current;
             }
-            session = new CompletableFuture<>();
+            session = new SettableFuture<>();
             habbodexWebSessionFuture = session;
             habbodexWebChallengeDetected = true;
         }
@@ -13012,7 +13118,7 @@ private int loadingProgressFor(String message) {
         @JavascriptInterface
         public void deliver(String token, String requestId, String payload) {
             if (!habbodexWebBridgeToken.equals(token) || requestId == null) return;
-            CompletableFuture<String> future = habbodexWebRequests.remove(requestId);
+            SettableFuture<String> future = habbodexWebRequests.remove(requestId);
             if (future != null && !future.isDone()) {
                 future.complete(payload == null ? "" : payload);
             }
@@ -13030,19 +13136,21 @@ private int loadingProgressFor(String message) {
 
         String requestId = "tx" + habbodexWebRequestSeq.incrementAndGet()
                 + "_" + UUID.randomUUID().toString();
-        CompletableFuture<String> future = new CompletableFuture<>();
+        SettableFuture<String> future = new SettableFuture<>();
         habbodexWebRequests.put(requestId, future);
 
         String quotedToken = JSONObject.quote(habbodexWebBridgeToken);
         String quotedId = JSONObject.quote(requestId);
         String quotedUrl = JSONObject.quote(url);
         String script = "(function(){var token=" + quotedToken + ";var id=" + quotedId + ";var u=" + quotedUrl + ";"
-                + "var send=function(o){try{ToxicNative.deliver(token,id,JSON.stringify(o));}catch(e){}};"
+                + "var requests=window.__toxicActiveRequests||(window.__toxicActiveRequests={});"
+                + "var controller=typeof AbortController==='function'?new AbortController():null;requests[id]=controller;"
+                + "var send=function(o){delete requests[id];try{ToxicNative.deliver(token,id,JSON.stringify(o));}catch(e){}};"
                 + "var isBadgeList=/\\/badges(?:\\?|$)/i.test(u);"
                 + "var scrub=function(o,d){if(!o||typeof o!=='object'||d>3)return;"
                 + "['badges','badgeList','achievementBadges','achievements'].forEach(function(k){try{if(Object.prototype.hasOwnProperty.call(o,k))delete o[k];}catch(e){}});"
                 + "['data','profile','user','habbo','result'].forEach(function(k){try{scrub(o[k],d+1);}catch(e){}});};"
-                + "fetch(u,{method:'GET',credentials:'include',cache:'no-store',headers:{'Accept':'application/json,text/plain,*/*'}})"
+                + "fetch(u,{method:'GET',credentials:'include',cache:'no-store',signal:controller?controller.signal:undefined,headers:{'Accept':'application/json,text/plain,*/*'}})"
                 + ".then(function(r){return r.text().then(function(t){var body=t;try{var j=JSON.parse(t);if(!isBadgeList)scrub(j,0);body=JSON.stringify(j);}catch(e){}"
                 + "send({ok:r.ok,status:r.status,url:r.url||u,contentType:r.headers.get('content-type')||'',cfMitigated:r.headers.get('cf-mitigated')||'',body:body});});})"
                 + ".catch(function(e){send({ok:false,status:0,url:u,error:String(e),body:''});});})();";
@@ -13050,13 +13158,13 @@ private int loadingProgressFor(String message) {
         uiHandler.post(() -> {
             try {
                 if (habbodexWebView == null) {
-                    CompletableFuture<String> pending = habbodexWebRequests.remove(requestId);
+                    SettableFuture<String> pending = habbodexWebRequests.remove(requestId);
                     if (pending != null) pending.completeExceptionally(new IOException("WebView unavailable"));
                     return;
                 }
                 habbodexWebView.evaluateJavascript(script, null);
             } catch(Exception error) {
-                CompletableFuture<String> pending = habbodexWebRequests.remove(requestId);
+                SettableFuture<String> pending = habbodexWebRequests.remove(requestId);
                 if (pending != null) pending.completeExceptionally(error);
             }
         });
@@ -13066,6 +13174,12 @@ private int loadingProgressFor(String message) {
             envelopeText = future.get(HABBODEX_WEB_REQUEST_TIMEOUT_MS, TimeUnit.MILLISECONDS);
         } finally {
             habbodexWebRequests.remove(requestId);
+            uiHandler.post(() -> {
+                if (habbodexWebView == null || activityDestroyed) return;
+                String cancel = "(function(){var r=window.__toxicActiveRequests;var id=" + quotedId
+                        + ";if(r&&r[id]){r[id].abort();delete r[id];}})();";
+                habbodexWebView.evaluateJavascript(cancel, null);
+            });
         }
         JSONObject envelope = new JSONObject(envelopeText == null || envelopeText.trim().isEmpty()
                 ? "{}" : envelopeText);
@@ -13118,7 +13232,7 @@ private int loadingProgressFor(String message) {
         try {
             return fetchHabbodexViaWebViewOnce(url);
         } catch(HabbodexWebChallengeException challenge) {
-            CompletableFuture<Boolean> session = beginHabbodexInteractiveVerification(challenge.url);
+            SettableFuture<Boolean> session = beginHabbodexInteractiveVerification(challenge.url);
             boolean verified;
             try {
                 verified = Boolean.TRUE.equals(session.get(
@@ -13160,7 +13274,7 @@ private int loadingProgressFor(String message) {
         habbodexVerificationDialog = null;
 
         IOException destroyed = new IOException("Activity destroyed");
-        for (CompletableFuture<String> future : habbodexWebRequests.values()) {
+        for (SettableFuture<String> future : habbodexWebRequests.values()) {
             if (future != null && !future.isDone()) future.completeExceptionally(destroyed);
         }
         habbodexWebRequests.clear();
@@ -13180,94 +13294,25 @@ private int loadingProgressFor(String message) {
         habbodexWebHiddenHost = null;
     }
 
-    private Object getJsonAny(String u) throws Exception {
-        final boolean cacheable = isFiveMinuteJsonCacheUrl(u);
-        final long now = SystemClock.elapsedRealtime();
-        if (cacheable) {
-            CachedJsonResponse cached = jsonResponseCache.get(u);
-            if (cached != null) {
-                if (now - cached.storedAtMs <= JSON_RESPONSE_CACHE_TTL_MS) {
-                    try { return parseCachedJsonBody(cached.body); }
-                    catch(Exception ignored) { jsonResponseCache.remove(u, cached); }
-                } else {
-                    jsonResponseCache.remove(u, cached);
-                }
-            }
-
-            String diskBody = readFiveMinuteJsonDiskCache(u);
-            if (diskBody != null && !diskBody.trim().isEmpty()) {
-                try {
-                    Object parsed = parseCachedJsonBody(diskBody);
-                    jsonResponseCache.put(
-                            u,
-                            new CachedJsonResponse(diskBody, SystemClock.elapsedRealtime())
-                    );
-                    return parsed;
-                } catch(Exception ignored) {
-                    try { fiveMinuteJsonCacheFile(u).delete(); } catch(Exception ignoredAgain) {}
-                }
-            }
-        }
-
-        // HabboDex não usa mais HttpURLConnection. A requisição acontece dentro de
-        // uma sessão WebView real do próprio aparelho, preservando cookies/JS/origem.
-        if (isDirectHabbodexUrl(u)) {
-            Object parsed = getJsonViaHabbodexWebView(u);
-            if (cacheable && parsed != null) {
-                String body = parsed.toString();
-                jsonResponseCache.put(
-                        u,
-                        new CachedJsonResponse(body, SystemClock.elapsedRealtime())
-                );
-                writeFiveMinuteJsonDiskCache(u, body);
-            }
-            return parsed;
-        }
-
-        final boolean ownServer = u != null && u.startsWith(PROFILE_API);
-        final boolean largeOfficialProfile = u != null
-                && u.contains("/api/public/users/")
-                && u.endsWith("/profile");
-        HttpURLConnection c = null;
+    private Object getJsonAny(String url) throws Exception {
         try {
-            c = (HttpURLConnection)new URL(u).openConnection();
-            c.setUseCaches(false);
-            c.setDefaultUseCaches(false);
-            c.setConnectTimeout(ownServer ? 6000 : 5000);
-            c.setReadTimeout(ownServer ? 12000 : (largeOfficialProfile ? 15000 : 8000));
-            c.setRequestProperty("Accept", "application/json, text/plain, */*");
-            c.setRequestProperty(
-                    "User-Agent",
-                    "ToxicSearchTool/" + APP_VERSION + " Android (+https://atoxic.com.br)"
-            );
-            c.setRequestProperty("X-Toxic-App", APP_VERSION);
-
-            int code = c.getResponseCode();
-            InputStream is = code >= 200 && code < 300
-                    ? c.getInputStream()
-                    : c.getErrorStream();
-            String body = readAll(is);
-
-            if (code < 200 || code >= 300 || body == null || body.trim().isEmpty()) {
-                throw new IOException("HTTP " + code);
-            }
-
-            Object parsed = parseCachedJsonBody(body);
-            if (cacheable) {
-                jsonResponseCache.put(
-                        u,
-                        new CachedJsonResponse(body, SystemClock.elapsedRealtime())
-                );
-                writeFiveMinuteJsonDiskCache(u, body);
-            }
-            return parsed;
-        } finally {
-            if (c != null) c.disconnect();
+            if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
+            if (isDirectHabbodexUrl(url)) return getJsonViaHabbodexWebView(url);
+            boolean ownServer = url != null && url.startsWith(PROFILE_API);
+            boolean largeProfile = url != null && url.contains("/api/public/users/") && url.endsWith("/profile");
+            return parseCachedJsonBody(JsonHttpClient.get(url, ownServer ? 6000 : 5000,
+                    ownServer ? 12000 : (largeProfile ? 15000 : 8000)));
+        } catch (InterruptedException cancelled) {
+            Thread.currentThread().interrupt();
+            throw cancelled;
         }
     }
 
     private JSONObject getJson(String u) throws Exception { Object any = getJsonAny(u); if (any instanceof JSONObject) return (JSONObject)any; JSONObject wrap = new JSONObject(); wrap.put("data", any); return wrap; }
-    private JSONObject tryJson(String u) { try { return getJson(u); } catch (Exception e) { return null; } }
+    private JSONObject tryJson(String u) {
+        try { return getJson(u); }
+        catch (Exception error) { AppDiagnostics.failure("profile_request", error); return null; }
+    }
 
     private static class ApiHttpException extends IOException {
         final int statusCode;
@@ -14252,6 +14297,8 @@ private int loadingProgressFor(String message) {
     }
 
     private void clearProfileCache(Runnable done) {
+        profileHistory.clear();
+        friendPresence.refreshNow();
         visualFigureDataCache = null;
         visualFigureDataLoadedAt = 0L;
         visualEditorCachedFigure = DEFAULT_VISUAL_FIGURE;
@@ -17244,7 +17291,7 @@ private int loadingProgressFor(String message) {
         return translationContext == null ? this : translationContext;
     }
 
-    private static String localizedStringStatic(Context context, String hotelKey, int resourceId, Object... args) {
+    static String localizedStringStatic(Context context, String hotelKey, int resourceId, Object... args) {
         if (context == null) return "";
         Context localized = localizedContextForHotel(context, hotelKey);
         Context source = localized == null ? context : localized;
@@ -17321,7 +17368,7 @@ private int loadingProgressFor(String message) {
             currentHotelKey = normalizeHotelKey(hotelKey);
             getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(PREF_HOTEL, currentHotelKey).apply();
             dialog.dismiss();
-            activeSearchToken++;
+            beginProfileRequest();
             searchInProgress = false;
             profileSectionsInProgress = false;
             inlineProgressPct = 0;
@@ -17515,31 +17562,21 @@ private int loadingProgressFor(String message) {
     }
 
     private ProfileResult copyProfileResult(ProfileResult src) {
-        ProfileResult c = new ProfileResult();
-        if (src == null) return c;
-        c.searchToken = src.searchToken;
-        c.searchedNick = src.searchedNick; c.uniqueId = src.uniqueId; c.name = src.name; c.motto = src.motto; c.figure = src.figure; c.memberSince = src.memberSince; c.lastAccess = src.lastAccess; c.level = src.level; c.starGems = src.starGems; c.hotelKey = src.hotelKey;
-        c.online = src.online; c.privateProfile = src.privateProfile; c.banned = src.banned;
-        c.habboPublic = src.habboPublic; c.dex = src.dex; c.suggest = src.suggest; c.dexProfile = src.dexProfile; c.officialProfile = src.officialProfile; c.officialBadgeLookup = src.officialBadgeLookup;
-        c.previousNames = new ArrayList<>(src.previousNames); c.previousMottos = new ArrayList<>(src.previousMottos); c.previousStyles = new ArrayList<>(src.previousStyles); c.photos = new ArrayList<>(src.photos); c.friends = new ArrayList<>(src.friends); c.oldFriends = new ArrayList<>(src.oldFriends); c.rooms = new ArrayList<>(src.rooms); c.oldRooms = new ArrayList<>(src.oldRooms); c.groups = new ArrayList<>(src.groups); c.badges = new ArrayList<>(src.badges); c.badgesWithAchievements = new ArrayList<>(src.badgesWithAchievements); c.totalBadges = src.totalBadges; c.selectedBadges = new ArrayList<>(src.selectedBadges);
-        c.allPhotosSource = new ArrayList<>(src.allPhotosSource); c.allStylesSource = new ArrayList<>(src.allStylesSource);
-        c.photosNextPage = src.photosNextPage; c.stylesNextPage = src.stylesNextPage; c.photosTotal = src.photosTotal; c.stylesTotal = src.stylesTotal; c.stylesRemoteNextPage = src.stylesRemoteNextPage;
-        c.photosAutoLoadRetryAfterMs = src.photosAutoLoadRetryAfterMs; c.stylesAutoLoadRetryAfterMs = src.stylesAutoLoadRetryAfterMs;
-        c.removedFriendsNextPage = src.removedFriendsNextPage; c.removedFriendsTotal = src.removedFriendsTotal; c.friendsNextPage = src.friendsNextPage; c.friendsTotal = src.friendsTotal; c.friendsTabPage = src.friendsTabPage; c.previousMottosSlideIndex = src.previousMottosSlideIndex; c.badgesNextPage = src.badgesNextPage; c.badgesTotal = src.badgesTotal; c.badgesTabPage = src.badgesTabPage;
-        c.photosHasMore = src.photosHasMore; c.stylesHasMore = src.stylesHasMore; c.photosLoading = false; c.stylesLoading = false;
-        c.removedFriendsHasMore = src.removedFriendsHasMore; c.removedFriendsLoading = false; c.removedFriendsDataAvailable = src.removedFriendsDataAvailable; c.friendsHasMore = src.friendsHasMore; c.friendsLoading = false; c.friendsPagedMode = src.friendsPagedMode; c.friendsTabShowingRemoved = src.friendsTabShowingRemoved; c.friendsTabSelectionTouched = src.friendsTabSelectionTouched; c.badgesHasMore = src.badgesHasMore; c.badgesLoading = false; c.badgesPagedMode = src.badgesPagedMode; c.hideAchievementBadges = src.hideAchievementBadges;
-        c.officialProfileAttempted = src.officialProfileAttempted; c.officialPhotosAttempted = src.officialPhotosAttempted; c.officialPhotosSucceeded = src.officialPhotosSucceeded; c.photosFromOfficial = src.photosFromOfficial; c.stylesFromComplement = src.stylesFromComplement; c.stylesRemotePaged = src.stylesRemotePaged; c.friendsDatesReady = src.friendsDatesReady;
-        return c;
+        return ProfileSnapshots.copy(src);
     }
 
     @Override public void onBackPressed() {
-        if (accessGateReason != AccessGateReason.NONE) return;
+        if (!handleAppBack()) super.onBackPressed();
+    }
+
+    private boolean handleAppBack() {
+        if (accessGateReason != AccessGateReason.NONE) return true;
         if (searchInput != null && searchInput.hasFocus()) {
             clearSearchFocus();
-            return;
+            return true;
         }
         if (!profileHistory.isEmpty()) {
-            activeSearchToken++;
+            beginProfileRequest();
             searchInProgress = false;
             profileSectionsInProgress = false;
             activeSearchNick = "";
@@ -17547,7 +17584,7 @@ private int loadingProgressFor(String message) {
             inlineProgressMessage = "";
             ProfileResult previous = profileHistory.removeLast();
             previous.searchToken = activeSearchToken;
-            activeProfileSource = previous;
+            activeProfileSource = copyProfileResult(previous);
             String previousHotel = normalizeHotelKey(previous.hotelKey);
             if (!previousHotel.isEmpty()) {
                 currentHotelKey = previousHotel;
@@ -17559,10 +17596,12 @@ private int loadingProgressFor(String message) {
             setSearchTextProgrammatically(previous.name == null ? "" : previous.name);
             clearSearchFocus();
             setStatusMessage("");
+            previous.photosLoading = previous.stylesLoading = previous.friendsLoading = previous.removedFriendsLoading = previous.badgesLoading = false;
             renderProfile(previous);
-            return;
+            friendPresence.refreshNow();
+            return true;
         }
-        super.onBackPressed();
+        return false;
     }
 
     private TextView dialogButton(String label) {
@@ -17592,15 +17631,15 @@ private int loadingProgressFor(String message) {
     }
 
     private void scheduleFavoriteOnlineAlarm() {
-        AlarmManager am = (AlarmManager)getSystemService(ALARM_SERVICE);
-        if (am == null) return;
-        PendingIntent pi = favoriteOnlineAlarmIntent(PendingIntent.FLAG_UPDATE_CURRENT);
-        long first = System.currentTimeMillis() + 60_000L;
-        am.cancel(pi);
-        am.setRepeating(AlarmManager.RTC_WAKEUP, first, 60_000L, pi);
+        // Remove the repeating alarm left by earlier installations.
+        AlarmManager manager = (AlarmManager)getSystemService(ALARM_SERVICE);
+        PendingIntent legacy = favoriteOnlineAlarmIntent(PendingIntent.FLAG_NO_CREATE);
+        if (manager != null && legacy != null) manager.cancel(legacy);
+        FavoriteOnlineJobService.schedule(this);
     }
 
     private void cancelFavoriteOnlineAlarm() {
+        FavoriteOnlineJobService.cancel(this);
         AlarmManager am = (AlarmManager)getSystemService(ALARM_SERVICE);
         if (am == null) return;
         PendingIntent pi = favoriteOnlineAlarmIntent(PendingIntent.FLAG_NO_CREATE);
@@ -17660,11 +17699,13 @@ private int loadingProgressFor(String message) {
 
     private void startFavoriteOnlineWatcher() {
         if (favoriteOnlineWatcher != null) uiHandler.removeCallbacks(favoriteOnlineWatcher);
+        if (!appInForeground || activityDestroyed) return;
         favoriteOnlineWatcher = () -> {
+            if (!appInForeground || activityDestroyed) return;
             checkFavoriteOnlineNotifications();
-            uiHandler.postDelayed(favoriteOnlineWatcher, favoriteOnlineWatcherIntervalMs());
+            uiHandler.postDelayed(favoriteOnlineWatcher, FAVORITE_ONLINE_FOREGROUND_INTERVAL_MS);
         };
-        uiHandler.postDelayed(favoriteOnlineWatcher, appInForeground ? 500L : favoriteOnlineWatcherIntervalMs());
+        uiHandler.postDelayed(favoriteOnlineWatcher, FAVORITE_ONLINE_FOREGROUND_INTERVAL_MS);
     }
 
     private void checkFavoriteOnlineNotifications() {
@@ -17672,13 +17713,17 @@ private int loadingProgressFor(String message) {
             runOnUiThread(() -> updateFavoriteOnlineBadgeText());
             return;
         }
+        if (!appInForeground || activityDestroyed || !FavoriteRefreshCoordinator.checks.tryStart()) return;
         ArrayList<ProfileHistoryItem> snapshot = new ArrayList<>(favoriteProfiles);
-        executor.execute(() -> {
+        try { favoritesExecutor.execute(() -> {
+            try {
             boolean changedAny = false;
             for (ProfileHistoryItem item : snapshot) {
+                if (!appInForeground || activityDestroyed || Thread.currentThread().isInterrupted()) break;
                 if (item == null) continue;
                 String key = favoriteKey(item);
                 FavoriteStatus st = fetchFavoriteStatus(item);
+                if (!appInForeground || activityDestroyed || Thread.currentThread().isInterrupted()) break;
                 if (st == null) continue;
 
                 String newKey = profileIdentityKey(st.hotelKey, st.uniqueId, st.nick);
@@ -17703,7 +17748,10 @@ private int loadingProgressFor(String message) {
                 }
             }
             if (changedAny || !snapshot.isEmpty()) runOnUiThread(() -> updateFavoriteOnlineBadgeText());
-        });
+            } finally { FavoriteRefreshCoordinator.checks.finish(); }
+        }); } catch (java.util.concurrent.RejectedExecutionException cancelled) {
+            FavoriteRefreshCoordinator.checks.finish();
+        }
     }
 
 
@@ -17742,35 +17790,18 @@ private int loadingProgressFor(String message) {
 
     private FavoriteStatus fetchFavoriteStatus(ProfileHistoryItem item) {
         if (item == null) return null;
-        try {
-            String hotel = normalizeHotelKey(item.hotelKey);
-            if (hotel.isEmpty()) hotel = "br";
-            JSONObject obj = null;
-            String storedId = item.uniqueId == null ? "" : item.uniqueId.trim();
-            if (!storedId.isEmpty()) {
-                obj = validProfileObject(tryJson(
-                        "https://" + hotelDomain(hotel) + "/api/public/users/" + enc(storedId)
-                ));
-            }
-            if (obj == null && item.nick != null && !item.nick.trim().isEmpty()) {
-                obj = validProfileObject(tryJson("https://" + hotelDomain(hotel) + "/api/public/users?name=" + enc(item.nick)));
-            }
-            if (obj == null) return null;
-            FavoriteStatus st = new FavoriteStatus();
-            st.nick = firstText(obj, "name", "username", "habboName");
-            if (st.nick.isEmpty()) st.nick = item.nick;
-            st.uniqueId = firstText(obj, "uniqueId", "id", "habboId");
-            if (st.uniqueId.isEmpty()) st.uniqueId = storedId;
-            st.figure = firstText(obj, "figureString", "figure", "figure_string");
-            if (st.figure.isEmpty()) st.figure = item.figure;
-            st.hotelKey = hotel;
-            st.online = obj.optBoolean("online", optBoolAny(obj, false, "isOnline"));
-            st.privateProfile = !optBoolAny(obj, true, "profileVisible", "isProfileVisible", "visible");
-            st.lastAccess = firstText(obj, "lastAccessTime", "lastLoginTime", "lastOnline", "lastVisit");
-            return st;
-        } catch(Exception ignored) {
-            return null;
-        }
+        PresenceRepository.Result result = new PresenceRepository().fetch(item.hotelKey, item.uniqueId, item.nick);
+        if (result.profile == null || result.state == PresenceRepository.State.UNKNOWN) return null;
+        JSONObject obj = result.profile;
+        FavoriteStatus status = new FavoriteStatus();
+        status.nick = obj.optString("name", item.nick);
+        status.uniqueId = obj.optString("uniqueId", item.uniqueId);
+        status.figure = obj.optString("figureString", item.figure);
+        status.hotelKey = normalizeHotelKey(item.hotelKey);
+        status.online = result.state == PresenceRepository.State.ONLINE;
+        status.privateProfile = !obj.optBoolean("profileVisible", true);
+        status.lastAccess = firstText(obj, "lastAccessTime", "lastLoginTime", "lastOnline", "lastVisit");
+        return status;
     }
 
     private File favoriteHeadCacheDir() {
@@ -18770,7 +18801,7 @@ private int loadingProgressFor(String message) {
         return 0L;
     }
 
-    private static boolean isFavoriteRecentlyOnlineStatic(FavoriteStatus st) {
+    static boolean isFavoriteRecentlyOnlineStatic(FavoriteStatus st) {
         if (st == null || st.lastAccess == null || st.lastAccess.trim().isEmpty()) return false;
         long access = parseHabboTimestampMsStatic(st.lastAccess);
         if (access <= 0L) return false;
@@ -18783,26 +18814,9 @@ private int loadingProgressFor(String message) {
         boolean online = false, privateProfile = false, banned = false;
     }
 
-    private static class FavoriteStatus {
-        String nick = "", figure = "", hotelKey = "br", uniqueId = "", lastAccess = "";
-        boolean online = false, privateProfile = false;
-    }
+    
 
-    private static class ProfileHistoryItem {
-        final String nick;
-        final String figure;
-        final String hotelKey;
-        final String uniqueId;
-        ProfileHistoryItem(String nick, String figure, String hotelKey) {
-            this(nick, figure, hotelKey, "");
-        }
-        ProfileHistoryItem(String nick, String figure, String hotelKey, String uniqueId) {
-            this.nick = nick == null ? "" : nick;
-            this.figure = figure == null ? "" : figure;
-            this.hotelKey = hotelKey == null || hotelKey.trim().isEmpty() ? "br" : hotelKey;
-            this.uniqueId = uniqueId == null ? "" : uniqueId.trim();
-        }
-    }
+    
 
     private static class CachedJsonResponse {
         final String body;
@@ -18824,26 +18838,7 @@ private int loadingProgressFor(String message) {
         }
     }
 
-    private static class ProfileResult {
-        int searchToken = 0;
-        String searchedNick = "", uniqueId = "", name = "", motto = "", figure = "", memberSince = "", lastAccess = "", level = "", starGems = "", totalBadges = "", hotelKey = "br";
-        boolean online = false, privateProfile = false, banned = false;
-        JSONObject habboPublic, dex, suggest, dexProfile, officialProfile;
-        HashMap<String, JSONObject> officialBadgeLookup = new HashMap<>();
-        ArrayList<JSONObject> previousNames = new ArrayList<>(), previousMottos = new ArrayList<>(), previousStyles = new ArrayList<>(), photos = new ArrayList<>(), friends = new ArrayList<>(), oldFriends = new ArrayList<>(), rooms = new ArrayList<>(), oldRooms = new ArrayList<>(), groups = new ArrayList<>(), selectedBadges = new ArrayList<>(), badges = new ArrayList<>(), badgesWithAchievements = new ArrayList<>();
-        ArrayList<JSONObject> allPhotosSource = new ArrayList<>(), allStylesSource = new ArrayList<>();
-        int photosNextPage = 0, stylesNextPage = 0, photosTotal = 0, stylesTotal = 0;
-        int stylesRemoteNextPage = 0;
-        volatile long photosAutoLoadRetryAfterMs = 0L, stylesAutoLoadRetryAfterMs = 0L;
-        int removedFriendsNextPage = 0, removedFriendsTotal = 0, friendsNextPage = 0, friendsTotal = 0, friendsTabPage = 1;
-        int previousMottosSlideIndex = 0;
-        int badgesNextPage = 0, badgesTotal = 0, badgesTabPage = 1;
-        boolean photosHasMore = false, stylesHasMore = false;
-        volatile boolean photosLoading = false, stylesLoading = false;
-        boolean removedFriendsHasMore = false, removedFriendsLoading = false, removedFriendsDataAvailable = false, friendsHasMore = false, friendsLoading = false, friendsPagedMode = false, friendsTabShowingRemoved = false, friendsTabSelectionTouched = false;
-        boolean badgesHasMore = false, badgesLoading = false, badgesPagedMode = false, hideAchievementBadges = true;
-        boolean officialProfileAttempted = false, officialPhotosAttempted = false, officialPhotosSucceeded = false, photosFromOfficial = false, stylesFromComplement = false, stylesRemotePaged = false, friendsDatesReady = false;
-    }
+    
 
     private static class ProfileSectionPayload {
         final String kind;
@@ -18887,236 +18882,7 @@ private int loadingProgressFor(String message) {
 
     public static class FavoriteOnlineReceiver extends BroadcastReceiver {
         @Override public void onReceive(Context context, Intent intent) {
-            final PendingResult pending = goAsync();
-            new Thread(() -> {
-                try {
-                    checkFavoritesInBackground(context);
-                } catch(Exception ignored) {
-                } finally {
-                    try { pending.finish(); } catch(Exception ignored) {}
-                }
-            }).start();
-        }
-
-        private static void checkFavoritesInBackground(Context context) {
-            if (context == null) return;
-            SharedPreferences sp = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
-            if (!sp.getBoolean(PREF_NOTIFY_FAVORITE_ONLINE, false)) return;
-
-            String rawFavorites = sp.getString(PREF_FAVORITES, "");
-            if (rawFavorites == null || rawFavorites.trim().isEmpty()) return;
-
-            JSONObject states;
-            try {
-                String rawStates = sp.getString(PREF_FAVORITE_ONLINE_STATES, "{}");
-                states = new JSONObject(rawStates == null || rawStates.trim().isEmpty() ? "{}" : rawStates);
-            } catch(Exception e) {
-                states = new JSONObject();
-            }
-
-            try {
-                JSONArray arr = new JSONArray(rawFavorites);
-                for (int i=0; i<arr.length(); i++) {
-                    JSONObject fav = arr.optJSONObject(i);
-                    if (fav == null) continue;
-                    String nick = fav.optString("nick", "").trim();
-                    if (nick.isEmpty()) continue;
-                    String hotel = normalizeHotelKeyStatic(fav.optString("hotel", "br"));
-                    if (hotel.isEmpty()) hotel = "br";
-                    String uniqueId = fav.optString("uniqueId", fav.optString("id", "")).trim();
-                    String key = profileIdentityKeyStatic(hotel, uniqueId, nick);
-
-                    FavoriteStatus st = fetchFavoriteStatusStatic(nick, fav.optString("figure", ""), hotel, uniqueId);
-                    if (st == null) continue;
-
-                    boolean hadPrevious = states.has(key);
-                    boolean wasOnline = states.optBoolean(key, false);
-                    states.put(key, st.online);
-
-                    if (hadPrevious && !wasOnline && st.online && isFavoriteRecentlyOnlineStatic(st)) {
-                        showFavoriteOnlineSystemNotificationStatic(context, st);
-                    }
-                }
-                sp.edit().putString(PREF_FAVORITE_ONLINE_STATES, states.toString()).apply();
-            } catch(Exception ignored) {}
-        }
-
-        private static FavoriteStatus fetchFavoriteStatusStatic(String nick, String fallbackFigure, String hotel, String uniqueId) {
-            HttpURLConnection c = null;
-            try {
-                String safeId = uniqueId == null ? "" : uniqueId.trim();
-                URL u;
-                if (!safeId.isEmpty()) u = new URL("https://" + hotelDomainStatic(hotel) + "/api/public/users/" + URLEncoder.encode(safeId, "UTF-8"));
-                else u = new URL("https://" + hotelDomainStatic(hotel) + "/api/public/users?name=" + URLEncoder.encode(nick, "UTF-8"));
-                c = (HttpURLConnection)u.openConnection();
-                c.setUseCaches(false);
-                c.setDefaultUseCaches(false);
-                c.setConnectTimeout(12000);
-                c.setReadTimeout(18000);
-                c.setRequestProperty("Accept", "application/json, text/plain, */*");
-                c.setRequestProperty("Cache-Control", "no-cache, no-store");
-                c.setRequestProperty("Pragma", "no-cache");
-                c.setRequestProperty("User-Agent", "ToxicSearchTool/" + APP_VERSION + " Android");
-                int code = c.getResponseCode();
-                InputStream is = code >= 200 && code < 400 ? c.getInputStream() : c.getErrorStream();
-                String body = readAllStatic(is);
-                if (body == null || body.trim().isEmpty() || body.trim().startsWith("[")) return null;
-                JSONObject root = new JSONObject(body);
-                JSONObject obj = root.optJSONObject("user");
-                if (obj == null) obj = root;
-                if (obj.has("ok") && !obj.optBoolean("ok", true) && !obj.has("uniqueId")) return null;
-
-                FavoriteStatus st = new FavoriteStatus();
-                st.nick = obj.optString("name", nick);
-                if (st.nick == null || st.nick.trim().isEmpty()) st.nick = nick;
-                st.uniqueId = obj.optString("uniqueId", obj.optString("id", safeId));
-                st.figure = obj.optString("figureString", obj.optString("figure", fallbackFigure == null ? "" : fallbackFigure));
-                st.hotelKey = hotel;
-                st.online = obj.optBoolean("online", obj.optBoolean("isOnline", false));
-                st.privateProfile = !obj.optBoolean("profileVisible", obj.optBoolean("isProfileVisible", obj.optBoolean("visible", true)));
-                st.lastAccess = obj.optString("lastAccessTime", obj.optString("lastLoginTime", obj.optString("lastOnline", obj.optString("lastVisit", ""))));
-                return st;
-            } catch(Exception ignored) {
-                return null;
-            } finally {
-                try { if (c != null) c.disconnect(); } catch(Exception ignored) {}
-            }
-        }
-
-
-        private static File favoriteHeadCacheDirStatic(Context context) {
-            File dir = new File(context.getCacheDir(), "favorite_heads");
-            try { dir.mkdirs(); } catch(Exception ignored) {}
-            return dir;
-        }
-
-        private static File favoriteHeadCacheFileStatic(Context context, String hotelKey, String nick) {
-            return favoriteHeadCacheFileStatic(context, hotelKey, nick, "");
-        }
-
-        private static File favoriteHeadCacheFileStatic(Context context, String hotelKey, String nick, String uniqueId) {
-            String key = profileIdentityKeyStatic(hotelKey, uniqueId, nick);
-            return new File(favoriteHeadCacheDirStatic(context), Math.abs(key.hashCode()) + ".png");
-        }
-
-        private static void saveFavoriteHeadBitmapStatic(Context context, FavoriteStatus st, Bitmap bitmap) {
-            if (context == null || st == null || bitmap == null) return;
-            try {
-                FileOutputStream out = new FileOutputStream(favoriteHeadCacheFileStatic(context, st.hotelKey, st.nick, st.uniqueId));
-                bitmap.compress(Bitmap.CompressFormat.PNG, 100, out);
-                out.flush();
-                out.close();
-            } catch(Exception ignored) {}
-        }
-
-        private static Bitmap loadFavoriteHeadFromCacheStatic(Context context, FavoriteStatus st) {
-            try {
-                if (context == null || st == null) return null;
-                File f = favoriteHeadCacheFileStatic(context, st.hotelKey, st.nick, st.uniqueId);
-                if (f.exists()) return BitmapFactory.decodeFile(f.getAbsolutePath());
-            } catch(Exception ignored) {}
-            return null;
-        }
-
-        private static Bitmap loadNotificationHeadBitmapStatic(Context context, FavoriteStatus st) {
-            HttpURLConnection c = null;
-            try {
-                if (context == null || st == null) return null;
-                String url;
-                if (st.nick != null && !st.nick.trim().isEmpty()) {
-                    url = "https://" + hotelDomainStatic(st.hotelKey) + "/habbo-imaging/avatarimage?user=" + URLEncoder.encode(st.nick, "UTF-8") + "&size=m&direction=2&head_direction=2&headonly=1";
-                } else if (st.figure != null && !st.figure.trim().isEmpty()) {
-                    url = "https://" + hotelDomainStatic(st.hotelKey) + "/habbo-imaging/avatarimage?figure=" + URLEncoder.encode(st.figure, "UTF-8") + "&size=m&direction=2&head_direction=2&headonly=1";
-                } else {
-                    Bitmap cached = loadFavoriteHeadFromCacheStatic(context, st);
-                    return cached != null ? cached : BitmapFactory.decodeResource(context.getResources(), R.drawable.pre_load_head);
-                }
-                c = (HttpURLConnection)new URL(url).openConnection();
-                c.setConnectTimeout(10000);
-                c.setReadTimeout(15000);
-                Bitmap b = BitmapFactory.decodeStream(c.getInputStream());
-                if (b != null) {
-                    saveFavoriteHeadBitmapStatic(context, st, b);
-                    return b;
-                }
-                Bitmap cached = loadFavoriteHeadFromCacheStatic(context, st);
-                return cached != null ? cached : BitmapFactory.decodeResource(context.getResources(), R.drawable.pre_load_head);
-            } catch(Exception ignored) {
-                Bitmap cached = loadFavoriteHeadFromCacheStatic(context, st);
-                return cached != null ? cached : (context == null ? null : BitmapFactory.decodeResource(context.getResources(), R.drawable.pre_load_head));
-            } finally {
-                try { if (c != null) c.disconnect(); } catch(Exception ignored) {}
-            }
-        }
-
-        private static void showFavoriteOnlineSystemNotificationStatic(Context context, FavoriteStatus st) {
-            try {
-                NotificationManager nm = (NotificationManager)context.getSystemService(Context.NOTIFICATION_SERVICE);
-                if (nm == null || st == null) return;
-                String channelId = "favorite_online";
-                if (Build.VERSION.SDK_INT >= 26) {
-                    NotificationChannel ch = new NotificationChannel(channelId, localizedStringStatic(context, st.hotelKey, R.string.favorites), NotificationManager.IMPORTANCE_HIGH);
-                    nm.createNotificationChannel(ch);
-                }
-                Intent open = new Intent(context, MainActivity.class);
-                open.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-                PendingIntent pi = PendingIntent.getActivity(context, 1207, open, Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0);
-                String msg = localizedStringStatic(context, st.hotelKey, R.string.favorite_online_banner, st.nick == null ? "" : st.nick);
-                Bitmap largeIcon = loadNotificationHeadBitmapStatic(context, st);
-                Notification.Builder b = Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(context, channelId) : new Notification.Builder(context);
-                b.setSmallIcon(R.drawable.notification_image)
-                 .setContentTitle(localizedStringStatic(context, st.hotelKey, R.string.favorites))
-                 .setContentText(msg)
-                 .setWhen(System.currentTimeMillis())
-                 .setShowWhen(true)
-                 .setPriority(Notification.PRIORITY_HIGH)
-                 .setContentIntent(pi)
-                 .setAutoCancel(true)
-                 .setStyle(new Notification.BigTextStyle().bigText(msg));
-                if (largeIcon != null) b.setLargeIcon(largeIcon);
-                nm.notify(Math.abs(profileIdentityKeyStatic(st.hotelKey, st.uniqueId, st.nick).hashCode()), b.build());
-            } catch(Exception ignored) {}
-        }
-
-        private static String readAllStatic(InputStream is) throws IOException {
-            if (is == null) return "";
-            ByteArrayOutputStream out = new ByteArrayOutputStream();
-            byte[] buf = new byte[4096];
-            int n;
-            while ((n = is.read(buf)) > 0) out.write(buf, 0, n);
-            return out.toString("UTF-8");
-        }
-
-        private static String normalizeHotelKeyStatic(String hotel) {
-            String h = hotel == null ? "" : hotel.trim().toLowerCase(Locale.ROOT).replaceAll("[^a-z]", "");
-            if ("us".equals(h)) h = "com";
-            String[] allowed = {"br","com","es","de","fr","fi","it","nl","tr"};
-            for (String a : allowed) if (a.equals(h)) return h;
-            return "";
-        }
-
-        private static String profileIdentityKeyStatic(String hotelKey, String uniqueId, String nick) {
-            String hotel = normalizeHotelKeyStatic(hotelKey);
-            String id = normalizeNickKeyStatic(uniqueId);
-            if (!id.isEmpty()) return hotel + ":id:" + id;
-            return hotel + ":nick:" + normalizeNickKeyStatic(nick);
-        }
-
-        private static String normalizeNickKeyStatic(String raw) {
-            return raw == null ? "" : raw.trim().toLowerCase(Locale.ROOT);
-        }
-
-        private static String hotelDomainStatic(String key) {
-            String h = normalizeHotelKeyStatic(key);
-            if ("com".equals(h)) return "www.habbo.com";
-            if ("es".equals(h)) return "www.habbo.es";
-            if ("de".equals(h)) return "www.habbo.de";
-            if ("fr".equals(h)) return "www.habbo.fr";
-            if ("fi".equals(h)) return "www.habbo.fi";
-            if ("it".equals(h)) return "www.habbo.it";
-            if ("nl".equals(h)) return "www.habbo.nl";
-            if ("tr".equals(h)) return "www.habbo.com.tr";
-            return "www.habbo.com.br";
+            FavoriteOnlineJobService.enqueue(context);
         }
     }
 

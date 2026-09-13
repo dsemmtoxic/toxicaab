@@ -78,8 +78,8 @@ applicationId 'com.toxic.search'
 2. Aumente o `versionCode` em `app/build.gradle`:
 
 ```gradle
-versionCode 90
-versionName '1.4.6'
+versionCode 91
+versionName '1.4.7'
 ```
 
 O `versionCode` precisa sempre aumentar. O `versionName` é o texto exibido para você/usuário.

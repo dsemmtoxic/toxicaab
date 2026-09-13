@@ -256,4 +256,5 @@
 
     <string name="room_rating">Bewertung</string>
     <string name="room_limit">Limit</string>
+    <string name="retry_section">Erneut versuchen</string>
 </resources>
