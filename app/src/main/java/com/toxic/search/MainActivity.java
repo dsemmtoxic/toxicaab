@@ -3213,8 +3213,8 @@ public class MainActivity extends Activity {
         state.badgesPage = profile.badgesTabPage; state.hideAchievements = profile.hideAchievementBadges;
         state.mottoIndex = profile.previousMottosSlideIndex; state.avatarDirection = avatarDirection;
         state.scrollY = mainScroll == null ? 0 : mainScroll.getScrollY();
-        state.photosX = photosHsv == null ? photosScrollX : photosHsv.getScrollX();
-        state.stylesX = stylesHsv == null ? stylesScrollX : stylesHsv.getScrollX();
+        state.photosX = readCarouselScrollX(TAG_PHOTOS_CAROUSEL_ROW, photosScrollX);
+        state.stylesX = readCarouselScrollX(TAG_STYLES_CAROUSEL_ROW, stylesScrollX);
         state.write(out);
     }
 
@@ -8470,6 +8470,15 @@ public class MainActivity extends Activity {
         return found instanceof LinearLayout ? (LinearLayout) found : null;
     }
 
+    private int readCarouselScrollX(String rowTag, int fallback) {
+        LinearLayout row = taggedCarouselRow(rowTag);
+        if (row == null) return fallback;
+        ViewParent parent = row.getParent();
+        return parent instanceof HorizontalScrollView
+                ? ((HorizontalScrollView) parent).getScrollX()
+                : fallback;
+    }
+
     private TextView taggedCarouselTitle(String tag) {
         if (resultWrap == null) return null;
         View found = resultWrap.findViewWithTag(tag);
@@ -8821,8 +8830,8 @@ public class MainActivity extends Activity {
         String key = activeSearchToken + ":" + profileIdentityKey(incoming.hotelKey, incoming.uniqueId, incoming.name);
         boolean reuse = profileSectionsView != null && profileSectionsView.owns(resultWrap) && key.equals(renderedSectionsKey);
         if (reuse) {
-            if (photosHsv != null) photosScrollX = photosHsv.getScrollX();
-            if (stylesHsv != null) stylesScrollX = stylesHsv.getScrollX();
+            photosScrollX = readCarouselScrollX(TAG_PHOTOS_CAROUSEL_ROW, photosScrollX);
+            stylesScrollX = readCarouselScrollX(TAG_STYLES_CAROUSEL_ROW, stylesScrollX);
         }
         if (reuse && activeRenderedProfile != null) {
             if (!ProfileStateMerger.update(activeRenderedProfile, incoming)) return;
