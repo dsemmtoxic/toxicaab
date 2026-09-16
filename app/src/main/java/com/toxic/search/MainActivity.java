@@ -10872,7 +10872,7 @@ public class MainActivity extends Activity {
             } else if (removedUnavailable) {
                 content.addView(centerNote(t(R.string.not_available)));
             } else {
-                renderFriendsPage(content, data, page[0], 10, showingRemoved[0]);
+                renderFriendsPage(content, data, page[0], 10, showingRemoved[0], profileResult.uniqueId);
                 renderPager(content, data.size(), 10, page, render[0], () -> {
                     profileResult.friendsTabPage = page[0];
                     profileResult.friendsTabShowingRemoved = showingRemoved[0];
@@ -10948,8 +10948,9 @@ public class MainActivity extends Activity {
 
     private Drawable tabBg(boolean active) { return active ? grad(dp(13), purple2, purple) : round(lightTheme ? Color.rgb(244,244,246) : Color.rgb(18,17,25), dp(13), lightTheme ? Color.rgb(210,210,214) : Color.rgb(55,50,70), 1); }
 
-    private void renderFriendsPage(LinearLayout content, ArrayList<JSONObject> data, int page, int per, boolean removed) {
-        friendPresence.beginPage(activeSearchToken + ":" + currentHotelKey + ":" + removed + ":" + page);
+    private void renderFriendsPage(LinearLayout content, ArrayList<JSONObject> data, int page, int per, boolean removed, String ownerId) {
+        friendPresence.beginPage(activeSearchToken + ":" + currentHotelKey + ":" + removed + ":" + page,
+                currentHotelKey, removed ? "" : ownerId);
         if (data.isEmpty()) { content.addView(centerNote(removed ? t(R.string.no_removed_friend_found) : t(R.string.no_friend_found))); return; }
         int start = Math.max(0, (page-1)*per), end = Math.min(data.size(), start+per);
         for (int i=start; i<end; i+=2) {
@@ -11534,7 +11535,10 @@ public class MainActivity extends Activity {
         icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
         icon.setContentDescription(description);
         // Automatic decoding also plays animated GIFs when original assets are supplied.
-        Glide.with(this).load(resource).override(dp(40), dp(36)).into(icon);
+        // Bundled icons must be decoded again after an APK replaces the resource files.
+        Glide.with(this).load(resource)
+                .diskCacheStrategy(DiskCacheStrategy.NONE)
+                .override(dp(40), dp(36)).into(icon);
         return icon;
     }
 
