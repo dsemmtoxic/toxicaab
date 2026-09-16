@@ -18,6 +18,8 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;35.0.0'
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -47,6 +49,15 @@ jobs:
           mkdir -p app/keystore
           echo "$KEYSTORE_BASE64" | base64 --decode > app/keystore/upload-key.jks
 
+      - name: Verify regression tests and Android compatibility
+        run: gradle :app:testDebugUnitTest :app:lintDebug --no-daemon
+      - name: Upload verification reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verification-reports
+          path: app/build/reports/
+          retention-days: 3
       - name: Build signed release AAB
         env:
           KEYSTORE_FILE: keystore/upload-key.jks
