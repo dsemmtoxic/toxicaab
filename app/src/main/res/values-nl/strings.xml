@@ -263,9 +263,12 @@
     <string name="color_blue">Blauw</string>
     <string name="color_teal">Groen</string>
     <string name="color_rose">Roze</string>
-    <string name="color_amber">Amber</string>
-    <string name="color_slate">Grijs</string>
     <string name="back">Terug</string>
     <string name="wait_refresh">Wacht %1$ss voordat je dit profiel opnieuw ververst.</string>
     <string name="visual_save_action">Look bewaren</string>
+    <string name="color_custom">Eigen kleur</string>
+    <string name="color_brightness">Helderheid</string>
+    <string name="color_hex">Hexkleur</string>
+    <string name="color_apply">Toepassen</string>
+    <string name="color_invalid_hex">Gebruik zes tekens: #RRGGBB</string>
 </resources>
