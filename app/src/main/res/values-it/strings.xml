@@ -263,9 +263,12 @@
     <string name="color_blue">Blu</string>
     <string name="color_teal">Verde</string>
     <string name="color_rose">Rosa</string>
-    <string name="color_amber">Ambra</string>
-    <string name="color_slate">Grigio</string>
     <string name="back">Indietro</string>
     <string name="wait_refresh">Attendi %1$ss prima di aggiornare di nuovo questo profilo.</string>
     <string name="visual_save_action">Salva look</string>
+    <string name="color_custom">Personalizzato</string>
+    <string name="color_brightness">Luminosità</string>
+    <string name="color_hex">Colore esadecimale</string>
+    <string name="color_apply">Applica</string>
+    <string name="color_invalid_hex">Usa sei cifre: #RRGGBB</string>
 </resources>
