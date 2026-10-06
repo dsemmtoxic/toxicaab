@@ -33,6 +33,11 @@ import com.android.billingclient.api.QueryProductDetailsResult;
 import com.android.billingclient.api.QueryPurchasesParams;
 import com.android.billingclient.api.UnfetchedProduct;
 import androidx.core.graphics.Insets;
+import androidx.core.graphics.ColorUtils;
+import com.bumptech.glide.request.RequestListener;
+import com.bumptech.glide.request.target.Target;
+import com.bumptech.glide.load.DataSource;
+import com.bumptech.glide.load.engine.GlideException;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
@@ -547,7 +552,7 @@ public class MainActivity extends Activity {
         if (pendingProfileRestore != null) currentHotelKey = normalizeHotelKey(pendingProfileRestore.hotel);
         loadAppearancePreferences();
         clearLegacyApiProfileCache();
-        habboFont = Typeface.create("sans-serif-medium", Typeface.NORMAL);
+        habboFont = Typeface.createFromAsset(getAssets(), "fonts/ubuntu_habbo.ttf");
         applySystemBarsForTheme(getWindow());
         loadOpenedProfilesHistory();
         loadFavoriteProfiles();
@@ -1754,7 +1759,7 @@ public class MainActivity extends Activity {
         });
         root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(20), dp(14), dp(20), dp(104));
+        root.setPadding(dp(contentPadding()), dp(compactUi ? 10 : 14), dp(contentPadding()), dp(104));
         scroll.addView(root, new ScrollView.LayoutParams(-1, -2));
         screen.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
 
@@ -1781,7 +1786,7 @@ public class MainActivity extends Activity {
         searchIconLp.leftMargin = dp(8);
         header.addView(searchIcon, searchIconLp);
         mainTutorialSearchTarget = searchIcon;
-        root.addView(header, lp(-1, -2, 0, 0, 0, 24));
+        root.addView(header, lp(-1, -2, 0, 0, 0, compactUi ? 16 : 24));
 
         // Keep the existing suggestion input and submit path; only their host changes.
         searchInput = new EditText(this);
@@ -1792,7 +1797,7 @@ public class MainActivity extends Activity {
         searchInput.setHintTextColor(themeMutedColor());
         searchInput.setTextColor(primaryTextColor());
         searchInput.setTextSize(16);
-        searchInput.setTypeface(Typeface.create("sans-serif", Typeface.NORMAL));
+        searchInput.setTypeface(habboTypeface());
         searchInput.setPadding(dp(16), 0, dp(16), 0);
         searchInput.setBackground(round(subtleSurfaceColor(), dp(16), dialogStrokeColor(), 1));
         searchInput.setCursorVisible(false);
@@ -1814,7 +1819,7 @@ public class MainActivity extends Activity {
         suggestionsScroll.addView(suggestionsBox, new ScrollView.LayoutParams(-1, -2));
         searchBtn = new Button(this);
         searchBtn.setText(t(R.string.search_button));
-        searchBtn.setTextColor(Color.WHITE);
+        searchBtn.setTextColor(accentOnColor());
         searchBtn.setTextSize(15);
         searchBtn.setAllCaps(false);
         searchBtn.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
@@ -1868,25 +1873,44 @@ public class MainActivity extends Activity {
 
     private int primaryTextColor() { return lightTheme ? Color.rgb(30, 35, 47) : Color.rgb(237, 239, 246); }
     private int subtleSurfaceColor() { return lightTheme ? Color.rgb(244, 245, 249) : Color.rgb(32, 35, 44); }
-    private int sectionSpacing() { return compactUi ? 10 : 16; }
-    private int sectionPadding() { return compactUi ? 14 : 20; }
-    private String appearanceSignature() { return accentKey + ":" + shapeKey + ":" + compactUi; }
+    private int sectionSpacing() { return compactUi ? 8 : 16; }
+    private int contentPadding() { return compactUi ? 14 : 20; }
+    private int profileAvatarHeight() { return compactUi ? 154 : 214; }
+    private int sectionPadding() { return compactUi ? 12 : 20; }
+    private String appearanceSignature() { return accentKey + ":" + purple + ":" + shapeKey + ":" + compactUi; }
     private int mixColor(int first, int second, float amount) {
         return Color.rgb(Math.round(Color.red(first) * (1-amount) + Color.red(second) * amount),
                 Math.round(Color.green(first) * (1-amount) + Color.green(second) * amount),
                 Math.round(Color.blue(first) * (1-amount) + Color.blue(second) * amount));
     }
     private int accentForKey(String key) {
+        if ("custom".equals(key)) return getSharedPreferences(PREFS, MODE_PRIVATE)
+                .getInt("appearance_custom_color", Color.rgb(123, 83, 202)) | 0xFF000000;
         if ("blue".equals(key)) return Color.rgb(49, 108, 204);
         if ("teal".equals(key)) return Color.rgb(19, 128, 116);
         if ("rose".equals(key)) return Color.rgb(181, 65, 112);
-        if ("amber".equals(key)) return Color.rgb(166, 101, 22);
-        if ("slate".equals(key)) return Color.rgb(81, 104, 130);
         return Color.rgb(123, 83, 202);
+    }
+    private int accentTextColor() {
+        int surface = dialogFillColor();
+        int target = lightTheme ? Color.BLACK : Color.WHITE;
+        for (int i = 0; i <= 20; i++) {
+            int candidate = mixColor(purple, target, i / 20f);
+            if (ColorUtils.calculateContrast(candidate, surface) >= 4.5) return candidate;
+        }
+        return target;
+    }
+    private int accentOnColor() {
+        return ColorUtils.calculateContrast(Color.BLACK, purple2) > ColorUtils.calculateContrast(Color.WHITE, purple)
+                ? Color.BLACK : Color.WHITE;
     }
     private void loadAppearancePreferences() {
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         accentKey = prefs.getString("appearance_accent", "violet");
+        if (!Arrays.asList("violet", "blue", "teal", "rose", "custom").contains(accentKey)) {
+            accentKey = "violet";
+            prefs.edit().putString("appearance_accent", accentKey).apply();
+        }
         shapeKey = prefs.getString("appearance_shape", "soft");
         compactUi = prefs.getBoolean("appearance_compact", false);
         lightTheme = "light".equals(prefs.getString("theme", "dark"));
@@ -1914,11 +1938,18 @@ public class MainActivity extends Activity {
         button.setOnClickListener(v -> { if (action != null) action.run(); });
         return button;
     }
+    private ImageView appLogo() {
+        ImageView logo = new ImageView(this);
+        logo.setImageResource(R.drawable.toxic_top_logo);
+        logo.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        logo.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        return logo;
+    }
     private View brandMark(int size) {
         FrameLayout mark = new FrameLayout(this);
         mark.setBackground(round(mixColor(subtleSurfaceColor(), purple, lightTheme ? .10f : .18f),
                 dp(Math.round(size * .28f)), Color.TRANSPARENT, 0));
-        TextView letter = text("T", Math.round(size * .52f), lightTheme ? purple : pink, true);
+        TextView letter = text("T", Math.round(size * .52f), accentTextColor(), true);
         letter.setGravity(Gravity.CENTER);
         letter.setIncludeFontPadding(false);
         mark.addView(letter, new FrameLayout.LayoutParams(-1, -1));
@@ -1946,7 +1977,7 @@ public class MainActivity extends Activity {
         full.setBackground(makeBg());
         LinearLayout body = new LinearLayout(this);
         body.setOrientation(LinearLayout.VERTICAL);
-        body.setPadding(dp(20), dp(16), dp(20), dp(20));
+        body.setPadding(dp(contentPadding()), dp(16), dp(contentPadding()), dp(contentPadding()));
         full.addView(body, new FrameLayout.LayoutParams(-1, -1));
         LinearLayout header = new LinearLayout(this);
         header.setGravity(Gravity.CENTER_VERTICAL);
@@ -1957,8 +1988,8 @@ public class MainActivity extends Activity {
         detachViewFromParent(searchInput);
         detachViewFromParent(searchBtn);
         detachViewFromParent(suggestionsScroll);
-        body.addView(searchInput, lp(-1, dp(56), 0, 0, 0, 12));
-        body.addView(searchBtn, lp(-1, dp(52), 0, 0, 0, 8));
+        body.addView(searchInput, lp(-1, dp(compactUi ? 48 : 56), 0, 0, 0, sectionSpacing()));
+        body.addView(searchBtn, lp(-1, dp(compactUi ? 48 : 52), 0, 0, 0, 8));
         profileSearchAvailability = text("", 12, themeMutedColor(), false);
         profileSearchAvailability.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         body.addView(profileSearchAvailability, lp(-1, -2, 2, 2, 2, 12));
@@ -2304,7 +2335,7 @@ public class MainActivity extends Activity {
         sponsorsActionIcon = text(
                 supporterActive ? "✦" : (validationPending ? "…" : "+"),
                 supporterActive ? 26 : (validationPending ? 28 : 34),
-                lightTheme ? purple : pink,
+                accentTextColor(),
                 true
         );
         sponsorsActionIcon.setGravity(Gravity.CENTER);
@@ -3160,9 +3191,7 @@ public class MainActivity extends Activity {
         LinearLayout center = new LinearLayout(this);
         center.setOrientation(LinearLayout.VERTICAL);
         center.setGravity(Gravity.CENTER);
-        center.addView(brandMark(96),new LinearLayout.LayoutParams(dp(96),dp(96)));
-        TextView name = text("Toxic",30,primaryTextColor(),true);
-        center.addView(name,lp(-2,-2,0,20,0,0));
+        center.addView(appLogo(),new LinearLayout.LayoutParams(dp(260),dp(128)));
         splash.addView(center,new FrameLayout.LayoutParams(-1,-2,Gravity.CENTER));
         host.addView(splash,new FrameLayout.LayoutParams(-1,-1));
         uiHandler.postDelayed(() -> {
@@ -3188,7 +3217,7 @@ public class MainActivity extends Activity {
         }, 900L);
     }
 
-    private int tutorialAccentColor(int step) { return lightTheme ? purple : pink; }
+    private int tutorialAccentColor(int step) { return accentTextColor(); }
 
     private int tutorialAccentSecondaryColor(int step) { return purple2; }
 
@@ -3231,7 +3260,7 @@ public class MainActivity extends Activity {
         card.setPadding(dp(22),dp(22),dp(22),dp(20));
         LinearLayout top = new LinearLayout(this);
         top.setGravity(Gravity.CENTER_VERTICAL);
-        TextView stepLabel = text((safeStep + 1) + " / 4",12,lightTheme ? purple : pink,true);
+        TextView stepLabel = text((safeStep + 1) + " / 4",12,accentTextColor(),true);
         top.addView(stepLabel,new LinearLayout.LayoutParams(0,-2,1));
         TextView skip = text(t(R.string.tutorial_skip),13,themeMutedColor(),true);
         skip.setGravity(Gravity.CENTER);
@@ -3252,7 +3281,7 @@ public class MainActivity extends Activity {
         back.setVisibility(safeStep == 0 ? View.INVISIBLE : View.VISIBLE);
         footer.addView(back,new LinearLayout.LayoutParams(0,dp(48),1));
         TextView next = text(t(safeStep == 3 ? R.string.tutorial_finish : R.string.tutorial_next),14,Color.WHITE,true);
-        next.setTextColor(Color.WHITE);
+        next.setTextColor(accentOnColor());
         next.setGravity(Gravity.CENTER);
         next.setPadding(dp(20),0,dp(20),0);
         next.setBackground(ripple(grad(dp(14),purple2,purple)));
@@ -3682,9 +3711,9 @@ public class MainActivity extends Activity {
         startScreenVisible = activeRenderedProfile == null;
         if (!startScreenVisible || searchInProgress) return;
         LinearLayout empty = neutralCard(dp(24));
-        empty.setPadding(dp(24), dp(40), dp(24), dp(40));
+        empty.setPadding(dp(sectionPadding()), dp(compactUi ? 24 : 40), dp(sectionPadding()), dp(compactUi ? 24 : 40));
         empty.setGravity(Gravity.CENTER);
-        empty.addView(brandMark(72), new LinearLayout.LayoutParams(dp(72), dp(72)));
+        empty.addView(appLogo(), new LinearLayout.LayoutParams(dp(compactUi ? 164 : 204), dp(compactUi ? 80 : 100)));
         TextView title = text(t(R.string.discover_profiles), 24, primaryTextColor(), true);
         title.setGravity(Gravity.CENTER);
         empty.addView(title, lp(-1, -2, 0, 20, 0, 8));
@@ -6854,11 +6883,11 @@ public class MainActivity extends Activity {
             else if (unavailable && restricted) addUnavailableSection(R.string.groups);
         });
         renderProfileSection("badges", recordsSignature(r.badgesWithAchievements) + ":" + recordsSignature(r.badges)
-                + ":" + r.badgesLoadFailed + ":" + r.badgesTotal + ":" + r.badgesHasMore + ":" + r.badgesLoading + ":" + r.badgesPagedMode
+                + ":" + r.badgesLoadFailed + ":" + r.badgesTotal + ":" + r.badgesHasMore + ":" + r.badgesLoading + ":" + r.badgesPagedMode + ":" + profileSectionsInProgress
                 + ":" + unavailable + theme, () -> {
             boolean hasBadges = !r.badgesWithAchievements.isEmpty() || !r.badges.isEmpty();
             boolean known = r.officialProfile != null && hasNamedListDeep(r.officialProfile, "badges");
-            if (hasBadges || !unavailable) addBadgesSection(r);
+            if (hasBadges || r.badgesLoading || (profileSectionsInProgress && !r.badgesLoadFailed) || !unavailable) addBadgesSection(r);
             else if (!known) addUnavailableSection(R.string.badges);
         });
         updateFloatingProfileProgressIndicators();
@@ -6891,11 +6920,11 @@ public class MainActivity extends Activity {
         applyProfilePrivateBorder(profile, dp(26));
         profile.setPadding(dp(sectionPadding()), dp(sectionPadding()), dp(sectionPadding()), dp(sectionPadding()));
         if (Build.VERSION.SDK_INT >= 21) profile.setElevation(dp(1));
-        resultWrap.addView(profile, lp(-1, -2, 0, 0, 0, 16));
+        resultWrap.addView(profile, lp(-1, -2, 0, 0, 0, sectionSpacing()));
 
         FrameLayout avatarFrame = new FrameLayout(this);
         avatarFrame.setBackground(grad(dp(20), subtleSurfaceColor(), mixColor(subtleSurfaceColor(), purple, lightTheme ? .06f : .09f)));
-        profile.addView(avatarFrame, lp(-1, dp(compactUi ? 174 : 214), 0, 0, 0, 20));
+        profile.addView(avatarFrame, lp(-1, dp(profileAvatarHeight()), 0, 0, 0, compactUi ? 12 : 20));
         ImageView avatar = new ImageView(this);
         avatar.setAdjustViewBounds(true);
         avatar.setScaleType(ImageView.ScaleType.FIT_CENTER);
@@ -6927,10 +6956,10 @@ public class MainActivity extends Activity {
 
         TextView name = habboText(r.name, 28, true);
         name.setGravity(Gravity.CENTER);
-        name.setLetterSpacing(-0.025f);
+        name.setTextColor(accentTextColor());
         profile.addView(name, lp(-1, -2, 0, 0, 0, 10));
         if (!r.motto.isEmpty()) {
-            TextView motto = text(r.motto, 14, themeMutedColor(), false);
+            TextView motto = habboText(r.motto, 14, false);
             motto.setGravity(Gravity.CENTER);
             motto.setTextColor(lightTheme ? Color.rgb(70,70,70) : Color.argb(220,255,255,255));
             motto.setLineSpacing(dp(2), 1f);
@@ -7070,7 +7099,7 @@ public class MainActivity extends Activity {
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setPadding(dp(14), dp(9), dp(14), dp(9));
-        LinearLayout.LayoutParams rp = lp(-1, dp(compactUi ? 52 : 60), 0, 0, 0, 0);
+        LinearLayout.LayoutParams rp = lp(-1, dp(compactUi ? 48 : 60), 0, 0, 0, 0);
         row.setLayoutParams(rp);
         if ("status".equals(icon) || "status_online".equals(icon) || "status_offline".equals(icon)) {
             ImageView iv = new ImageView(this);
@@ -7125,7 +7154,7 @@ public class MainActivity extends Activity {
             img.setScaleType(ImageView.ScaleType.FIT_CENTER);
             img.setPadding(dp(2), dp(2), dp(2), dp(2));
             cell.addView(img, new FrameLayout.LayoutParams(dp(50), dp(50), Gravity.CENTER));
-            if (!code.isEmpty()) loadImage(img, badgeImageUrl(code));
+            if (!code.isEmpty()) loadBadgeImage(cell, img, badgeImageUrl(code));
             if (isTodayCreationTime(badgeObtainedDate(b))) {
                 TextView newBadge = text(newBadgeLabel(), 8, Color.WHITE, true);
                 newBadge.setGravity(Gravity.CENTER);
@@ -7544,7 +7573,7 @@ public class MainActivity extends Activity {
         Button close = new Button(this);
         close.setText(t(R.string.close));
         close.setAllCaps(false);
-        close.setTextColor(Color.WHITE);
+        close.setTextColor(accentOnColor());
         close.setBackground(grad(dp(14), purple2, purple));
         rootDialog.addView(close, lp(-1, dp(48), 0, 0, 0, 0));
         close.setOnClickListener(v -> dialog.dismiss());
@@ -8387,7 +8416,7 @@ public class MainActivity extends Activity {
         Button close = new Button(this);
         close.setText(t(R.string.close));
         close.setAllCaps(false);
-        close.setTextColor(Color.WHITE);
+        close.setTextColor(accentOnColor());
         close.setBackground(grad(dp(14), purple2, purple));
         wrap.addView(close, lp(-1, dp(46), 0, 0, 0, 0));
         close.setOnClickListener(v -> dialog.dismiss());
@@ -8602,6 +8631,11 @@ public class MainActivity extends Activity {
         r.badgesLoading = true;
         r.badgesLoadFailed = false;
         if (activeRenderedProfile != null) activeRenderedProfile.badgesLoading = true;
+        runOnUiThread(() -> {
+            if (!isCurrentProfileResult(r, token)) return;
+            if (sectionRefresh != null) sectionRefresh.run();
+            else if (activeRenderedProfile != null) renderProfile(activeRenderedProfile);
+        });
         profileRequestsExecutor.execute(() -> {
             boolean succeeded = false;
             try {
@@ -8883,7 +8917,7 @@ public class MainActivity extends Activity {
     private int tabInactiveTextColor() { return lightTheme ? Color.rgb(70,70,70) : Color.argb(150,255,255,255); }
 
     private TextView tabButton(String s, boolean active) {
-        TextView v = habboText(s, 16, true); v.setTextColor(active ? Color.WHITE : tabInactiveTextColor()); v.setGravity(Gravity.CENTER); v.setPadding(dp(13),0,dp(13),0); v.setBackground(tabBg(active));
+        TextView v = habboText(s, 16, true); v.setTextColor(active ? accentOnColor() : tabInactiveTextColor()); v.setGravity(Gravity.CENTER); v.setPadding(dp(13),0,dp(13),0); v.setBackground(tabBg(active));
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(-2, dp(44)); p.rightMargin = dp(8); v.setLayoutParams(p); return v;
     }
 
@@ -9278,10 +9312,11 @@ public class MainActivity extends Activity {
         total = Math.max(total, Math.max(normal.size(), withAchievements.size()));
         // Em modo remoto paginado, não mostra uma grade vazia enquanto a
         // primeira página do HabboDex ainda está chegando.
-        if (r.badgesPagedMode && normal.isEmpty() && withAchievements.isEmpty()) return;
-        if (total <= 0 && normal.isEmpty() && withAchievements.isEmpty()) return;
+        boolean waitingForBadges = r.badgesLoading || (profileSectionsInProgress && normalSource.isEmpty() && !r.badgesLoadFailed);
+        if (!waitingForBadges && r.badgesPagedMode && normal.isEmpty() && withAchievements.isEmpty()) return;
+        if (!waitingForBadges && total <= 0 && normal.isEmpty() && withAchievements.isEmpty()) return;
 
-        LinearLayout c = sectionCard(t(R.string.badges), total, true);
+        LinearLayout c = sectionCard(t(R.string.badges), total, total > 0);
 
         LinearLayout controls = new LinearLayout(this);
         controls.setOrientation(LinearLayout.HORIZONTAL);
@@ -9323,6 +9358,10 @@ public class MainActivity extends Activity {
             r.badgesTabPage = page[0];
             r.hideAchievementBadges = hideAchievementBadges[0];
 
+            if (data.isEmpty() && (r.badgesLoading || (profileSectionsInProgress && !r.badgesLoadFailed))) {
+                addBadgeSkeletonGrid(content, 12);
+                return;
+            }
             renderBadgePage(content, data, page[0], 24);
             final ArrayList<JSONObject> currentData = data;
             renderPager(content, currentData.size(), 24, page, render[0], () -> {
@@ -9349,7 +9388,7 @@ public class MainActivity extends Activity {
                 content.addView(retry, lp(-1, dp(42), 0, 8, 0, 0));
             }
             if (r.badgesLoading) {
-                content.addView(centerNote(t(R.string.loading_history)));
+                addBadgeSkeletonGrid(content, 4);
             }
         };
 
@@ -9390,6 +9429,43 @@ public class MainActivity extends Activity {
         );
     }
 
+    private void addBadgeSkeletonGrid(LinearLayout host, int count) {
+        LinearLayout grid = new LinearLayout(this);
+        grid.setTag("badge_skeleton");
+        grid.setOrientation(LinearLayout.VERTICAL);
+        host.addView(grid, lp(-1, -2, 0, 0, 0, 8));
+        for (int index = 0; index < count; index += 4) {
+            LinearLayout row = new LinearLayout(this);
+            row.setGravity(Gravity.CENTER);
+            grid.addView(row, lp(-1, dp(60), 0, 0, 0, 8));
+            for (int column = 0; column < Math.min(4, count - index); column++) {
+                FrameLayout cell = new FrameLayout(this);
+                row.addView(cell, new LinearLayout.LayoutParams(0, -1, 1));
+                cell.addView(skeletonBlock(dp(44), dp(44), dp(12)),
+                        new FrameLayout.LayoutParams(dp(44), dp(44), Gravity.CENTER));
+            }
+        }
+    }
+    private void loadBadgeImage(FrameLayout cell, ImageView image, String url) {
+        View placeholder = skeletonBlock(dp(42), dp(42), dp(10));
+        placeholder.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        cell.addView(placeholder, new FrameLayout.LayoutParams(dp(42), dp(42), Gravity.CENTER));
+        Runnable finished = () -> {
+            placeholder.animate().cancel();
+            cell.removeView(placeholder);
+        };
+        Glide.with(this).load(url).listener(new RequestListener<Drawable>() {
+            @Override public boolean onLoadFailed(GlideException error, Object model, Target<Drawable> target, boolean first) {
+                finished.run();
+                return false;
+            }
+            @Override public boolean onResourceReady(Drawable resource, Object model, Target<Drawable> target, DataSource source, boolean first) {
+                finished.run();
+                return false;
+            }
+        }).into(image);
+    }
+
     private void renderBadgePage(LinearLayout content, ArrayList<JSONObject> list, int page, int per) {
         if (list == null || list.isEmpty()) {
             content.addView(centerNote(t(R.string.no_badges_found)));
@@ -9421,7 +9497,7 @@ public class MainActivity extends Activity {
             img.setScaleType(ImageView.ScaleType.FIT_CENTER);
             img.setPadding(dp(2), dp(2), dp(2), dp(2));
             cell.addView(img, new FrameLayout.LayoutParams(dp(50), dp(50), Gravity.CENTER));
-            if (!code.isEmpty()) loadImage(img, badgeImageUrl(code));
+            if (!code.isEmpty()) loadBadgeImage(cell, img, badgeImageUrl(code));
 
             if (isTodayCreationTime(badgeObtainedDate(badgeObj))) {
                 TextView newBadge = text(newBadgeLabel(), 8, Color.WHITE, true);
@@ -9873,7 +9949,7 @@ public class MainActivity extends Activity {
         LinearLayout texts = new LinearLayout(this); texts.setOrientation(LinearLayout.VERTICAL); LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, -2, 1); tp.leftMargin = dp(10); row.addView(texts, tp);
         TextView nm = habboText(name, compact ? 15 : 17, true); nm.setMaxLines(1); nm.setEllipsize(TextUtils.TruncateAt.END); texts.addView(nm);
         if (previous != null && !oldName.isEmpty()) {
-            TextView old = text(t(R.string.old_nick) + ": " + oldName, compact ? 12 : 13, Color.argb(210,255,255,255), false); old.setMaxLines(1); old.setEllipsize(TextUtils.TruncateAt.END); texts.addView(old);
+            TextView old = habboText(t(R.string.old_nick) + ": " + oldName, compact ? 12 : 13, false); old.setMaxLines(1); old.setEllipsize(TextUtils.TruncateAt.END); texts.addView(old);
             if (!changed.isEmpty() && !"—".equals(changed)) texts.addView(text(t(R.string.changed_at) + ": " + changed, compact ? 11 : 12, muted, false));
         }
         TextView arrow = text("›", compact ? 24 : 28, Color.WHITE, true); row.addView(arrow, new LinearLayout.LayoutParams(dp(26), -1));
@@ -10060,82 +10136,78 @@ private int loadingProgressFor(String message) {
 
     private void showLoadingSkeleton(String message) {
         resultWrap.removeAllViews();
-
-        LinearLayout c = card(dp(22));
-        c.setPadding(dp(18), dp(18), dp(18), dp(18));
-        resultWrap.addView(c, lp(-1, -2, 0, 0, 0, 18));
-
-        TextView title = habboText(message, 18, true);
-        title.setGravity(Gravity.CENTER);
-        c.addView(title, lp(-1,-2,0,0,0,8));
-        ProgressBar skeletonSpinner = new ProgressBar(this, null, android.R.attr.progressBarStyleSmall);
-        if (Build.VERSION.SDK_INT >= 21) skeletonSpinner.setIndeterminateTintList(android.content.res.ColorStateList.valueOf(purple));
-        LinearLayout spinnerLine = new LinearLayout(this);
-        spinnerLine.setGravity(Gravity.CENTER);
-        spinnerLine.addView(skeletonSpinner, new LinearLayout.LayoutParams(dp(30), dp(30)));
-        c.addView(spinnerLine, lp(-1, dp(34), 0,0,0,12));
-
-        loadingSkeletonProgressBar = (FrameLayout) inlineProgressBar(
-                Math.max(0, Math.min(100, inlineProgressPct))
-        );
+        profileSectionsView = null;
+        renderedSectionsKey = "";
+        LinearLayout progressCard = card(dp(22));
+        progressCard.setPadding(dp(sectionPadding()), dp(14), dp(sectionPadding()), dp(14));
+        TextView status = habboText(message, 14, false);
+        status.setTextColor(themeMutedColor());
+        progressCard.addView(status, lp(-1, -2, 0, 0, 0, 10));
+        loadingSkeletonProgressBar = (FrameLayout) inlineProgressBar(Math.max(0, Math.min(100, inlineProgressPct)));
         profilePrimaryProgressAnchor = loadingSkeletonProgressBar;
-        c.addView(loadingSkeletonProgressBar, lp(-1, dp(9), 0, 0, 0, 16));
+        progressCard.addView(loadingSkeletonProgressBar, lp(-1, dp(8), 0, 0, 0, 0));
         loadingSkeletonProgressBar.post(this::updateFloatingProfileProgressIndicators);
+        resultWrap.addView(progressCard, lp(-1, -2, 0, 0, 0, sectionSpacing()));
 
+        LinearLayout profile = card(dp(26));
+        profile.setTag("profile_skeleton");
+        profile.setPadding(dp(sectionPadding()), dp(sectionPadding()), dp(sectionPadding()), dp(sectionPadding()));
+        resultWrap.addView(profile, lp(-1, -2, 0, 0, 0, sectionSpacing()));
         FrameLayout avatar = new FrameLayout(this);
-        avatar.setBackground(round(lightTheme ? Color.rgb(250,250,250) : Color.rgb(15, 8, 25), dp(20), lightTheme ? Color.rgb(220,220,220) : Color.argb(24,255,255,255), 1));
-        c.addView(avatar, lp(-1, dp(280), 0,0,0,16));
-
+        avatar.setBackground(grad(dp(20), subtleSurfaceColor(), mixColor(subtleSurfaceColor(), purple, lightTheme ? .06f : .09f)));
+        profile.addView(avatar, lp(-1, dp(profileAvatarHeight()), 0, 0, 0, compactUi ? 12 : 20));
         ImageView walker = new ImageView(this);
         loadingProfileAvatarImage = walker;
         walker.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        walker.setPadding(dp(20), dp(10), dp(20), dp(84));
+        walker.setPadding(dp(20), dp(8), dp(20), dp(8));
         avatar.addView(walker, new FrameLayout.LayoutParams(-1, -1));
-        String cachedFigure = loadingProfileFigureHint == null ? "" : loadingProfileFigureHint.trim();
-        if (cachedFigure == null || cachedFigure.trim().isEmpty()) {
-            // Figure neutra usada somente durante o loader quando ainda não sabemos a figure real.
-            cachedFigure = "hd-6295";
-        }
-        // Nunca usa ?user=nick no loader: nicks repetidos podem carregar o avatar de outra conta.
-        // Durante o loader, usa a pose solicitada para deixar o avatar pesquisado mais vivo.
-        String walkerUrl = loadingProfileAvatarUrl(cachedFigure);
-        String fallbackUrl = walkerUrl;
-        try {
-            Glide.with(this).load(walkerUrl).error(Glide.with(this).load(fallbackUrl)).into(walker);
-        } catch (Exception ex) {
-            loadImage(walker, fallbackUrl);
-        }
+        View favorite = skeletonBlock(dp(32), dp(32), dp(999));
+        FrameLayout.LayoutParams favoriteParams = new FrameLayout.LayoutParams(dp(32), dp(32), Gravity.TOP | Gravity.RIGHT);
+        favoriteParams.topMargin = dp(18); favoriteParams.rightMargin = dp(18);
+        avatar.addView(favorite, favoriteParams);
+        String figure = loadingProfileFigureHint == null ? "" : loadingProfileFigureHint.trim();
+        if (figure.isEmpty()) figure = "hd-6295";
+        String walkerUrl = loadingProfileAvatarUrl(figure);
+        try { Glide.with(this).load(walkerUrl).into(walker); }
+        catch (Exception error) { loadImage(walker, walkerUrl); }
+        View name = skeletonBlock(dp(158), dp(28), dp(10));
+        LinearLayout.LayoutParams nameParams = lp(dp(158), dp(28), 0, 0, 0, 10);
+        nameParams.gravity = Gravity.CENTER_HORIZONTAL;
+        profile.addView(name, nameParams);
+        profile.addView(skeletonBlock(-1, dp(16), dp(8)), lp(-1, dp(16), 18, 0, 18, 14));
 
-        LinearLayout grid = new LinearLayout(this);
-        grid.setOrientation(LinearLayout.VERTICAL);
-        c.addView(grid, lp(-1, -2, 0, 0, 0, 0));
-        grid.addView(skeletonLine(dp(180), dp(28), true));
-        grid.addView(skeletonLine(-1, dp(16), false));
-        grid.addView(skeletonLine(-1, dp(16), false));
+        LinearLayout history = card(dp(22));
+        history.setPadding(dp(sectionPadding()), dp(sectionPadding()), dp(sectionPadding()), dp(sectionPadding()));
+        resultWrap.addView(history, lp(-1, -2, 0, 0, 0, sectionSpacing()));
+        history.addView(skeletonLine(dp(190), dp(22), false));
+        LinearLayout record = new LinearLayout(this);
+        record.setOrientation(LinearLayout.VERTICAL);
+        record.setPadding(dp(16), dp(16), dp(16), dp(16));
+        record.setBackground(round(subtleSurfaceColor(), dp(16), dialogStrokeColor(), 1));
+        record.addView(skeletonLine(-1, dp(18), false));
+        record.addView(skeletonBlock(dp(120), dp(12), dp(6)));
+        history.addView(record, lp(-1, -2, 0, 8, 0, 0));
 
-        for (int rowIndex = 0; rowIndex < 3; rowIndex++) {
+        LinearLayout stats = card(dp(22));
+        stats.setPadding(dp(6), dp(6), dp(6), dp(6));
+        resultWrap.addView(stats, lp(-1, -2, 0, 0, 0, sectionSpacing()));
+        for (int index = 0; index < 5; index++) {
             LinearLayout row = new LinearLayout(this);
-            row.setOrientation(LinearLayout.HORIZONTAL);
-            grid.addView(row, lp(-1, dp(58), 0, 6, 0, 8));
-            for (int col = 0; col < 2; col++) {
-                LinearLayout mini = new LinearLayout(this);
-                mini.setOrientation(LinearLayout.HORIZONTAL);
-                mini.setGravity(Gravity.CENTER_VERTICAL);
-                mini.setPadding(dp(10), dp(7), dp(10), dp(7));
-                mini.setBackground(round(lightTheme ? Color.rgb(250,250,250) : Color.argb(22,255,255,255), dp(16), lightTheme ? Color.rgb(220,220,220) : Color.argb(24,255,255,255), 1));
-                LinearLayout.LayoutParams mp = new LinearLayout.LayoutParams(0, -1, 1);
-                if (col == 1) mp.leftMargin = dp(8);
-                row.addView(mini, mp);
-                mini.addView(skeletonBlock(dp(24), dp(24), dp(999)));
-                LinearLayout lines = new LinearLayout(this);
-                lines.setOrientation(LinearLayout.VERTICAL);
-                LinearLayout.LayoutParams lpLines = new LinearLayout.LayoutParams(0, -2, 1);
-                lpLines.leftMargin = dp(9);
-                mini.addView(lines, lpLines);
-                lines.addView(skeletonLine(dp(70), dp(10), false));
-                lines.addView(skeletonLine(dp(110), dp(14), false));
-            }
+            row.setGravity(Gravity.CENTER_VERTICAL);
+            row.setPadding(dp(14), dp(9), dp(14), dp(9));
+            stats.addView(row, lp(-1, dp(compactUi ? 48 : 60), 0, 0, 0, 0));
+            row.addView(skeletonBlock(dp(18), dp(18), dp(6)));
+            LinearLayout labels = new LinearLayout(this);
+            labels.setOrientation(LinearLayout.VERTICAL);
+            row.addView(labels, lp(-2, -2, 12, 0, 0, 0));
+            labels.addView(skeletonLine(dp(72), dp(10), false));
+            labels.addView(skeletonBlock(dp(118), dp(14), dp(6)));
         }
+        LinearLayout badges = card(dp(22));
+        badges.setPadding(dp(sectionPadding()), dp(sectionPadding()), dp(sectionPadding()), dp(sectionPadding()));
+        resultWrap.addView(badges, lp(-1, -2, 0, 0, 0, sectionSpacing()));
+        badges.addView(skeletonLine(dp(110), dp(22), false));
+        addBadgeSkeletonGrid(badges, 12);
     }
 
     private View skeletonLine(int width, int height, boolean centered) {
@@ -10147,7 +10219,7 @@ private int loadingProgressFor(String message) {
 
     private View skeletonBlock(int width, int height, int radius) {
         View v = new View(this);
-        v.setBackground(round(lightTheme ? Color.rgb(250,250,250) : Color.argb(28,255,255,255), radius, lightTheme ? Color.rgb(220,220,220) : Color.argb(18,255,255,255), 1));
+        v.setBackground(round(lightTheme ? Color.rgb(223,227,235) : Color.rgb(43,48,60), radius, Color.TRANSPARENT, 0));
         v.setAlpha(0.72f);
         v.animate().alpha(1f).setDuration(650).withEndAction(() -> v.animate().alpha(0.55f).setDuration(650).withEndAction(() -> pulseSkeleton(v)).start()).start();
         v.setLayoutParams(new LinearLayout.LayoutParams(width, height));
@@ -11955,8 +12027,15 @@ private int loadingProgressFor(String message) {
         if (sp >= 19) view.setLetterSpacing(-.02f);
         return view;
     }
+    private Typeface habboTypeface() {
+        if (habboFont == null) habboFont = Typeface.createFromAsset(getAssets(), "fonts/ubuntu_habbo.ttf");
+        return habboFont;
+    }
     private TextView habboText(String s, int sp, boolean bold) {
-        return text(s, sp, primaryTextColor(), bold);
+        TextView view = text(s, sp, primaryTextColor(), bold);
+        view.setTypeface(habboTypeface());
+        view.setLetterSpacing(0f);
+        return view;
     }
     private TextView toxicLogoText(String s, int sp) {
         TextView view = text(s, sp, primaryTextColor(), true);
@@ -12435,7 +12514,7 @@ private int loadingProgressFor(String message) {
         }
     }
 
-    private int bottomNavIconColor(boolean selected) { return selected ? (lightTheme ? purple : pink) : themeMutedColor(); }
+    private int bottomNavIconColor(boolean selected) { return selected ? primaryTextColor() : themeMutedColor(); }
 
     private int bottomNavDividerColor() {
         return lightTheme ? Color.rgb(224,224,228) : Color.rgb(44,44,52);
@@ -12460,7 +12539,7 @@ private int loadingProgressFor(String message) {
         FrameLayout.LayoutParams navInnerLp = new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER);
         navWrap.addView(nav, navInnerLp);
 
-        FrameLayout.LayoutParams navLp = new FrameLayout.LayoutParams(-1, dp(72), Gravity.BOTTOM);
+        FrameLayout.LayoutParams navLp = new FrameLayout.LayoutParams(-1, dp(compactUi ? 62 : 72), Gravity.BOTTOM);
         navLp.leftMargin = dp(12);
         navLp.rightMargin = dp(12);
         navLp.bottomMargin = dp(10);
@@ -12518,26 +12597,18 @@ private int loadingProgressFor(String message) {
         item.setBackground(ripple(selected
                 ? round(adjustAlpha(purple, lightTheme ? .09f : .18f), dp(18), Color.TRANSPARENT, 0)
                 : new ColorDrawable(Color.TRANSPARENT)));
-        LinearLayout content = new LinearLayout(this);
-        content.setOrientation(LinearLayout.VERTICAL);
-        content.setGravity(Gravity.CENTER);
         ImageView image = new ImageView(this);
-        image.setImageDrawable(new ToxicIcons(icon, bottomNavIconColor(selected)));
+        image.setImageDrawable(new BottomNavIconDrawable(icon, selected));
         image.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
-        content.addView(image, new LinearLayout.LayoutParams(dp(22), dp(22)));
-        TextView text = text(label, 10, bottomNavIconColor(selected), selected);
-        text.setMaxLines(1);
-        text.setEllipsize(TextUtils.TruncateAt.END);
-        content.addView(text, lp(-2, -2, 2, 5, 2, 0));
-        item.addView(content, new FrameLayout.LayoutParams(-1, -1));
+        item.addView(image, new FrameLayout.LayoutParams(dp(30), dp(30), Gravity.CENTER));
         if ("heart".equals(icon)) {
             TextView badge = text("", 9, Color.WHITE, true);
-            badge.setTextColor(Color.WHITE);
+            badge.setTextColor(accentOnColor());
             badge.setGravity(Gravity.CENTER);
             badge.setBackground(round(purple, dp(999), Color.TRANSPARENT, 0));
             FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(dp(18), dp(18), Gravity.TOP | Gravity.CENTER_HORIZONTAL);
             params.leftMargin = dp(20);
-            params.topMargin = dp(1);
+            params.topMargin = dp(compactUi ? 2 : 6);
             item.addView(badge, params);
             favoriteOnlineBadgeViews.add(badge);
             updateFavoriteOnlineBadgeText();
@@ -12789,7 +12860,7 @@ private int loadingProgressFor(String message) {
 
         LinearLayout wrap = new LinearLayout(this);
         wrap.setOrientation(LinearLayout.VERTICAL);
-        wrap.setPadding(dp(20), dp(88), dp(20), dp(104));
+        wrap.setPadding(dp(contentPadding()), dp(88), dp(contentPadding()), dp(104));
         wrap.setBackgroundColor(Color.TRANSPARENT);
         visualScroll.addView(wrap, new ScrollView.LayoutParams(-1, -2));
 
@@ -12837,7 +12908,7 @@ private int loadingProgressFor(String message) {
 
         FrameLayout visualPreviewFrame = new FrameLayout(this);
         visualPreviewFrame.setBackground(round(dialogFillColor(),dp(22),dialogStrokeColor(),1));
-        wrap.addView(visualPreviewFrame, lp(-1, dp(220), 0, 0, 0, 10));
+        wrap.addView(visualPreviewFrame, lp(-1, dp(compactUi ? 166 : 220), 0, 0, 0, sectionSpacing()));
 
         ImageView preview = new ImageView(this);
         preview.setAdjustViewBounds(true);
@@ -14872,7 +14943,7 @@ private int loadingProgressFor(String message) {
         scroll.setVerticalScrollBarEnabled(false);
         LinearLayout wrap = new LinearLayout(this);
         wrap.setOrientation(LinearLayout.VERTICAL);
-        wrap.setPadding(dp(20), dp(16), dp(20), dp(106));
+        wrap.setPadding(dp(contentPadding()), dp(16), dp(contentPadding()), dp(106));
         scroll.addView(wrap, new ScrollView.LayoutParams(-1, -2));
         full.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
         LinearLayout header = new LinearLayout(this);
@@ -14889,7 +14960,7 @@ private int loadingProgressFor(String message) {
         TextView previewTitle = text("Toxic", 21, primaryTextColor(), true);
         previewHeader.addView(previewTitle, new LinearLayout.LayoutParams(0, -2, 1));
         ImageView previewIcon = new ImageView(this);
-        previewIcon.setImageDrawable(new ToxicIcons("search", lightTheme ? purple : pink));
+        previewIcon.setImageDrawable(new ToxicIcons("search", accentTextColor()));
         previewHeader.addView(previewIcon, new LinearLayout.LayoutParams(dp(22), dp(22)));
         preview.addView(previewHeader);
         View separator = new View(this);
@@ -14928,8 +14999,8 @@ private int loadingProgressFor(String message) {
         LinearLayout colors = new LinearLayout(this);
         colorScroll.addView(colors,new HorizontalScrollView.LayoutParams(-1,-1));
         appearance.addView(colorScroll, lp(-1, dp(48), 0, 10, 0, 18));
-        String[] keys = {"violet", "blue", "teal", "rose", "amber", "slate"};
-        int[] colorNames = {R.string.color_violet, R.string.color_blue, R.string.color_teal, R.string.color_rose, R.string.color_amber, R.string.color_slate};
+        String[] keys = {"violet", "blue", "teal", "rose", "custom"};
+        int[] colorNames = {R.string.color_violet, R.string.color_blue, R.string.color_teal, R.string.color_rose, R.string.color_custom};
         for (int i = 0; i < keys.length; i++) {
             final String key = keys[i];
             FrameLayout swatch = new FrameLayout(this);
@@ -14939,17 +15010,27 @@ private int loadingProgressFor(String message) {
             swatch.setSelected(selected);
             swatch.setFocusable(true);
             View color = new View(this);
-            color.setBackground(round(accentForKey(key), dp(999), Color.TRANSPARENT, 0));
+            if ("custom".equals(key) && !selected) {
+                GradientDrawable rainbow = new GradientDrawable(GradientDrawable.Orientation.LEFT_RIGHT,
+                        new int[]{Color.RED, Color.YELLOW, Color.GREEN, Color.CYAN, Color.BLUE, Color.MAGENTA, Color.RED});
+                rainbow.setShape(GradientDrawable.OVAL);
+                rainbow.setGradientType(GradientDrawable.SWEEP_GRADIENT);
+                color.setBackground(rainbow);
+            } else color.setBackground(round(accentForKey(key), dp(999), Color.TRANSPARENT, 0));
             swatch.addView(color, new FrameLayout.LayoutParams(dp(30), dp(30), Gravity.CENTER));
             if (selected) {
                 ImageView check = new ImageView(this);
-                check.setImageDrawable(new ToxicIcons("check", Color.WHITE));
+                check.setImageDrawable(new ToxicIcons("custom".equals(key) ? "palette" : "check",
+                        ColorUtils.calculateLuminance(accentForKey(key)) > .45 ? Color.BLACK : Color.WHITE));
                 swatch.addView(check, new FrameLayout.LayoutParams(dp(18), dp(18), Gravity.CENTER));
             }
             swatch.setMinimumWidth(dp(48));
             colors.addView(swatch, new LinearLayout.LayoutParams(dp(48), -1, 1));
-            swatch.setOnClickListener(v -> applyAppearanceChange(dialog, scroll, () ->
-                    getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("appearance_accent", key).apply()));
+            swatch.setOnClickListener(v -> {
+                if ("custom".equals(key)) showCustomAccentPicker(dialog, scroll);
+                else if (!key.equals(accentKey)) applyAppearanceChange(dialog, scroll, () ->
+                        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString("appearance_accent", key).apply());
+            });
         }
         addSettingsLabel(appearance, t(R.string.appearance_shape));
         LinearLayout shapes = new LinearLayout(this);
@@ -15020,6 +15101,122 @@ private int loadingProgressFor(String message) {
         scroll.post(() -> scroll.scrollTo(0, settingsScrollY));
     }
 
+    private void showCustomAccentPicker(Dialog settingsDialog, ScrollView settingsScroll) {
+        final Dialog picker = new Dialog(this);
+        ScrollView scroll = new ScrollView(this);
+        scroll.setVerticalScrollBarEnabled(false);
+        LinearLayout wrap = neutralCard(dp(24));
+        wrap.setPadding(dp(20), dp(20), dp(20), dp(20));
+        scroll.addView(wrap, new ScrollView.LayoutParams(-1, -2));
+        TextView title = text(t(R.string.color_custom), 22, primaryTextColor(), true);
+        wrap.addView(title, lp(-1, -2, 0, 0, 0, 16));
+
+        LinearLayout preview = new LinearLayout(this);
+        preview.setGravity(Gravity.CENTER_VERTICAL);
+        View colorPreview = new View(this);
+        preview.addView(colorPreview, new LinearLayout.LayoutParams(dp(46), dp(46)));
+        EditText hex = new EditText(this);
+        hex.setSingleLine(true);
+        hex.setTextSize(16);
+        hex.setTextColor(primaryTextColor());
+        hex.setHint("#RRGGBB");
+        hex.setHintTextColor(themeMutedColor());
+        hex.setContentDescription(t(R.string.color_hex));
+        hex.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        hex.setFilters(new InputFilter[]{new InputFilter.LengthFilter(7)});
+        hex.setPadding(dp(14), 0, dp(14), 0);
+        hex.setBackground(round(subtleSurfaceColor(), dp(12), dialogStrokeColor(), 1));
+        LinearLayout.LayoutParams hexParams = new LinearLayout.LayoutParams(0, dp(48), 1);
+        hexParams.leftMargin = dp(12);
+        preview.addView(hex, hexParams);
+        wrap.addView(preview, lp(-1, -2, 0, 0, 0, 8));
+
+        ColorWheelView wheel = new ColorWheelView(this);
+        wheel.setContentDescription(t(R.string.color_custom));
+        wheel.setColor(getSharedPreferences(PREFS, MODE_PRIVATE).getInt("appearance_custom_color", purple));
+        wrap.addView(wheel, lp(-1, dp(244), 0, 0, 0, 4));
+        TextView brightnessLabel = text(t(R.string.color_brightness), 13, themeMutedColor(), true);
+        wrap.addView(brightnessLabel);
+        SeekBar brightness = new SeekBar(this);
+        brightness.setMax(100);
+        brightness.setProgress(Math.round(wheel.getBrightness() * 100));
+        brightness.setContentDescription(t(R.string.color_brightness));
+        brightness.setProgressTintList(ColorStateList.valueOf(accentTextColor()));
+        brightness.setThumbTintList(ColorStateList.valueOf(accentTextColor()));
+        wrap.addView(brightness, lp(-1, dp(48), 0, 0, 0, 16));
+        final boolean[] syncing = {false};
+        Runnable refreshPreview = () -> {
+            int color = wheel.getColor();
+            colorPreview.setBackground(round(color, dp(14), dialogStrokeColor(), 1));
+            syncing[0] = true;
+            hex.setText(String.format(Locale.ROOT, "#%06X", color & 0xFFFFFF));
+            hex.setSelection(hex.length());
+            syncing[0] = false;
+            hex.setError(null);
+        };
+        wheel.setListener(color -> refreshPreview.run());
+        brightness.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar bar, int value, boolean fromUser) {
+                if (fromUser) wheel.setBrightness(value / 100f);
+            }
+            @Override public void onStartTrackingTouch(SeekBar bar) {}
+            @Override public void onStopTrackingTouch(SeekBar bar) {}
+        });
+        hex.addTextChangedListener(new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence value, int start, int count, int after) {}
+            @Override public void onTextChanged(CharSequence value, int start, int before, int count) {
+                if (syncing[0]) return;
+                String clean = value.toString().replace("#", "").trim();
+                if (!clean.matches("[0-9a-fA-F]{6}")) return;
+                int color = Color.parseColor("#" + clean);
+                wheel.setColor(color);
+                brightness.setProgress(Math.round(wheel.getBrightness() * 100));
+                colorPreview.setBackground(round(color, dp(14), dialogStrokeColor(), 1));
+                hex.setError(null);
+            }
+            @Override public void afterTextChanged(Editable value) {}
+        });
+        refreshPreview.run();
+        LinearLayout actions = new LinearLayout(this);
+        TextView cancel = text(t(R.string.cancel), 14, primaryTextColor(), true);
+        cancel.setGravity(Gravity.CENTER);
+        cancel.setBackground(ripple(round(subtleSurfaceColor(), dp(14), Color.TRANSPARENT, 0)));
+        actions.addView(cancel, new LinearLayout.LayoutParams(0, dp(48), 1));
+        TextView apply = text(t(R.string.color_apply), 14, accentOnColor(), true);
+        apply.setTextColor(accentOnColor());
+        apply.setGravity(Gravity.CENTER);
+        apply.setBackground(ripple(grad(dp(14), purple2, purple)));
+        LinearLayout.LayoutParams applyParams = new LinearLayout.LayoutParams(0, dp(48), 1);
+        applyParams.leftMargin = dp(10);
+        actions.addView(apply, applyParams);
+        wrap.addView(actions);
+        cancel.setOnClickListener(v -> picker.dismiss());
+        apply.setOnClickListener(v -> {
+            String clean = hex.getText().toString().replace("#", "").trim();
+            if (!clean.matches("[0-9a-fA-F]{6}")) {
+                hex.setError(t(R.string.color_invalid_hex));
+                return;
+            }
+            int color = Color.parseColor("#" + clean);
+            picker.dismiss();
+            applyAppearanceChange(settingsDialog, settingsScroll, () ->
+                    getSharedPreferences(PREFS, MODE_PRIVATE).edit()
+                            .putString("appearance_accent", "custom").putInt("appearance_custom_color", color).apply());
+        });
+        picker.setContentView(scroll);
+        picker.show();
+        Window window = picker.getWindow();
+        if (window != null) {
+            window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            int width = Math.min(dp(440), getResources().getDisplayMetrics().widthPixels - dp(32));
+            wrap.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+            window.setLayout(width, Math.min(wrap.getMeasuredHeight(), getResources().getDisplayMetrics().heightPixels - dp(72)));
+            window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+            applySafeAreaInsets(window, scroll);
+        }
+    }
+
     private void addSettingsHeading(LinearLayout wrap, String title) {
         TextView view = text(title, 13, themeMutedColor(), true);
         wrap.addView(view, lp(-1, -2, 4, 0, 4, 10));
@@ -15029,8 +15226,8 @@ private int loadingProgressFor(String message) {
     }
     private LinearLayout settingsSurface(LinearLayout wrap) {
         LinearLayout surface = neutralCard(dp(22));
-        surface.setPadding(dp(16), dp(16), dp(16), dp(16));
-        wrap.addView(surface, lp(-1, -2, 0, 0, 0, 24));
+        surface.setPadding(dp(compactUi ? 12 : 16), dp(compactUi ? 12 : 16), dp(compactUi ? 12 : 16), dp(compactUi ? 12 : 16));
+        wrap.addView(surface, lp(-1, -2, 0, 0, 0, compactUi ? 16 : 24));
         return surface;
     }
     private Switch settingsSwitch(String label, boolean checked) {
@@ -15057,10 +15254,10 @@ private int loadingProgressFor(String message) {
         choice.setBackground(ripple(round(selected ? adjustAlpha(purple,lightTheme ? .08f : .17f) : subtleSurfaceColor(), dp(14), selected ? purple : Color.TRANSPARENT, selected ? 1 : 0)));
         if (icon != null) {
             ImageView image = new ImageView(this);
-            image.setImageDrawable(new ToxicIcons(icon, selected ? (lightTheme ? purple : pink) : themeMutedColor()));
+            image.setImageDrawable(new ToxicIcons(icon, selected ? (accentTextColor()) : themeMutedColor()));
             choice.addView(image, new LinearLayout.LayoutParams(dp(19), dp(19)));
         }
-        TextView label = text(title, 12, selected ? (lightTheme ? purple : pink) : primaryTextColor(), selected);
+        TextView label = text(title, 12, selected ? (accentTextColor()) : primaryTextColor(), selected);
         label.setGravity(Gravity.CENTER);
         label.setMaxLines(2);
         choice.addView(label, lp(-2,-2,icon == null ? 0 : 8,0,0,0));
@@ -15077,7 +15274,7 @@ private int loadingProgressFor(String message) {
         row.setContentDescription(label);
         row.setFocusable(true);
         ImageView image = new ImageView(this);
-        image.setImageDrawable(new ToxicIcons(icon,lightTheme ? purple : pink));
+        image.setImageDrawable(new ToxicIcons(icon,accentTextColor()));
         row.addView(image,new LinearLayout.LayoutParams(dp(22),dp(22)));
         TextView title = text(label,14,primaryTextColor(),true);
         LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(0,-2,1);
@@ -15405,7 +15602,7 @@ private int loadingProgressFor(String message) {
         fp.rightMargin = dp(6);
         btn.addView(flag, fp);
         TextView label = text(hotelKey.toUpperCase(Locale.ROOT),11,active ? Color.WHITE : primaryTextColor(),true);
-        if (active) label.setTextColor(Color.WHITE);
+        if (active) label.setTextColor(accentOnColor());
         btn.addView(label);
         btn.setContentDescription(hotelName(hotelKey));
         btn.setSelected(active);
@@ -15548,8 +15745,10 @@ private int loadingProgressFor(String message) {
         img.setScaleType(ImageView.ScaleType.FIT_CENTER);
         img.setPadding(dp(30), dp(24), dp(30), dp(24));
         img.setBackground(round(lightTheme ? Color.rgb(245,245,245) : Color.argb(20,255,255,255), dp(16), lightTheme ? Color.rgb(224,224,224) : Color.argb(28,255,255,255), 1));
-        wrap.addView(img, lp(-1, dp(170), 0,0,0,12));
-        loadImage(img, badgeImageUrl(code));
+        FrameLayout badgeHost = new FrameLayout(this);
+        badgeHost.addView(img, new FrameLayout.LayoutParams(-1, -1));
+        wrap.addView(badgeHost, lp(-1, dp(170), 0,0,0,12));
+        loadBadgeImage(badgeHost, img, badgeImageUrl(code));
 
         LinearLayout infoGrid = new LinearLayout(this);
         infoGrid.setOrientation(LinearLayout.VERTICAL);
@@ -15660,7 +15859,7 @@ private int loadingProgressFor(String message) {
     private TextView dialogButton(String label) {
         TextView v = habboText(label, 15, true);
         v.setGravity(Gravity.CENTER);
-        v.setTextColor(Color.WHITE);
+        v.setTextColor(accentOnColor());
         v.setPadding(dp(12), 0, dp(12), 0);
         v.setBackground(grad(dp(14), purple2, purple));
         return v;
@@ -15739,7 +15938,7 @@ private int loadingProgressFor(String message) {
             if (count <= 0) {
                 badge.setVisibility(View.GONE);
             } else {
-                badge.setTextColor(Color.WHITE);
+                badge.setTextColor(accentOnColor());
                 badge.setText(String.valueOf(Math.min(MAX_FAVORITES, count)));
                 badge.setVisibility(View.VISIBLE);
             }
@@ -15844,15 +16043,17 @@ private int loadingProgressFor(String message) {
     private FavoriteStatus fetchFavoriteStatus(ProfileHistoryItem item) {
         if (item == null) return null;
         PresenceRepository.Result result = new PresenceRepository().fetch(item.hotelKey, item.uniqueId, item.nick);
-        if (result.profile == null || result.state == PresenceRepository.State.UNKNOWN) return null;
+        if (result.profile == null) return null;
         JSONObject obj = result.profile;
+        boolean privateProfile = !obj.optBoolean("profileVisible", true);
+        if (result.state == PresenceRepository.State.UNKNOWN && !privateProfile) return null;
         FavoriteStatus status = new FavoriteStatus();
         status.nick = obj.optString("name", item.nick);
         status.uniqueId = obj.optString("uniqueId", item.uniqueId);
         status.figure = obj.optString("figureString", item.figure);
         status.hotelKey = normalizeHotelKey(item.hotelKey);
-        status.online = result.state == PresenceRepository.State.ONLINE;
-        status.privateProfile = !obj.optBoolean("profileVisible", true);
+        status.online = !privateProfile && result.state == PresenceRepository.State.ONLINE;
+        status.privateProfile = privateProfile;
         status.lastAccess = firstText(obj, "lastAccessTime", "lastLoginTime", "lastOnline", "lastVisit");
         return status;
     }
@@ -16087,11 +16288,11 @@ private int loadingProgressFor(String message) {
         int bgColor;
         int strokeColor;
         if (privateProfile) {
-            bgColor = Color.rgb(10, 10, 14);
-            strokeColor = lightTheme ? Color.rgb(54, 54, 64) : Color.argb(155, 110, 110, 125);
+            bgColor = lightTheme ? Color.rgb(217, 220, 226) : Color.rgb(13, 15, 21);
+            strokeColor = lightTheme ? Color.rgb(165, 171, 184) : Color.rgb(66, 72, 87);
         } else if (online) {
-            bgColor = lightTheme ? Color.rgb(241, 232, 252) : Color.argb(74, 139, 52, 217);
-            strokeColor = lightTheme ? Color.rgb(139, 52, 217) : Color.argb(190, 171, 77, 255);
+            bgColor = mixColor(dialogFillColor(), purple, lightTheme ? .10f : .22f);
+            strokeColor = purple;
         } else {
             bgColor = lightTheme ? Color.rgb(232, 232, 236) : Color.rgb(42, 42, 50);
             strokeColor = lightTheme ? Color.rgb(192, 192, 198) : Color.argb(82, 180, 180, 190);
@@ -16108,8 +16309,10 @@ private int loadingProgressFor(String message) {
 
     private void applyFavoriteRowTextColor(View view, boolean privateProfile) {
         if (view == null) return;
-        if (view instanceof TextView && privateProfile) {
-            ((TextView)view).setTextColor(Color.WHITE);
+        if (view instanceof TextView) {
+            TextView text = (TextView)view;
+            text.setTextColor("favorite_presence".equals(text.getTag()) ? accentTextColor()
+                    : privateProfile ? (lightTheme ? Color.rgb(82, 89, 104) : Color.rgb(157, 165, 184)) : primaryTextColor());
         }
         if (view instanceof ViewGroup) {
             ViewGroup group = (ViewGroup)view;
@@ -16176,7 +16379,7 @@ private int loadingProgressFor(String message) {
 
         LinearLayout wrap = new LinearLayout(this);
         wrap.setOrientation(LinearLayout.VERTICAL);
-        wrap.setPadding(dp(20), dp(22), dp(20), dp(104));
+        wrap.setPadding(dp(contentPadding()), dp(compactUi ? 16 : 22), dp(contentPadding()), dp(104));
         wrap.setBackgroundColor(Color.TRANSPARENT);
         full.addView(wrap, new FrameLayout.LayoutParams(-1, -1));
 
@@ -16438,14 +16641,14 @@ private int loadingProgressFor(String message) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(10), dp(8), dp(10), dp(8));
+        row.setPadding(dp(10), dp(compactUi ? 4 : 8), dp(10), dp(compactUi ? 4 : 8));
         row.setBackground(round(lightTheme ? Color.rgb(250,250,250) : Color.argb(20,255,255,255), dp(16), lightTheme ? Color.rgb(218,218,218) : Color.argb(30,255,255,255), 1));
-        row.setLayoutParams(lp(-1, dp(72), 0, 0, 0, 8));
+        row.setLayoutParams(lp(-1, dp(compactUi ? 60 : 76), 0, 0, 0, sectionSpacing()));
 
         ImageView head = new ImageView(this);
         head.setTag("favorite_head");
         head.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        row.addView(head, new LinearLayout.LayoutParams(dp(54), dp(56)));
+        row.addView(head, new LinearLayout.LayoutParams(dp(compactUi ? 44 : 54), dp(compactUi ? 48 : 56)));
         if (showOnlineState) loadHeadImage(head, avatarHeadByNameForHotel(item.nick, item.hotelKey));
         else loadHeadImageForKnownProfile(head, item.figure, item.uniqueId, item.nick, item.hotelKey);
 
@@ -16462,9 +16665,13 @@ private int loadingProgressFor(String message) {
         LinearLayout nameRow = new LinearLayout(this);
         nameRow.setOrientation(LinearLayout.HORIZONTAL);
         nameRow.setGravity(Gravity.CENTER_VERTICAL);
-        nameRow.addView(name, new LinearLayout.LayoutParams(-2, -2));
-        if (showOnlineState && Boolean.TRUE.equals(favoriteOnlineStates.get(favoriteKey(item)))) {
-            TextView online = text(t(R.string.favorite_currently_online), 12, purple, true);
+        nameRow.addView(name, new LinearLayout.LayoutParams(0, -2, 1));
+        FavoriteStatus status = favoriteStatusCache.get(favoriteKey(item));
+        boolean privateFavorite = status != null && status.privateProfile;
+        boolean onlineFavorite = status != null ? status.online : Boolean.TRUE.equals(favoriteOnlineStates.get(favoriteKey(item)));
+        if (showOnlineState && onlineFavorite && !privateFavorite) {
+            TextView online = text(t(R.string.favorite_currently_online), 12, accentTextColor(), true);
+            online.setTag("favorite_presence");
             online.setGravity(Gravity.CENTER_VERTICAL);
             LinearLayout.LayoutParams op = new LinearLayout.LayoutParams(-2, -2);
             op.leftMargin = dp(8);
@@ -16477,6 +16684,14 @@ private int loadingProgressFor(String message) {
         ImageView flag = new ImageView(this);
         flag.setImageDrawable(new HotelFlagDrawable(item.hotelKey));
         hotelLine.addView(flag, new LinearLayout.LayoutParams(dp(24), dp(16)));
+        if (showOnlineState && privateFavorite) {
+            ImageView lock = new ImageView(this);
+            lock.setImageDrawable(new ToxicIcons("lock", themeMutedColor()));
+            lock.setContentDescription(t(R.string.profile_private));
+            LinearLayout.LayoutParams lockParams = new LinearLayout.LayoutParams(dp(14), dp(14));
+            lockParams.leftMargin = dp(8);
+            hotelLine.addView(lock, lockParams);
+        }
         mid.addView(hotelLine, new LinearLayout.LayoutParams(-1, -2));
         return row;
     }
@@ -16577,6 +16792,7 @@ private int loadingProgressFor(String message) {
 
         TextView name = habboText(nick == null || nick.trim().isEmpty() ? t(R.string.profile) : nick.trim(), 24, true);
         name.setGravity(Gravity.CENTER);
+        name.setTextColor(accentTextColor());
         rootDialog.addView(name, lp(-1, -2, 0, 0, 0, 8));
 
         ProgressBar miniLoader = new ProgressBar(this);

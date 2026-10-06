@@ -36,6 +36,11 @@ final class ToxicIcons extends Drawable {
             case "back":
                 path(canvas, 14, 5, 7, 12, 14, 19);
                 line(canvas, 7, 12, 21, 12); break;
+            case "lock":
+                canvas.drawRoundRect(5, 10, 19, 21, 2, 2, paint);
+                canvas.drawArc(8, 3, 16, 15, 180, 180, false, paint);
+                canvas.drawLine(12, 14, 12, 17, paint);
+                break;
             case "close":
                 line(canvas, 6, 6, 18, 18); line(canvas, 18, 6, 6, 18); break;
             case "arrow":
