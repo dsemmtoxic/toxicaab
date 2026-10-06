@@ -263,9 +263,12 @@
     <string name="color_blue">Sininen</string>
     <string name="color_teal">Vihreä</string>
     <string name="color_rose">Roosa</string>
-    <string name="color_amber">Meripihka</string>
-    <string name="color_slate">Harmaa</string>
     <string name="back">Takaisin</string>
     <string name="wait_refresh">Odota %1$ss ennen kuin päivität tämän profiilin uudelleen.</string>
     <string name="visual_save_action">Tallenna asu</string>
+    <string name="color_custom">Oma väri</string>
+    <string name="color_brightness">Kirkkaus</string>
+    <string name="color_hex">Heksaväri</string>
+    <string name="color_apply">Käytä</string>
+    <string name="color_invalid_hex">Käytä kuutta merkkiä: #RRGGBB</string>
 </resources>
