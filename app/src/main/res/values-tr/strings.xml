@@ -263,9 +263,12 @@
     <string name="color_blue">Mavi</string>
     <string name="color_teal">Yeşil</string>
     <string name="color_rose">Pembe</string>
-    <string name="color_amber">Kehribar</string>
-    <string name="color_slate">Gri</string>
     <string name="back">Geri</string>
     <string name="wait_refresh">Bu profili tekrar yenilemek için %1$ss bekleyin.</string>
     <string name="visual_save_action">Görünümü kaydet</string>
+    <string name="color_custom">Özel renk</string>
+    <string name="color_brightness">Parlaklık</string>
+    <string name="color_hex">Onaltılık renk</string>
+    <string name="color_apply">Uygula</string>
+    <string name="color_invalid_hex">Altı basamak kullanın: #RRGGBB</string>
 </resources>
