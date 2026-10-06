@@ -33,6 +33,11 @@ final class ToxicIcons extends Drawable {
             case "search":
                 canvas.drawCircle(10.5f, 10.5f, 6.5f, paint);
                 line(canvas, 15.3f, 15.3f, 20.5f, 20.5f); break;
+            case "wifi_off":
+                canvas.drawArc(new RectF(2, 4, 22, 24), 228, 84, false, paint);
+                canvas.drawArc(new RectF(6, 10, 18, 22), 228, 84, false, paint);
+                canvas.drawCircle(12, 19, .65f, paint);
+                line(canvas, 3, 3, 21, 21); break;
             case "back":
                 path(canvas, 14, 5, 7, 12, 14, 19);
                 line(canvas, 7, 12, 21, 12); break;

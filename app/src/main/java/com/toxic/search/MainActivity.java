@@ -1642,60 +1642,60 @@ public class MainActivity extends Activity {
         full.setClickable(true);
         full.setFocusable(true);
 
-        LinearLayout card = new LinearLayout(this);
-        card.setOrientation(LinearLayout.VERTICAL);
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        scroll.setVerticalScrollBarEnabled(false);
+        LinearLayout center = new LinearLayout(this);
+        center.setOrientation(LinearLayout.VERTICAL);
+        center.setGravity(Gravity.CENTER);
+        center.setPadding(dp(contentPadding()), dp(80), dp(contentPadding()), dp(32));
+        scroll.addView(center, new ScrollView.LayoutParams(-1, -2));
+        full.addView(scroll, new FrameLayout.LayoutParams(-1, -1));
+
+        ImageView logo = appLogo();
+        FrameLayout.LayoutParams logoLp = new FrameLayout.LayoutParams(dp(72), dp(35), Gravity.TOP | Gravity.START);
+        logoLp.leftMargin = dp(contentPadding());
+        logoLp.topMargin = dp(14);
+        full.addView(logo, logoLp);
+
+        LinearLayout card = neutralCard(dp(24));
         card.setGravity(Gravity.CENTER_HORIZONTAL);
-        card.setPadding(dp(24), dp(28), dp(24), dp(26));
-        int cardFillColor = lightTheme ? Color.WHITE : Color.rgb(35, 23, 49);
-        int cardStrokeColor = lightTheme ? Color.rgb(222, 205, 238) : Color.argb(95, 190, 115, 255);
-        card.setBackground(round(cardFillColor, dp(24), cardStrokeColor, 1));
-        if (Build.VERSION.SDK_INT >= 21) card.setElevation(dp(12));
+        card.setPadding(dp(compactUi ? 20 : 28), dp(compactUi ? 24 : 32), dp(compactUi ? 20 : 28), dp(compactUi ? 24 : 32));
 
         FrameLayout iconWrap = new FrameLayout(this);
-        int first = reason == AccessGateReason.OFFLINE ? Color.rgb(255, 142, 70) : Color.rgb(169, 68, 235);
-        int second = reason == AccessGateReason.OFFLINE ? Color.rgb(224, 63, 78) : Color.rgb(105, 42, 180);
-        iconWrap.setBackground(grad(dp(999), first, second));
-        TextView icon = text(reason == AccessGateReason.OFFLINE ? "!" : "×", 38, Color.WHITE, true);
-        icon.setTextColor(Color.WHITE);
-        icon.setGravity(Gravity.CENTER);
-        icon.setIncludeFontPadding(false);
-        iconWrap.addView(icon, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
-        card.addView(iconWrap, new LinearLayout.LayoutParams(dp(76), dp(76)));
+        iconWrap.setBackground(round(mixColor(dialogFillColor(), purple, lightTheme ? .08f : .17f),
+                dp(20), Color.TRANSPARENT, 0));
+        ImageView icon = new ImageView(this);
+        icon.setImageDrawable(new ToxicIcons("wifi_off", accentTextColor()));
+        icon.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        iconWrap.addView(icon, new FrameLayout.LayoutParams(dp(32), dp(32), Gravity.CENTER));
+        card.addView(iconWrap, new LinearLayout.LayoutParams(dp(64), dp(64)));
 
-        int titleRes = R.string.no_internet_title;
-        int bodyRes = R.string.no_internet_body;
-
-        TextView title = habboText(t(titleRes), 22, true);
+        TextView title = text(t(R.string.no_internet_title), 22, primaryTextColor(), true);
         title.setGravity(Gravity.CENTER);
         title.setIncludeFontPadding(false);
         LinearLayout.LayoutParams titleLp = new LinearLayout.LayoutParams(-1, -2);
         titleLp.topMargin = dp(20);
         card.addView(title, titleLp);
 
-        TextView body = text(t(bodyRes), 14, lightTheme ? Color.rgb(83, 68, 94) : Color.argb(215,255,255,255), false);
+        TextView body = text(t(R.string.no_internet_body), 14, themeMutedColor(), false);
         body.setGravity(Gravity.CENTER);
         body.setLineSpacing(dp(3), 1f);
         LinearLayout.LayoutParams bodyLp = new LinearLayout.LayoutParams(-1, -2);
-        bodyLp.topMargin = dp(12);
+        bodyLp.topMargin = dp(10);
         card.addView(body, bodyLp);
 
+        LinearLayout status = new LinearLayout(this);
+        status.setGravity(Gravity.CENTER);
         ProgressBar spinner = new ProgressBar(this, null, android.R.attr.progressBarStyleSmall);
         spinner.setIndeterminate(true);
         if (Build.VERSION.SDK_INT >= 21) spinner.setIndeterminateTintList(ColorStateList.valueOf(purple));
-        LinearLayout.LayoutParams spinnerLp = new LinearLayout.LayoutParams(dp(30), dp(30));
-        spinnerLp.topMargin = dp(22);
-        card.addView(spinner, spinnerLp);
-
-        TextView checking = text(t(R.string.access_gate_auto_check), 12, lightTheme ? Color.rgb(100, 82, 112) : Color.argb(175,255,255,255), true);
-        checking.setGravity(Gravity.CENTER);
-        LinearLayout.LayoutParams checkingLp = new LinearLayout.LayoutParams(-1, -2);
-        checkingLp.topMargin = dp(8);
-        card.addView(checking, checkingLp);
-
-        FrameLayout.LayoutParams cardLp = new FrameLayout.LayoutParams(-1, -2, Gravity.CENTER);
-        cardLp.leftMargin = dp(24);
-        cardLp.rightMargin = dp(24);
-        full.addView(card, cardLp);
+        status.addView(spinner, new LinearLayout.LayoutParams(dp(18), dp(18)));
+        TextView checking = text(t(R.string.access_gate_auto_check), 12, themeMutedColor(), false);
+        checking.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
+        status.addView(checking, lp(-2, -2, 10, 0, 0, 0));
+        card.addView(status, lp(-1, -2, 0, 24, 0, 0));
+        center.addView(card, new LinearLayout.LayoutParams(-1, -2));
         dialog.setContentView(full);
         applySafeAreaInsets(dialog.getWindow(), full);
         accessGateDialog = dialog;
@@ -1768,9 +1768,10 @@ public class MainActivity extends Activity {
         header.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout brand = new LinearLayout(this);
         brand.setOrientation(LinearLayout.VERTICAL);
-        TextView logo = text("Toxic", 28, primaryTextColor(), true);
-        logo.setLetterSpacing(-0.035f);
-        brand.addView(logo);
+        ImageView logo = appLogo();
+        logo.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
+        logo.setContentDescription(t(R.string.app_name));
+        brand.addView(logo, new LinearLayout.LayoutParams(dp(72), dp(35)));
         LinearLayout hotel = new LinearLayout(this);
         hotel.setGravity(Gravity.CENTER_VERTICAL);
         selectedHotelFlag = new ImageView(this);
@@ -1958,7 +1959,7 @@ public class MainActivity extends Activity {
     }
     private void showFullScreenDialog(Dialog dialog, FrameLayout content) {
         dialog.setContentView(content);
-        dialog.show();
+        if (!dialog.isShowing()) dialog.show();
         Window window = dialog.getWindow();
         if (window != null) {
             window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
@@ -1971,8 +1972,10 @@ public class MainActivity extends Activity {
         if (activityDestroyed) return;
         if (profileSearchDialog != null && profileSearchDialog.isShowing()) return;
         if (profileSearchDialog != null) cleanProfileSearchDialog(profileSearchDialog);
+        setSearchTextProgrammatically("");
         final Dialog dialog = new Dialog(this);
         profileSearchDialog = dialog;
+        final EditText input = searchInput;
         FrameLayout full = new FrameLayout(this);
         full.setBackground(makeBg());
         LinearLayout body = new LinearLayout(this);
@@ -1994,20 +1997,41 @@ public class MainActivity extends Activity {
         profileSearchAvailability.setAccessibilityLiveRegion(View.ACCESSIBILITY_LIVE_REGION_POLITE);
         body.addView(profileSearchAvailability, lp(-1, -2, 2, 2, 2, 12));
         body.addView(suggestionsScroll, new LinearLayout.LayoutParams(-1, 0, 1f));
-        dialog.setOnDismissListener(ignored -> cleanProfileSearchDialog(dialog));
+        input.setFocusableInTouchMode(true);
+        input.requestFocus();
+        input.setCursorVisible(true);
+        suppressSuggestions = false;
+        final ViewTreeObserver.OnWindowFocusChangeListener keyboardFocusListener = new ViewTreeObserver.OnWindowFocusChangeListener() {
+            @Override public void onWindowFocusChanged(boolean hasFocus) {
+                if (!hasFocus) return;
+                if (full.getViewTreeObserver().isAlive()) {
+                    full.getViewTreeObserver().removeOnWindowFocusChangeListener(this);
+                }
+                input.post(() -> showProfileSearchKeyboard(dialog, input));
+            }
+        };
+        full.getViewTreeObserver().addOnWindowFocusChangeListener(keyboardFocusListener);
+        dialog.setOnDismissListener(ignored -> {
+            if (full.getViewTreeObserver().isAlive()) {
+                full.getViewTreeObserver().removeOnWindowFocusChangeListener(keyboardFocusListener);
+            }
+            cleanProfileSearchDialog(dialog);
+        });
         showFullScreenDialog(dialog, full);
         Window window = dialog.getWindow();
-        if (window != null) window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
+        if (window != null) window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_ALWAYS_VISIBLE
+                | WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
         updateProfileSearchAvailability();
-        searchInput.post(() -> {
-            if (profileSearchDialog != dialog || !dialog.isShowing()) return;
-            searchInput.requestFocus();
-            searchInput.selectAll();
-            suppressSuggestions = false;
-            InputMethodManager imm = (InputMethodManager)getSystemService(INPUT_METHOD_SERVICE);
-            if (imm != null) imm.showSoftInput(searchInput, InputMethodManager.SHOW_IMPLICIT);
-            scheduleSuggestions(searchInput.getText().toString());
-        });
+        input.post(() -> showProfileSearchKeyboard(dialog, input));
+    }
+    private void showProfileSearchKeyboard(Dialog dialog, EditText input) {
+        if (profileSearchDialog != dialog || !dialog.isShowing() || input != searchInput) return;
+        input.requestFocus();
+        input.setCursorVisible(true);
+        Window window = dialog.getWindow();
+        if (window != null && input.hasWindowFocus()) {
+            WindowCompat.getInsetsController(window, input).show(WindowInsetsCompat.Type.ime());
+        }
     }
     private void dismissProfileSearchDialog() {
         Dialog dialog = profileSearchDialog;
@@ -3713,10 +3737,9 @@ public class MainActivity extends Activity {
         LinearLayout empty = neutralCard(dp(24));
         empty.setPadding(dp(sectionPadding()), dp(compactUi ? 24 : 40), dp(sectionPadding()), dp(compactUi ? 24 : 40));
         empty.setGravity(Gravity.CENTER);
-        empty.addView(appLogo(), new LinearLayout.LayoutParams(dp(compactUi ? 164 : 204), dp(compactUi ? 80 : 100)));
         TextView title = text(t(R.string.discover_profiles), 24, primaryTextColor(), true);
         title.setGravity(Gravity.CENTER);
-        empty.addView(title, lp(-1, -2, 0, 20, 0, 8));
+        empty.addView(title, lp(-1, -2, 0, 0, 0, 8));
         TextView subtitle = text(t(R.string.discover_subtitle), 14, themeMutedColor(), false);
         subtitle.setGravity(Gravity.CENTER);
         empty.addView(subtitle, lp(-1, -2, 0, 0, 0, 0));
@@ -14935,7 +14958,9 @@ private int loadingProgressFor(String message) {
     }
 
     private void showSettingsDialog() {
-        final Dialog dialog = new Dialog(this);
+        showSettingsDialog(new Dialog(this));
+    }
+    private void showSettingsDialog(Dialog dialog) {
         FrameLayout full = new FrameLayout(this);
         full.setBackground(makeBg());
         ScrollView scroll = new ScrollView(this);
@@ -15096,9 +15121,18 @@ private int loadingProgressFor(String message) {
         TextView version = text("Toxic  " + APP_VERSION, 12, themeMutedColor(), false);
         version.setGravity(Gravity.CENTER);
         wrap.addView(version, lp(-1, -2, 0, 8, 0, 0));
+        final int restoreScrollY = settingsScrollY;
+        scroll.getViewTreeObserver().addOnPreDrawListener(new ViewTreeObserver.OnPreDrawListener() {
+            @Override public boolean onPreDraw() {
+                if (scroll.getViewTreeObserver().isAlive()) {
+                    scroll.getViewTreeObserver().removeOnPreDrawListener(this);
+                }
+                scroll.scrollTo(0, restoreScrollY);
+                return true;
+            }
+        });
         bindBottomNavigationAutoHide(scroll, addBottomNavigation(full, 3, dialog));
         showFullScreenDialog(dialog, full);
-        scroll.post(() -> scroll.scrollTo(0, settingsScrollY));
     }
 
     private void showCustomAccentPicker(Dialog settingsDialog, ScrollView settingsScroll) {
@@ -15293,9 +15327,8 @@ private int loadingProgressFor(String message) {
         openingSplashShownThisSession = true;
         applySystemBarsForTheme();
         visualItemViewsSessionCache.clear();
-        dialog.dismiss();
         rebuildUiPreservingProfile();
-        showSettingsDialog();
+        showSettingsDialog(dialog);
     }
 
 
