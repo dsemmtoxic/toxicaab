@@ -263,9 +263,12 @@
     <string name="color_blue">Blau</string>
     <string name="color_teal">Grün</string>
     <string name="color_rose">Rosa</string>
-    <string name="color_amber">Bernstein</string>
-    <string name="color_slate">Grau</string>
     <string name="back">Zurück</string>
     <string name="wait_refresh">Warte %1$ss, um dieses Profil erneut zu aktualisieren.</string>
     <string name="visual_save_action">Look speichern</string>
+    <string name="color_custom">Eigene Farbe</string>
+    <string name="color_brightness">Helligkeit</string>
+    <string name="color_hex">Hex-Farbe</string>
+    <string name="color_apply">Anwenden</string>
+    <string name="color_invalid_hex">Sechs Stellen verwenden: #RRGGBB</string>
 </resources>
