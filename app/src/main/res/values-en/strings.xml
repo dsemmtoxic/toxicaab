@@ -263,9 +263,12 @@
     <string name="color_blue">Blue</string>
     <string name="color_teal">Teal</string>
     <string name="color_rose">Rose</string>
-    <string name="color_amber">Amber</string>
-    <string name="color_slate">Slate</string>
     <string name="back">Back</string>
     <string name="wait_refresh">Wait %1$ss before refreshing this profile again.</string>
     <string name="visual_save_action">Save look</string>
+    <string name="color_custom">Custom color</string>
+    <string name="color_brightness">Brightness</string>
+    <string name="color_hex">Hex color</string>
+    <string name="color_apply">Apply</string>
+    <string name="color_invalid_hex">Use six digits: #RRGGBB</string>
 </resources>
