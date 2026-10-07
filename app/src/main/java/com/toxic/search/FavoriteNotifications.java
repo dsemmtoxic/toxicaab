@@ -11,6 +11,10 @@ import org.json.*;
 import static com.toxic.search.MainActivity.localizedStringStatic;
 
 final class FavoriteNotifications {
+    static final String EXTRA_NICK = "favorite_profile_nick";
+    static final String EXTRA_HOTEL = "favorite_profile_hotel";
+    static final String EXTRA_ID = "favorite_profile_id";
+    static final String EXTRA_FIGURE = "favorite_profile_figure";
     private static final String PREFS = "toxic_search_settings";
     private static final String PREF_NOTIFY_FAVORITE_ONLINE = "notify_favorite_online";
     private static final String PREF_FAVORITES = "favorite_profiles";
@@ -85,72 +89,44 @@ final class FavoriteNotifications {
     }
 
 
-    private static File favoriteHeadCacheDirStatic(Context context) {
-        File dir = new File(context.getCacheDir(), "favorite_heads");
-        try { dir.mkdirs(); } catch(Exception ignored) {}
-        return dir;
-    }
-
-    private static File favoriteHeadCacheFileStatic(Context context, String hotelKey, String nick) {
-        return favoriteHeadCacheFileStatic(context, hotelKey, nick, "");
-    }
-
-    private static File favoriteHeadCacheFileStatic(Context context, String hotelKey, String nick, String uniqueId) {
-        String key = profileIdentityKeyStatic(hotelKey, uniqueId, nick);
-        return new File(favoriteHeadCacheDirStatic(context), Math.abs(key.hashCode()) + ".png");
-    }
-
-    private static void saveFavoriteHeadBitmapStatic(Context context, FavoriteStatus st, Bitmap bitmap) {
-        if (context == null || st == null || bitmap == null) return;
-        try {
-            FileOutputStream out = new FileOutputStream(favoriteHeadCacheFileStatic(context, st.hotelKey, st.nick, st.uniqueId));
-            bitmap.compress(Bitmap.CompressFormat.PNG, 100, out);
-            out.flush();
-            out.close();
-        } catch(Exception ignored) {}
-    }
-
-    private static Bitmap loadFavoriteHeadFromCacheStatic(Context context, FavoriteStatus st) {
-        try {
-            if (context == null || st == null) return null;
-            File f = favoriteHeadCacheFileStatic(context, st.hotelKey, st.nick, st.uniqueId);
-            if (f.exists()) return BitmapFactory.decodeFile(f.getAbsolutePath());
-        } catch(Exception ignored) {}
-        return null;
-    }
-
     private static Bitmap loadNotificationHeadBitmapStatic(Context context, FavoriteStatus st) {
-        HttpURLConnection c = null;
+        if (context == null || st == null) return null;
+        String url = "";
         try {
-            if (context == null || st == null) return null;
-            String url;
-            if (st.nick != null && !st.nick.trim().isEmpty()) {
-                url = "https://" + hotelDomainStatic(st.hotelKey) + "/habbo-imaging/avatarimage?user=" + URLEncoder.encode(st.nick, "UTF-8") + "&size=m&direction=2&head_direction=2&headonly=1";
-            } else if (st.figure != null && !st.figure.trim().isEmpty()) {
-                url = "https://" + hotelDomainStatic(st.hotelKey) + "/habbo-imaging/avatarimage?figure=" + URLEncoder.encode(st.figure, "UTF-8") + "&size=m&direction=2&head_direction=2&headonly=1";
-            } else {
-                Bitmap cached = loadFavoriteHeadFromCacheStatic(context, st);
-                return cached != null ? cached : BitmapFactory.decodeResource(context.getResources(), R.drawable.pre_load_head);
-            }
-            c = (HttpURLConnection)new URL(url).openConnection();
-            c.setConnectTimeout(5000);
-            c.setReadTimeout(5000);
-            Bitmap b = BitmapFactory.decodeStream(c.getInputStream());
-            if (b != null) {
-                saveFavoriteHeadBitmapStatic(context, st, b);
-                return b;
-            }
-            Bitmap cached = loadFavoriteHeadFromCacheStatic(context, st);
-            return cached != null ? cached : BitmapFactory.decodeResource(context.getResources(), R.drawable.pre_load_head);
-        } catch(Exception ignored) {
-            Bitmap cached = loadFavoriteHeadFromCacheStatic(context, st);
-            return cached != null ? cached : (context == null ? null : BitmapFactory.decodeResource(context.getResources(), R.drawable.pre_load_head));
-        } finally {
-            try { if (c != null) c.disconnect(); } catch(Exception ignored) {}
-        }
+            String base = "https://" + hotelDomainStatic(st.hotelKey) + "/habbo-imaging/avatarimage?";
+            if (st.nick != null && !st.nick.trim().isEmpty()) url = base + "user=" + URLEncoder.encode(st.nick, "UTF-8");
+            else if (st.figure != null && !st.figure.trim().isEmpty()) url = base + "figure=" + URLEncoder.encode(st.figure, "UTF-8");
+            if (!url.isEmpty()) url += "&size=m&direction=2&head_direction=2&headonly=1";
+        } catch (Exception ignored) {}
+        String key = profileIdentityKeyStatic(st.hotelKey, st.uniqueId, st.nick);
+        File legacy = new File(new File(context.getCacheDir(), "favorite_heads"), Math.abs(key.hashCode()) + ".png");
+        return FavoriteAvatarLoader.notificationIcon(context, url, legacy);
     }
 
-    private static void showFavoriteOnlineSystemNotificationStatic(Context context, FavoriteStatus st) {
+    static Intent profileIntent(Context context, FavoriteStatus st) {
+        String hotel = normalizeHotelKeyStatic(st.hotelKey);
+        if (hotel.isEmpty()) hotel = "br";
+        Intent open = new Intent(context, MainActivity.class);
+        open.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        open.putExtra(EXTRA_NICK, st.nick).putExtra(EXTRA_HOTEL, hotel)
+                .putExtra(EXTRA_ID, st.uniqueId).putExtra(EXTRA_FIGURE, st.figure);
+        open.setData(new android.net.Uri.Builder().scheme("toxic").authority("favorite")
+                .appendPath(profileIdentityKeyStatic(hotel, st.uniqueId, st.nick)).build());
+        return open;
+    }
+
+    static ProfileHistoryItem profileFromIntent(Intent intent) {
+        if (intent == null || !intent.hasExtra(EXTRA_HOTEL)) return null;
+        String hotel = normalizeHotelKeyStatic(intent.getStringExtra(EXTRA_HOTEL));
+        if (hotel.isEmpty()) return null;
+        String nick = intent.getStringExtra(EXTRA_NICK);
+        String id = intent.getStringExtra(EXTRA_ID);
+        if ((nick == null || nick.trim().isEmpty()) && (id == null || id.trim().isEmpty())) return null;
+        return new ProfileHistoryItem(nick == null ? "" : nick.trim(),
+                intent.getStringExtra(EXTRA_FIGURE), hotel, id == null ? "" : id.trim());
+    }
+
+    static void showFavoriteOnlineSystemNotificationStatic(Context context, FavoriteStatus st) {
         try {
             NotificationManager nm = (NotificationManager)context.getSystemService(Context.NOTIFICATION_SERVICE);
             if (nm == null || st == null) return;
@@ -159,9 +135,10 @@ final class FavoriteNotifications {
                 NotificationChannel ch = new NotificationChannel(channelId, localizedStringStatic(context, st.hotelKey, R.string.favorites), NotificationManager.IMPORTANCE_HIGH);
                 nm.createNotificationChannel(ch);
             }
-            Intent open = new Intent(context, MainActivity.class);
-            open.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-            PendingIntent pi = PendingIntent.getActivity(context, 1207, open, Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0);
+            Intent open = profileIntent(context, st);
+            PendingIntent pi = PendingIntent.getActivity(context,
+                    profileIdentityKeyStatic(st.hotelKey, st.uniqueId, st.nick).hashCode(), open,
+                    PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
             String msg = localizedStringStatic(context, st.hotelKey, R.string.favorite_online_banner, st.nick == null ? "" : st.nick);
             Bitmap largeIcon = loadNotificationHeadBitmapStatic(context, st);
             Notification.Builder b = Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(context, channelId) : new Notification.Builder(context);

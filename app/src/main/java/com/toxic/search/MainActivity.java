@@ -6,6 +6,7 @@ import android.os.*;
 import android.graphics.*;
 import android.graphics.drawable.*;
 import android.content.*;
+import android.content.ClipboardManager;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.content.res.Configuration;
@@ -211,9 +212,11 @@ public class MainActivity extends Activity {
     private EditText searchInput;
     private Button searchBtn;
     private Dialog profileSearchDialog;
+    private final Set<Dialog> appDialogs = Collections.newSetFromMap(new WeakHashMap<Dialog, Boolean>());
+    private ProfileHistoryItem pendingNotificationProfile;
     private TextView profileSearchAvailability;
     private String accentKey = "violet";
-    private String shapeKey = "soft";
+    private String shapeKey = "square";
     private boolean compactUi = false;
     private int settingsScrollY = 0;
     private boolean tutorialScheduled = false;
@@ -247,6 +250,13 @@ public class MainActivity extends Activity {
     private volatile boolean profileSectionsInProgress = false;
     private volatile int inlineProgressPct = 0;
     private volatile String inlineProgressMessage = "";
+    private int profileSectionTaskCount;
+    private final LinkedHashMap<Integer, Integer> profilePendingSectionLabels = new LinkedHashMap<>();
+    private volatile boolean profileProgressFinishing;
+    private float displayedProfileProgressPct;
+    private ValueAnimator profileProgressAnimator;
+    private final WeakHashMap<View, Boolean> profileProgressFills = new WeakHashMap<>();
+    private final WeakHashMap<TextView, Boolean> profileProgressLabels = new WeakHashMap<>();
     // Em aparelhos mais fracos, várias respostas progressivas podem chegar quase
     // juntas. Coalescemos redesenhos completos para não destruir/recriar toda a UI
     // várias vezes no mesmo intervalo curto.
@@ -570,7 +580,83 @@ public class MainActivity extends Activity {
         requestFavoriteNotificationPermissionIfNeeded();
         startFavoriteOnlineWatcher();
         updateFavoriteOnlineAlarm();
-        if (pendingProfileRestore != null) uiHandler.post(this::restoreProfileScreen);
+        if (!handleFavoriteProfileIntent(getIntent()) && pendingProfileRestore != null) uiHandler.post(this::restoreProfileScreen);
+    }
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        handleFavoriteProfileIntent(intent);
+    }
+
+    private boolean handleFavoriteProfileIntent(Intent intent) {
+        ProfileHistoryItem profile = FavoriteNotifications.profileFromIntent(intent);
+        if (profile == null) return false;
+        pendingProfileRestore = null;
+        pendingNotificationProfile = profile;
+        intent.removeExtra(FavoriteNotifications.EXTRA_NICK);
+        intent.removeExtra(FavoriteNotifications.EXTRA_ID);
+        intent.removeExtra(FavoriteNotifications.EXTRA_HOTEL);
+        intent.removeExtra(FavoriteNotifications.EXTRA_FIGURE);
+        uiHandler.post(this::openPendingNotificationProfile);
+        return true;
+    }
+
+    private void openPendingNotificationProfile() {
+        if (pendingNotificationProfile == null || activityDestroyed || isProfileLoading()
+                || accessGateReason != AccessGateReason.NONE) return;
+        ProfileHistoryItem profile = pendingNotificationProfile;
+        pendingNotificationProfile = null;
+        dismissAppDialogs();
+        openProfileReferenceOnMainScreen(profile.nick, profile.uniqueId, profile.figure, profile.hotelKey);
+    }
+
+    private void showTrackedDialog(Dialog dialog) {
+        appDialogs.add(dialog);
+        dialog.show();
+    }
+
+    private void dismissAppDialogs() {
+        for (Dialog dialog : new ArrayList<>(appDialogs)) {
+            if (dialog != null && dialog != accessGateDialog && dialog.isShowing()) {
+                try { dialog.dismiss(); } catch (Exception ignored) {}
+            }
+        }
+    }
+
+    private void showHomeScreen() {
+        pendingNotificationProfile = null;
+        pendingProfileRestore = null;
+        dismissAppDialogs();
+        dismissProfileSearchDialog();
+        beginProfileRequest();
+        searchInProgress = false;
+        profileSectionsInProgress = false;
+        activeSearchNick = "";
+        currentLoadedNick = "";
+        inlineProgressPct = 0;
+        inlineProgressMessage = "";
+        activeRenderedProfile = null;
+        activeProfileSource = null;
+        profileHistory.clear();
+        currentProfilePrivate = false;
+        currentAvatarImage = null;
+        currentAvatarProfileKey = "";
+        currentProfileFigure = "";
+        lastRememberedOpenedProfileKey = "";
+        photosScrollX = 0;
+        stylesScrollX = 0;
+        setSearchTextProgrammatically("");
+        hidePullRefreshIndicator();
+        buildUi();
+        if (mainScroll != null) mainScroll.scrollTo(0, 0);
+    }
+
+    private void copyMissionText(String mission) {
+        if (mission == null || mission.isEmpty()) return;
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        if (clipboard == null) return;
+        clipboard.setPrimaryClip(ClipData.newPlainText("Toxic", mission));
+        if (Build.VERSION.SDK_INT < 33) toast(t(R.string.text_copied));
     }
     private void requestFavoriteNotificationPermissionIfNeeded() {
         try {
@@ -588,13 +674,13 @@ public class MainActivity extends Activity {
     private void applySystemBarsForTheme(Window window) {
         if (window == null) return;
 
-        WindowCompat.enableEdgeToEdge(window);
+        if (Build.VERSION.SDK_INT < 35) WindowCompat.setDecorFitsSystemWindows(window, false);
         WindowInsetsControllerCompat controller = WindowCompat.getInsetsController(
                 window,
                 window.getDecorView()
         );
-        controller.setAppearanceLightStatusBars(lightTheme);
-        controller.setAppearanceLightNavigationBars(lightTheme);
+        controller.setAppearanceLightStatusBars(Build.VERSION.SDK_INT >= 35 && lightTheme);
+        controller.setAppearanceLightNavigationBars(Build.VERSION.SDK_INT >= 35 && lightTheme);
     }
 
     private void applySafeAreaInsets(Window window, View content) {
@@ -1389,6 +1475,7 @@ public class MainActivity extends Activity {
         translationContext = null;
         translationContextHotel = "";
         applySystemBarsForTheme();
+        if (activePhotoViewer != null) activePhotoViewer.updateSize();
         if (screen != null) {
             screen.requestLayout();
             screen.post(() -> {
@@ -1403,6 +1490,8 @@ public class MainActivity extends Activity {
 
     @Override protected void onDestroy() {
         activityDestroyed = true;
+        if (profileProgressAnimator != null) profileProgressAnimator.cancel();
+        if (activePhotoViewer != null) activePhotoViewer.dialog.dismiss();
 
         cancelTutorialPulseAnimation();
         stopAccessGateMonitoring();
@@ -1700,7 +1789,7 @@ public class MainActivity extends Activity {
         applySafeAreaInsets(dialog.getWindow(), full);
         accessGateDialog = dialog;
         try {
-            dialog.show();
+            showTrackedDialog(dialog);
             Window window = dialog.getWindow();
             if (window != null) {
                 window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
@@ -1724,6 +1813,7 @@ public class MainActivity extends Activity {
             try { accessGateDialog.dismiss(); } catch (Exception ignored) {}
             accessGateDialog = null;
         }
+        uiHandler.post(this::openPendingNotificationProfile);
     }
 
     private void buildUi() {
@@ -1771,6 +1861,7 @@ public class MainActivity extends Activity {
         ImageView logo = appLogo();
         logo.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_YES);
         logo.setContentDescription(t(R.string.app_name));
+        logo.setOnClickListener(v -> showHomeScreen());
         brand.addView(logo, new LinearLayout.LayoutParams(dp(72), dp(35)));
         LinearLayout hotel = new LinearLayout(this);
         hotel.setGravity(Gravity.CENTER_VERTICAL);
@@ -1912,7 +2003,7 @@ public class MainActivity extends Activity {
             accentKey = "violet";
             prefs.edit().putString("appearance_accent", accentKey).apply();
         }
-        shapeKey = prefs.getString("appearance_shape", "soft");
+        shapeKey = prefs.getString("appearance_shape", "square");
         compactUi = prefs.getBoolean("appearance_compact", false);
         lightTheme = "light".equals(prefs.getString("theme", "dark"));
         purple = accentForKey(accentKey);
@@ -1959,7 +2050,7 @@ public class MainActivity extends Activity {
     }
     private void showFullScreenDialog(Dialog dialog, FrameLayout content) {
         dialog.setContentView(content);
-        if (!dialog.isShowing()) dialog.show();
+        if (!dialog.isShowing()) showTrackedDialog(dialog);
         Window window = dialog.getWindow();
         if (window != null) {
             window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
@@ -2475,7 +2566,7 @@ public class MainActivity extends Activity {
     }
 
     private void showCompactDialog(Dialog dialog, int maxWidth) {
-        dialog.show();
+        showTrackedDialog(dialog);
         Window window = dialog.getWindow();
         if (window == null) return;
         window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
@@ -3855,13 +3946,30 @@ public class MainActivity extends Activity {
     }
 
     private int beginProfileRequest() {
+        final int requestToken = ++activeSearchToken;
+        if (activePhotoViewer != null) activePhotoViewer.dialog.dismiss();
+        if (profileProgressAnimator != null) profileProgressAnimator.cancel();
+        profileProgressAnimator = null;
+        displayedProfileProgressPct = 0;
+        synchronized (profileProgressLock) {
+            profileProgressFinishing = false;
+            profileSectionTaskCount = 0;
+            profilePendingSectionLabels.clear();
+        }
+        profileProgressFills.clear();
+        profileProgressLabels.clear();
         if (!restoringProfile) pendingProfileRestore = null;
+        if (!restoringProfile && mainScroll != null) {
+            final ScrollView scroll = mainScroll;
+            scroll.scrollTo(0, 0);
+            scroll.post(() -> { if (scroll == mainScroll) scroll.scrollTo(0, 0); });
+        }
         profileSectionsView = null;
         renderedSectionsKey = "";
         profileSectionsExecutor.cancelPending();
         profileRequestsExecutor.cancelPending();
-        friendPresence.beginPage("navigation:" + (activeSearchToken + 1));
-        return ++activeSearchToken;
+        friendPresence.beginPage("navigation:" + requestToken);
+        return requestToken;
     }
 
     private boolean isActiveToken(int token) {
@@ -3910,7 +4018,7 @@ public class MainActivity extends Activity {
             if (inlineProgressMessage == null || inlineProgressMessage.trim().isEmpty()) {
                 inlineProgressMessage = t(R.string.loading_history);
             }
-        } else {
+        } else if (!profileProgressFinishing) {
             inlineProgressPct = 0;
             inlineProgressMessage = "";
         }
@@ -3932,6 +4040,8 @@ public class MainActivity extends Activity {
         currentLoadedNick = normalizeNickKey(loadedReference);
         hidePullRefreshIndicator();
         maybeShowProfileFeaturesTutorial();
+        if (profileProgressFinishing && displayedProfileProgressPct >= 99.9f) finishProfileProgressAnimation(token);
+        uiHandler.post(this::openPendingNotificationProfile);
     }
 
     private boolean claimProfileSearchSlot() {
@@ -4318,10 +4428,10 @@ public class MainActivity extends Activity {
         synchronized (profileProgressLock) {
             if (!isActiveToken(token)) return;
             profileSectionsInProgress = true;
-            inlineProgressPct = 8;
+            inlineProgressPct = Math.max(20, inlineProgressPct);
             inlineProgressMessage = t(R.string.loading_details);
         }
-        updateLoadingSkeletonProgress(token, 8);
+        updateLoadingSkeletonProgress(token, inlineProgressPct);
         uiHandler.post(this::updateFloatingProfileProgressIndicators);
 
         // O perfil principal já foi liberado. Daqui em diante cada seção é
@@ -4331,6 +4441,16 @@ public class MainActivity extends Activity {
         // paginados antes do perfil oficial responder para evitar materializar
         // milhares de itens na interface.
         final int taskCount = restrictedProfile ? 7 : 9;
+        synchronized (profileProgressLock) {
+            profileSectionTaskCount = taskCount;
+            int[] messages = {R.string.loading_history, R.string.loading_history,
+                    R.string.loading_styles_friends, R.string.loading_styles_friends,
+                    R.string.loading_history, R.string.loading_details,
+                    restrictedProfile ? R.string.loading_rooms_groups : R.string.loading_details,
+                    R.string.loading_rooms_groups, R.string.loading_details};
+            profilePendingSectionLabels.clear();
+            for (int i = 0; i < taskCount; i++) profilePendingSectionLabels.put(i, messages[i]);
+        }
         final AtomicInteger pendingGroups = new AtomicInteger(taskCount);
         synchronized (r) {
             r.badgesPagedMode = true;
@@ -4360,11 +4480,11 @@ public class MainActivity extends Activity {
                         reconcileProfileSources(r);
                         enrichPhotoRoomInfo(r);
                     }
-                    setProfileSectionsProgress(token, 28, t(R.string.loading_history));
+
                     publishProgressiveProfile(r, token, firstRenderReleaseAt);
                 }
             } finally {
-                finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups);
+                finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups, 0);
             }
         });
 
@@ -4383,10 +4503,10 @@ public class MainActivity extends Activity {
                     reconcileProfileSources(r);
                     enrichPhotoRoomInfo(r);
                 }
-                setProfileSectionsProgress(token, 36, t(R.string.loading_history));
+
                 publishProgressiveProfile(r, token, firstRenderReleaseAt);
             } finally {
-                finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups);
+                finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups, 1);
             }
         });
 
@@ -4429,10 +4549,10 @@ public class MainActivity extends Activity {
                     reconcileProfileSources(r);
                     enrichPhotoRoomInfo(r);
                 }
-                setProfileSectionsProgress(token, 48, t(R.string.loading_styles_friends));
+
                 publishProgressiveProfile(r, token, firstRenderReleaseAt);
             } finally {
-                finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups);
+                finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups, 2);
             }
         });
 
@@ -4491,11 +4611,11 @@ public class MainActivity extends Activity {
                             r.friendsTabPage = 1;
                         }
                     }
-                    setProfileSectionsProgress(token, 76, t(R.string.loading_history));
+
                     publishProgressiveProfile(r, token, firstRenderReleaseAt);
                 }
             } finally {
-                finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups);
+                finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups, 3);
             }
         });
 
@@ -4524,11 +4644,11 @@ public class MainActivity extends Activity {
                         reconcileProfileSources(r);
                         enrichPhotoRoomInfo(r);
                     }
-                    setProfileSectionsProgress(token, 84, t(R.string.loading_history));
+
                     publishProgressiveProfile(r, token, firstRenderReleaseAt);
                 }
             } finally {
-                finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups);
+                finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups, 4);
             }
         });
 
@@ -4546,11 +4666,11 @@ public class MainActivity extends Activity {
                         reconcileProfileSources(r);
                         enrichSelectedBadgesWithOwnership(r);
                     }
-                    setProfileSectionsProgress(token, 88, t(R.string.loading_history));
+
                     publishProgressiveProfile(r, token, firstRenderReleaseAt);
                 }
             } finally {
-                finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups);
+                finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups, 5);
             }
         });
 
@@ -4570,10 +4690,10 @@ public class MainActivity extends Activity {
                         enrichSelectedBadgesWithOwnership(r);
                         enrichPhotoRoomInfo(r);
                     }
-                    setProfileSectionsProgress(token, 58, t(R.string.loading_history));
+
                     publishProgressiveProfile(r, token, firstRenderReleaseAt);
                 } finally {
-                    finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups);
+                    finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups, 6);
                 }
             });
 
@@ -4596,11 +4716,11 @@ public class MainActivity extends Activity {
                             putComplementSectionLocked(r, "groups", dexGroups.items);
                             reconcileProfileSources(r);
                         }
-                        setProfileSectionsProgress(token, 92, t(R.string.loading_details));
+
                         publishProgressiveProfile(r, token, firstRenderReleaseAt);
                     }
                 } finally {
-                    finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups);
+                    finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups, 7);
                 }
             });
 
@@ -4627,10 +4747,10 @@ public class MainActivity extends Activity {
                         reconcileProfileSources(r);
                         enrichPhotoRoomInfo(r);
                     }
-                    setProfileSectionsProgress(token, 68, t(R.string.loading_styles_friends));
+
                     publishProgressiveProfile(r, token, firstRenderReleaseAt);
                 } finally {
-                    finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups);
+                    finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups, 8);
                 }
             });
         } else {
@@ -4660,10 +4780,10 @@ public class MainActivity extends Activity {
                         reconcileProfileSources(r);
                         enrichPhotoRoomInfo(r);
                     }
-                    setProfileSectionsProgress(token, 94, t(R.string.loading_details));
+
                     publishProgressiveProfile(r, token, firstRenderReleaseAt);
                 } finally {
-                    finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups);
+                    finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups, 6);
                 }
             });
         }
@@ -4686,58 +4806,39 @@ public class MainActivity extends Activity {
         return Boolean.TRUE.equals(complementVisibility);
     }
 
-    private void setProfileSectionsProgress(int token, int pct, String message) {
-        int updated;
+    private void finishProfileSectionsGroup(
+            ProfileResult source, int token, long firstRenderReleaseAt, AtomicInteger pendingGroups, int completedJob
+    ) {
+        if (pendingGroups == null || !isActiveToken(token)) return;
+        int remaining = pendingGroups.decrementAndGet();
         synchronized (profileProgressLock) {
             if (!isActiveToken(token) || !profileSectionsInProgress) return;
-            int bounded = Math.max(0, Math.min(99, pct));
-            if (bounded < inlineProgressPct) return;
-            inlineProgressPct = bounded;
-            inlineProgressMessage = message == null ? "" : message;
-            updated = inlineProgressPct;
-        }
-        updateLoadingSkeletonProgress(token, updated);
-        uiHandler.post(this::updateFloatingProfileProgressIndicators);
-    }
-
-    private void finishProfileSectionsGroup(
-            ProfileResult source,
-            int token,
-            long firstRenderReleaseAt,
-            AtomicInteger pendingGroups
-    ) {
-        if (pendingGroups == null || pendingGroups.decrementAndGet() > 0
-                || !isActiveToken(token)) return;
-
-        synchronized (profileProgressLock) {
-            if (!isActiveToken(token)) return;
-            if (searchInProgress) {
-                // As fontes terminaram antes do primeiro desenho. O perfil inicial
-                // já receberá o estado final, sem um render intermediário a 100%.
+            int total = Math.max(1, profileSectionTaskCount);
+            int completed = Math.max(0, Math.min(total, total - remaining));
+            inlineProgressPct = Math.max(inlineProgressPct, 20 + Math.round(80f * completed / total));
+            profilePendingSectionLabels.remove(completedJob);
+            int loadingMessage = profilePendingSectionLabels.isEmpty() ? R.string.loading_details
+                    : profilePendingSectionLabels.values().iterator().next();
+            inlineProgressMessage = remaining > 0
+                    ? t(loadingMessage) + " · " + completed + "/" + total
+                    : t(R.string.load_complete);
+            if (remaining <= 0) {
                 profileSectionsInProgress = false;
-                inlineProgressPct = 0;
-                inlineProgressMessage = "";
-                updateLoadingSkeletonProgress(token, 100);
-                uiHandler.post(this::updateFloatingProfileProgressIndicators);
-                return;
+                profileProgressFinishing = true;
             }
-            // Não redesenha o perfil inteiro duas vezes para exibir 100% e logo
-            // depois ocultar o indicador. Fecha o progresso e publica uma única vez.
-            profileSectionsInProgress = false;
-            inlineProgressPct = 0;
-            inlineProgressMessage = "";
         }
-        uiHandler.post(this::updateFloatingProfileProgressIndicators);
-        publishProgressiveProfile(source, token, firstRenderReleaseAt);
-        runOnUiThread(() -> uiHandler.postDelayed(() -> {
-            if (isActiveToken(token) && !searchInProgress && !profileSectionsInProgress) {
-                maybeShowProfileFeaturesTutorial();
-                ProfileResult current = activeRenderedProfile;
-                if (current != null && isCurrentProfileResult(current, token)) {
-                    startSelectedBadgeDateLookup(current, token);
+        updateLoadingSkeletonProgress(token, inlineProgressPct);
+        if (!searchInProgress) publishProgressiveProfile(source, token, firstRenderReleaseAt);
+        if (remaining <= 0) {
+            uiHandler.post(this::openPendingNotificationProfile);
+            runOnUiThread(() -> uiHandler.postDelayed(() -> {
+                if (isActiveToken(token) && !searchInProgress && !profileSectionsInProgress) {
+                    maybeShowProfileFeaturesTutorial();
+                    ProfileResult current = activeRenderedProfile;
+                    if (current != null && isCurrentProfileResult(current, token)) startSelectedBadgeDateLookup(current, token);
                 }
-            }
-        }, 650L));
+            }, 650L));
+        }
     }
 
     private <T> T awaitFutureValue(Future<T> future) {
@@ -5671,13 +5772,14 @@ public class MainActivity extends Activity {
             boolean official
     ) {
         if (r == null) return;
+        int visibleCount = r.photos == null ? PAGE_CHUNK : Math.max(PAGE_CHUNK, r.photos.size());
         r.allPhotosSource = source == null ? new ArrayList<>() : new ArrayList<>(source);
         r.photosFromOfficial = official;
-        int end = Math.min(PAGE_CHUNK, r.allPhotosSource.size());
+        int end = Math.min(visibleCount, r.allPhotosSource.size());
         r.photos = new ArrayList<>(r.allPhotosSource.subList(0, end));
         r.photosTotal = r.allPhotosSource.size();
         r.photosHasMore = end < r.photosTotal;
-        r.photosNextPage = r.photosHasMore ? 2 : 0;
+        r.photosNextPage = r.photosHasMore ? end / PAGE_CHUNK + 1 : 0;
     }
 
     private void applyLocalStylesSource(ProfileResult r, ArrayList<JSONObject> source) {
@@ -6567,6 +6669,7 @@ public class MainActivity extends Activity {
                 rendered.photos.size(),
                 rendered.photosTotal
         );
+        if (activePhotoViewer != null) activePhotoViewer.onPhotosChanged();
     }
 
     private void refreshStylesCarouselIncrementally(ProfileResult state, int token) {
@@ -6594,7 +6697,7 @@ public class MainActivity extends Activity {
                 || state.uniqueId == null || state.uniqueId.isEmpty()) return;
         if (SystemClock.elapsedRealtime() < state.photosAutoLoadRetryAfterMs) return;
         if (state.allPhotosSource != null && !state.allPhotosSource.isEmpty()) {
-            photosScrollX = photosHsv == null ? 0 : photosHsv.getScrollX();
+            photosScrollX = photosHsv == null ? photosScrollX : photosHsv.getScrollX();
             synchronized (state) {
                 state.photosAutoLoadRetryAfterMs = 0L;
                 int end = Math.min(
@@ -6615,7 +6718,7 @@ public class MainActivity extends Activity {
         }
         final int page = state.photosNextPage <= 0 ? 2 : state.photosNextPage;
         state.photosLoading = true;
-        photosScrollX = photosHsv == null ? 0 : photosHsv.getScrollX();
+        photosScrollX = photosHsv == null ? photosScrollX : photosHsv.getScrollX();
         syncPhotosPaginationToRendered(state);
         setHorizontalCarouselLoading(TAG_PHOTOS_CAROUSEL_ROW, true, 165);
         profileRequestsExecutor.execute(() -> {
@@ -6848,6 +6951,11 @@ public class MainActivity extends Activity {
             if (!ProfileStateMerger.update(activeRenderedProfile, incoming)) return;
         } else activeRenderedProfile = incoming;
         final ProfileResult r = activeRenderedProfile;
+        ProfileResult photosState = livePaginationProfile(r);
+        if (photosState != r && isCurrentProfileResult(photosState, boundProfileToken(photosState))) {
+            // A queued snapshot can predate photo pages loaded while the profile was updating.
+            syncPhotosPaginationToRendered(photosState);
+        }
         if (pendingProfileRestore != null && pendingProfileRestore.matches(r)) {
             pendingProfileRestore.apply(r);
             photosScrollX = pendingProfileRestore.photosX;
@@ -6869,9 +6977,9 @@ public class MainActivity extends Activity {
         final boolean unavailable = !profileSectionsInProgress && isHabbodexTemporarilyUnavailable();
         final boolean restricted = r.privateProfile || r.banned;
         final String theme = ":" + lightTheme + ":" + currentProfilePrivate + ":" + appearanceSignature();
-        renderProfileSection("progress", profileSectionsInProgress + ":" + inlineProgressPct + ":" + inlineProgressMessage, () -> {
+        renderProfileSection("progress", profileSectionsInProgress + ":" + profileProgressFinishing + ":" + inlineProgressPct + ":" + inlineProgressMessage, () -> {
             profilePrimaryProgressAnchor = null;
-            if (profileSectionsInProgress && inlineProgressMessage != null && !inlineProgressMessage.isEmpty()) {
+            if ((profileSectionsInProgress || profileProgressFinishing) && inlineProgressMessage != null && !inlineProgressMessage.isEmpty()) {
                 LinearLayout progressCard = loadingProgressCard(inlineProgressMessage, inlineProgressPct);
                 profilePrimaryProgressAnchor = progressCard;
                 resultWrap.addView(progressCard, lp(-1, -2, 0, 0, 0, 12));
@@ -6917,6 +7025,7 @@ public class MainActivity extends Activity {
         friendPresence.requestSoon();
         if (anchor != null && mainScroll != null) anchor.restore(mainScroll);
         applyRestoredProfilePosition(r);
+        if (activePhotoViewer != null) activePhotoViewer.onPhotosChanged();
     }
 
     private void renderProfileSection(String key, String signature, Runnable build) {
@@ -6983,6 +7092,7 @@ public class MainActivity extends Activity {
         profile.addView(name, lp(-1, -2, 0, 0, 0, 10));
         if (!r.motto.isEmpty()) {
             TextView motto = habboText(r.motto, 14, false);
+            motto.setOnClickListener(v -> copyMissionText(r.motto));
             motto.setGravity(Gravity.CENTER);
             motto.setTextColor(lightTheme ? Color.rgb(70,70,70) : Color.argb(220,255,255,255));
             motto.setLineSpacing(dp(2), 1f);
@@ -7280,7 +7390,7 @@ public class MainActivity extends Activity {
                 View dot = new View(this);
                 boolean active = i == index[0];
                 dot.setBackground(round(
-                        active ? purple : Color.argb(lightTheme ? 75 : 105, 139, 52, 217),
+                        active ? purple : mixColor(purple, Color.BLACK, .32f),
                         dp(999),
                         Color.TRANSPARENT,
                         0
@@ -7314,6 +7424,7 @@ public class MainActivity extends Activity {
             animationDirection[0] = 0;
         };
 
+        slideHost.setOnClickListener(view -> copyMissionText(firstText(valid.get(index[0]), "text", "motto", "mission")));
         slideHost.setOnTouchListener((view, event) -> {
             switch (event.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN:
@@ -7347,6 +7458,9 @@ public class MainActivity extends Activity {
                             index[0]--;
                             render[0].run();
                         }
+                    } else if (event.getActionMasked() == MotionEvent.ACTION_UP
+                            && Math.abs(totalDx) < dp(10) && Math.abs(totalDy) < dp(10)) {
+                        view.performClick();
                     }
                     horizontalGesture[0] = false;
                     return true;
@@ -7601,7 +7715,7 @@ public class MainActivity extends Activity {
         rootDialog.addView(close, lp(-1, dp(48), 0, 0, 0, 0));
         close.setOnClickListener(v -> dialog.dismiss());
 
-        dialog.show();
+        showTrackedDialog(dialog);
         Window w = dialog.getWindow();
         if (w != null) {
             w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
@@ -8380,96 +8494,313 @@ public class MainActivity extends Activity {
         return getPhotoLikerNames(photo).size();
     }
 
+    private PhotoViewerSession activePhotoViewer;
+
     private void showPhotoDialog(JSONObject photo) {
-        String url = getPhotoUrl(photo);
-        if (url.isEmpty()) return;
+        if (photo == null || getPhotoUrl(photo).isEmpty()) return;
+        if (activePhotoViewer != null) activePhotoViewer.dialog.dismiss();
+        PhotoViewerSession viewer = new PhotoViewerSession(photo);
+        activePhotoViewer = viewer;
+        viewer.show();
+    }
 
-        final Dialog dialog = new Dialog(this);
-        LinearLayout wrap = new LinearLayout(this);
-        wrap.setOrientation(LinearLayout.VERTICAL);
-        wrap.setPadding(dp(14), dp(14), dp(14), dp(14));
-        wrap.setBackground(round(dialogFillColor(), dp(22), dialogStrokeColor(), 1));
-        dialog.setContentView(wrap);
-        applySafeAreaInsets(dialog.getWindow(), wrap);
+    private final class PhotoViewerSession implements PhotoSwipeLayout.Listener {
+        final Dialog dialog = new Dialog(MainActivity.this);
+        final int token = activeSearchToken;
+        final ProfileResult owner;
+        final JSONObject standalone;
+        final PhotoSwipeLayout imagePane = new PhotoSwipeLayout(MainActivity.this);
+        final LinearLayout metadata = new LinearLayout(MainActivity.this);
+        final TextView counter = text("", 13, themeMutedColor(), false);
+        final ProgressBar pageSpinner = new ProgressBar(MainActivity.this);
+        final ArrayList<com.bumptech.glide.request.target.Target<?>> preloads = new ArrayList<>();
+        ImageView image;
+        JSONObject shownPhoto;
+        String preloadedNeighborsKey = "";
+        int index, lastPrefetchedCount = -1;
+        boolean moving, awaitingNext, closed;
+        int imageWidth = Math.max(dp(120), getResources().getDisplayMetrics().widthPixels - dp(contentPadding() * 2));
+        int imageHeight = Math.max(dp(120), Math.min(dp(360), Math.round(getResources().getDisplayMetrics().heightPixels * .40f)));
 
-        Window w = dialog.getWindow();
-        if (w != null) {
-            w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-            w.setLayout(-1, -2);
+        PhotoViewerSession(JSONObject initial) {
+            int found = findPhotoIndex(activeRenderedProfile, initial);
+            owner = found >= 0 ? activeRenderedProfile : null;
+            standalone = owner == null ? initial : null;
+            index = Math.max(0, found);
+            imagePane.setListener(this);
         }
 
-        ImageView img = new ImageView(this);
-        img.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        applyRoundedClip(img, dp(16));
-        wrap.addView(img, lp(-1, dp(260), 0,0,0,12));
-        loadImage(img, url);
+        int findPhotoIndex(ProfileResult profile, JSONObject target) {
+            if (profile == null || profile.photos == null) return -1;
+            String url = getPhotoUrl(target);
+            for (int i = 0; i < profile.photos.size(); i++) {
+                JSONObject item = profile.photos.get(i);
+                if (item == target || (!url.isEmpty() && url.equals(getPhotoUrl(item)))) return i;
+            }
+            return -1;
+        }
 
-        ArrayList<String> likers = getPhotoLikerNames(photo);
+        ProfileResult profile() {
+            return owner != null && isCurrentProfileResult(owner, token) ? activeRenderedProfile : null;
+        }
 
-        LinearLayout infoGrid = new LinearLayout(this);
-        infoGrid.setOrientation(LinearLayout.VERTICAL);
-        wrap.addView(infoGrid, lp(-1, -2, 0, 0, 0, 12));
+        ArrayList<JSONObject> photos() {
+            ProfileResult current = profile();
+            if (current != null) return current.photos;
+            ArrayList<JSONObject> single = new ArrayList<>();
+            if (standalone != null) single.add(standalone);
+            return single;
+        }
 
-        populatePhotoInfoGrid(infoGrid, photo, dialog);
-
-        if (!likers.isEmpty()) {
-            TextView likesTitle = habboText(t(R.string.liked_by), 17, true);
-            likesTitle.setTextColor(lightTheme ? Color.rgb(33,33,33) : Color.WHITE);
-            wrap.addView(likesTitle, lp(-1, -2, 0, 0, 0, 8));
-
-            ScrollView likesScroll = new ScrollView(this);
-            likesScroll.setVerticalScrollBarEnabled(true);
-            likesScroll.setScrollbarFadingEnabled(false);
-            tintScrollBar(likesScroll);
-            likesScroll.setOnTouchListener((view, event) -> {
-                view.getParent().requestDisallowInterceptTouchEvent(true);
-                return false;
+        void show() {
+            dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+            FrameLayout full = new FrameLayout(MainActivity.this);
+            full.setBackground(makeBg());
+            LinearLayout body = new LinearLayout(MainActivity.this);
+            body.setOrientation(LinearLayout.VERTICAL);
+            body.setPadding(dp(contentPadding()), dp(12), dp(contentPadding()), dp(12));
+            full.addView(body, new FrameLayout.LayoutParams(-1, -1));
+            LinearLayout header = new LinearLayout(MainActivity.this);
+            header.setGravity(Gravity.CENTER_VERTICAL);
+            header.addView(uiIconButton("back", t(R.string.back), dialog::dismiss), new LinearLayout.LayoutParams(dp(48), dp(48)));
+            TextView title = text(t(R.string.photos), 22, primaryTextColor(), true);
+            LinearLayout.LayoutParams titleParams = new LinearLayout.LayoutParams(0, -2, 1);
+            titleParams.leftMargin = dp(12);
+            header.addView(title, titleParams);
+            header.addView(counter, lp(-2, -2, 12, 0, 4, 0));
+            body.addView(header, lp(-1, dp(52), 0, 0, 0, 16));
+            imagePane.setBackground(round(subtleSurfaceColor(), dp(20), dialogStrokeColor(), 1));
+            applyRoundedClip(imagePane, appearanceRadius(dp(20)));
+            body.addView(imagePane, lp(-1, imageHeight, 0, 0, 0, 16));
+            image = newImage();
+            imagePane.addView(image, new FrameLayout.LayoutParams(-1, -1));
+            imagePane.setContent(image);
+            pageSpinner.setIndeterminateTintList(ColorStateList.valueOf(purple));
+            pageSpinner.setBackground(round(dialogFillColor(), dp(999), dialogStrokeColor(), 1));
+            pageSpinner.setPadding(dp(8), dp(8), dp(8), dp(8));
+            pageSpinner.setVisibility(View.GONE);
+            FrameLayout.LayoutParams spinnerParams = new FrameLayout.LayoutParams(dp(44), dp(44), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+            spinnerParams.bottomMargin = dp(12);
+            imagePane.addView(pageSpinner, spinnerParams);
+            ScrollView infoScroll = new ScrollView(MainActivity.this);
+            infoScroll.setFillViewport(false);
+            tintScrollBar(infoScroll);
+            metadata.setOrientation(LinearLayout.VERTICAL);
+            infoScroll.addView(metadata, new ScrollView.LayoutParams(-1, -2));
+            body.addView(infoScroll, new LinearLayout.LayoutParams(-1, 0, 1));
+            dialog.setOnDismissListener(ignored -> {
+                closed = true;
+                awaitingNext = false;
+                for (int i = 0; i < imagePane.getChildCount(); i++) {
+                    View child = imagePane.getChildAt(i);
+                    child.animate().cancel();
+                    if (child instanceof ImageView) clearImage((ImageView) child);
+                }
+                clearPreloads();
+                if (activePhotoViewer == this) activePhotoViewer = null;
             });
+            showFullScreenDialog(dialog, full);
+            showCurrentPhoto(false);
+        }
 
-            LinearLayout likesList = new LinearLayout(this);
-            likesList.setOrientation(LinearLayout.VERTICAL);
-            likesScroll.addView(likesList, new ScrollView.LayoutParams(-1, -2));
-            wrap.addView(likesScroll, lp(-1, dp(Math.min(230, Math.max(82, 54 * Math.min(likers.size(), 4)))), 0, 0, 0, 12));
+        ImageView newImage() {
+            ImageView next = new ImageView(MainActivity.this);
+            next.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            return next;
+        }
 
-            for (String liker : likers) {
-                likesList.addView(likerRow(liker, dialog));
+        void loadPhotoImage(ImageView target, JSONObject photo) {
+            Glide.with(MainActivity.this).load(getPhotoUrl(photo)).override(imageWidth, imageHeight)
+                    .fitCenter().into(target);
+        }
+
+        void updateSize() {
+            imageWidth = Math.max(dp(120), getResources().getDisplayMetrics().widthPixels - dp(contentPadding() * 2));
+            imageHeight = Math.max(dp(120), Math.min(dp(360), Math.round(getResources().getDisplayMetrics().heightPixels * .40f)));
+            ViewGroup.LayoutParams params = imagePane.getLayoutParams();
+            if (params != null) { params.height = imageHeight; imagePane.setLayoutParams(params); }
+            if (image != null && shownPhoto != null) loadPhotoImage(image, shownPhoto);
+            preloadNeighbors();
+        }
+
+        void showCurrentPhoto(boolean animateInfo) {
+            ArrayList<JSONObject> items = photos();
+            if (closed || index < 0 || index >= items.size()) return;
+            shownPhoto = items.get(index);
+            loadPhotoImage(image, shownPhoto);
+            bindInformation(shownPhoto, animateInfo);
+            updateCounter();
+            preloadNeighbors();
+            prefetchPage();
+        }
+
+        void bindInformation(JSONObject photo, boolean animate) {
+            metadata.animate().cancel();
+            metadata.removeAllViews();
+            LinearLayout grid = new LinearLayout(MainActivity.this);
+            grid.setOrientation(LinearLayout.VERTICAL);
+            metadata.addView(grid, lp(-1, -2, 0, 0, 0, 8));
+            populatePhotoInfoGrid(grid, photo, dialog);
+            ArrayList<String> likers = getPhotoLikerNames(photo);
+            if (!likers.isEmpty()) {
+                TextView title = text(t(R.string.liked_by), 17, primaryTextColor(), true);
+                metadata.addView(title, lp(-1, -2, 0, 4, 0, 12));
+                for (String liker : likers) metadata.addView(likerRow(liker, dialog));
+            }
+            if (animate) {
+                metadata.setAlpha(.35f);
+                metadata.setTranslationY(dp(8));
+                metadata.animate().alpha(1).translationY(0).setDuration(220).start();
+            } else {
+                metadata.setAlpha(1);
+                metadata.setTranslationY(0);
+            }
+            String roomId = getPhotoRoomId(photo);
+            boolean needsRoom = !roomId.isEmpty()
+                    && (getPhotoRoomName(photo).isEmpty() || getPhotoRoomOwnerName(photo).isEmpty())
+                    && !photo.optBoolean("_officialRoomLookupDone", false);
+            if (needsRoom) {
+                try { photo.put("_officialRoomLookupDone", true); } catch (Exception ignored) {}
+                executor.execute(() -> {
+                    JSONObject roomInfo = fetchRoomInfoById(roomId);
+                    if (roomInfo == null) return;
+                    enrichPhotoWithRoomInfo(photo, roomInfo);
+                    runOnUiThread(() -> {
+                        if (!closed && dialog.isShowing() && shownPhoto == photo) populatePhotoInfoGrid(grid, photo, dialog);
+                    });
+                });
             }
         }
 
-        Button close = new Button(this);
-        close.setText(t(R.string.close));
-        close.setAllCaps(false);
-        close.setTextColor(accentOnColor());
-        close.setBackground(grad(dp(14), purple2, purple));
-        wrap.addView(close, lp(-1, dp(46), 0, 0, 0, 0));
-        close.setOnClickListener(v -> dialog.dismiss());
-
-        dialog.show();
-        Window shownWindow = dialog.getWindow();
-        if (shownWindow != null) {
-            shownWindow.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
-            WindowManager.LayoutParams params = new WindowManager.LayoutParams();
-            params.copyFrom(shownWindow.getAttributes());
-            params.width = (int) (getResources().getDisplayMetrics().widthPixels * 0.92f);
-            params.height = WindowManager.LayoutParams.WRAP_CONTENT;
-            shownWindow.setAttributes(params);
+        void updateCounter() {
+            ProfileResult current = profile();
+            int total = current == null ? 1 : Math.max(current.photos.size(), current.photosTotal);
+            counter.setText(formatCount(index + 1) + " / " + formatCount(total));
         }
 
-        String roomId = getPhotoRoomId(photo);
-        boolean needsRoomDetails = !roomId.isEmpty()
-                && (getPhotoRoomName(photo).isEmpty() || getPhotoRoomOwnerName(photo).isEmpty())
-                && !photo.optBoolean("_officialRoomLookupDone", false);
-        if (needsRoomDetails) {
-            try { photo.put("_officialRoomLookupDone", true); } catch(Exception ignored) {}
-            executor.execute(() -> {
-                JSONObject roomInfo = fetchRoomInfoById(roomId);
-                if (roomInfo == null) return;
-                enrichPhotoWithRoomInfo(photo, roomInfo);
-                runOnUiThread(() -> {
-                    if (!dialog.isShowing()) return;
-                    populatePhotoInfoGrid(infoGrid, photo, dialog);
-                });
-            });
+        @Override public boolean canSwipe(int direction) {
+            if (closed || moving) return false;
+            ArrayList<JSONObject> items = photos();
+            if (direction < 0) return index > 0;
+            ProfileResult current = profile();
+            return index + 1 < items.size() || (current != null && current.photosHasMore);
+        }
+
+        @Override public boolean onSwipe(int direction) {
+            if (closed || moving) return false;
+            int next = index + direction;
+            ArrayList<JSONObject> items = photos();
+            if (next >= 0 && next < items.size()) {
+                awaitingNext = false;
+                moveTo(next, direction);
+                return true;
+            }
+            ProfileResult current = profile();
+            if (direction > 0 && current != null && current.photosHasMore) {
+                awaitingNext = true;
+                loadMorePhotos(current, null);
+                ProfileResult updated = profile();
+                if (!moving && (updated == null || !updated.photosLoading)) awaitingNext = false;
+                updatePageSpinner();
+                return moving;
+            }
+            return false;
+        }
+
+        void moveTo(int next, int direction) {
+            if (closed || moving) return;
+            ArrayList<JSONObject> items = photos();
+            if (next < 0 || next >= items.size()) return;
+            moving = true;
+            imagePane.setLocked(true);
+            ImageView outgoing = image;
+            ImageView incoming = newImage();
+            imagePane.addView(incoming, 0, new FrameLayout.LayoutParams(-1, -1));
+            int width = Math.max(dp(120), imagePane.getWidth());
+            incoming.setTranslationX(direction * width);
+            incoming.setAlpha(.75f);
+            index = next;
+            image = incoming;
+            imagePane.setContent(incoming);
+            pageSpinner.setVisibility(View.GONE);
+            showCurrentPhoto(true);
+            outgoing.animate().translationX(-direction * width).alpha(.75f).setDuration(260)
+                    .setInterpolator(new android.view.animation.DecelerateInterpolator()).start();
+            incoming.animate().translationX(0).alpha(1).setDuration(260)
+                    .setInterpolator(new android.view.animation.DecelerateInterpolator()).withEndAction(() -> {
+                        clearImage(outgoing);
+                        imagePane.removeView(outgoing);
+                        moving = false;
+                        imagePane.setLocked(false);
+                    }).start();
+        }
+
+        void onPhotosChanged() {
+            if (closed || !dialog.isShowing()) return;
+            ProfileResult current = profile();
+            if (owner != null && current == null) { dialog.dismiss(); return; }
+            if (current != null && shownPhoto != null) {
+                int position = findPhotoIndex(current, shownPhoto);
+                if (position >= 0) index = position;
+                else if (!current.photos.isEmpty()) {
+                    index = Math.min(index, current.photos.size() - 1);
+                    showCurrentPhoto(false);
+                } else { dialog.dismiss(); return; }
+            }
+            updateCounter();
+            updatePageSpinner();
+            if (awaitingNext && current != null) {
+                if (index + 1 < current.photos.size()) {
+                    awaitingNext = false;
+                    if (!moving) moveTo(index + 1, 1);
+                } else if (!current.photosLoading) {
+                    awaitingNext = false;
+                    imagePane.bounce(1);
+                    updatePageSpinner();
+                }
+            }
+            preloadNeighbors();
+        }
+
+        void updatePageSpinner() {
+            ProfileResult current = profile();
+            pageSpinner.setVisibility(awaitingNext && current != null && current.photosLoading ? View.VISIBLE : View.GONE);
+            pageSpinner.bringToFront();
+        }
+
+        void prefetchPage() {
+            ProfileResult current = profile();
+            if (current == null || !current.photosHasMore || current.photosLoading) return;
+            if (current.photos.size() - index > 4 || lastPrefetchedCount == current.photos.size()) return;
+            lastPrefetchedCount = current.photos.size();
+            loadMorePhotos(current, null);
+        }
+
+        void preloadNeighbors() {
+            ArrayList<JSONObject> items = photos();
+            ArrayList<String> urls = new ArrayList<>();
+            StringBuilder key = new StringBuilder(imageWidth + "x" + imageHeight);
+            for (int neighbor : new int[]{index - 1, index + 1}) {
+                if (neighbor < 0 || neighbor >= items.size()) continue;
+                String url = getPhotoUrl(items.get(neighbor));
+                if (!url.isEmpty()) { urls.add(url); key.append('|').append(url); }
+            }
+            if (preloadedNeighborsKey.equals(key.toString())) return;
+            clearPreloads();
+            preloadedNeighborsKey = key.toString();
+            for (String url : urls) preloads.add(Glide.with(MainActivity.this).load(url).override(imageWidth, imageHeight).fitCenter().preload());
+        }
+
+        void clearPreloads() {
+            for (com.bumptech.glide.request.target.Target<?> target : preloads) {
+                try { Glide.with(MainActivity.this).clear(target); } catch (Exception ignored) {}
+            }
+            preloads.clear();
+            preloadedNeighborsKey = "";
+        }
+
+        void clearImage(ImageView target) {
+            try { Glide.with(MainActivity.this).clear(target); } catch (Exception ignored) {}
         }
     }
 
@@ -8542,10 +8873,10 @@ public class MainActivity extends Activity {
         if (hasHead) tp.leftMargin = dp(10);
         row.addView(texts, tp);
 
-        TextView lb = text(label, 12, Color.argb(185,255,255,255), false);
+        TextView lb = text(label, 12, themeMutedColor(), false);
         texts.addView(lb);
         TextView val = habboText(value == null || value.isEmpty() ? "" : value, 15, true);
-        val.setTextColor(lightTheme ? Color.rgb(33,33,33) : Color.WHITE);
+        val.setTextColor(hasHead ? accentTextColor() : primaryTextColor());
         val.setMaxLines(2);
         val.setEllipsize(TextUtils.TruncateAt.END);
         texts.addView(val);
@@ -10037,68 +10368,89 @@ public class MainActivity extends Activity {
             suggestionRequestId++;
             setSuggestionsVisible(false);
             if (inlineProgressPct <= 0) {
-                inlineProgressPct = Math.max(8, loadingProgressFor(message));
+                inlineProgressPct = 8;
+                inlineProgressMessage = message == null ? "" : message;
             }
         }
         updateProfileSearchAvailability();
         progress.setVisibility(View.GONE);
         setStatusMessage(loading ? "" : message);
-        if (loading) showLoadingSkeleton(message == null ? t(R.string.searching_profile) : message);
-        if (!loading && !profileSectionsInProgress) profilePrimaryProgressAnchor = null;
+        if (loading) {
+            showLoadingSkeleton(message == null ? t(R.string.searching_profile) : message);
+            animateProfileProgress(activeSearchToken, inlineProgressPct);
+        }
+        if (!loading && !profileSectionsInProgress && !profileProgressFinishing) profilePrimaryProgressAnchor = null;
+        if (!loading && !isProfileLoading()) uiHandler.post(this::openPendingNotificationProfile);
         updateFloatingProfileProgressIndicators();
     }
 
     private void showInlineLoading(String message) {
         inlineProgressMessage = message == null ? "" : message;
-        inlineProgressPct = loadingProgressFor(message);
+        updateLoadingSkeletonProgress(activeSearchToken, inlineProgressPct);
         setStatusMessage("");
     }
 
     private View inlineProgressBar(int pct) {
         FrameLayout bar = new FrameLayout(this);
-        bar.setBackground(round(lightTheme ? Color.rgb(232,232,232) : Color.argb(34,255,255,255), dp(999), lightTheme ? Color.rgb(216,216,216) : Color.argb(28,255,255,255), 1));
-
+        bar.setBackground(round(subtleSurfaceColor(), dp(999), Color.TRANSPARENT, 0));
         View fill = new View(this);
         fill.setBackground(grad(dp(999), purple2, purple));
+        fill.setPivotX(0);
+        fill.setScaleX(displayedProfileProgressPct / 100f);
         bar.setTag(fill);
-        int available = Math.max(dp(80), getResources().getDisplayMetrics().widthPixels - dp(72));
-        int bounded = Math.max(0, Math.min(100, pct));
-        int width = bounded == 0
-                ? 0
-                : Math.max(dp(22), (int)(available * (bounded / 100f)));
-        bar.addView(fill, new FrameLayout.LayoutParams(width, dp(9), Gravity.LEFT | Gravity.CENTER_VERTICAL));
+        bar.addView(fill, new FrameLayout.LayoutParams(-1, -1));
+        profileProgressFills.put(fill, Boolean.TRUE);
         return bar;
     }
 
     private void updateLoadingSkeletonProgress(int token, int pct) {
         uiHandler.post(() -> {
-            if (!isActiveToken(token) || !searchInProgress) return;
-            FrameLayout bar = loadingSkeletonProgressBar;
-            if (bar == null) return;
-            Object tagged = bar.getTag();
-            if (!(tagged instanceof View)) return;
-            View fill = (View) tagged;
-            int available = bar.getWidth();
-            if (available <= 0) {
-                available = Math.max(
-                        dp(80),
-                        getResources().getDisplayMetrics().widthPixels - dp(72)
-                );
+            if (!isActiveToken(token)) return;
+            for (TextView label : new ArrayList<>(profileProgressLabels.keySet())) {
+                if (label != null && !inlineProgressMessage.isEmpty()) label.setText(inlineProgressMessage);
             }
-            int bounded = Math.max(0, Math.min(100, pct));
-            int width = bounded == 0
-                    ? 0
-                    : Math.max(dp(22), (int)(available * (bounded / 100f)));
-            FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
-                    width,
-                    dp(9),
-                    Gravity.LEFT | Gravity.CENTER_VERTICAL
-            );
-            fill.setLayoutParams(params);
+            animateProfileProgress(token, pct);
         });
     }
 
-    
+    private void animateProfileProgress(int token, int pct) {
+        if (!isActiveToken(token)) return;
+        float target = Math.max(displayedProfileProgressPct, Math.min(100, Math.max(0, Math.max(pct, inlineProgressPct))));
+        if (profileProgressAnimator != null) profileProgressAnimator.cancel();
+        if (Math.abs(target - displayedProfileProgressPct) < .01f) {
+            if (target >= 99.9f) finishProfileProgressAnimation(token);
+            return;
+        }
+        ValueAnimator animator = ValueAnimator.ofFloat(displayedProfileProgressPct, target);
+        profileProgressAnimator = animator;
+        animator.setDuration(Math.max(180L, Math.min(1200L, Math.round((target - displayedProfileProgressPct) * 20))));
+        animator.setInterpolator(new android.view.animation.LinearInterpolator());
+        animator.addUpdateListener(value -> {
+            if (!isActiveToken(token)) return;
+            displayedProfileProgressPct = (float) value.getAnimatedValue();
+            for (View fill : new ArrayList<>(profileProgressFills.keySet())) {
+                if (fill != null) fill.setScaleX(displayedProfileProgressPct / 100f);
+            }
+            updateFloatingProfileProgressIndicators();
+        });
+        animator.addListener(new android.animation.AnimatorListenerAdapter() {
+            private boolean cancelled;
+            @Override public void onAnimationCancel(android.animation.Animator animation) { cancelled = true; }
+            @Override public void onAnimationEnd(android.animation.Animator animation) {
+                if (!cancelled && isActiveToken(token) && target >= 99.9f) finishProfileProgressAnimation(token);
+            }
+        });
+        animator.start();
+    }
+
+    private void finishProfileProgressAnimation(int token) {
+        if (!isActiveToken(token) || searchInProgress || profileSectionsInProgress || !profileProgressFinishing) return;
+        profileProgressFinishing = false;
+        inlineProgressMessage = "";
+        if (activeRenderedProfile != null) renderProfile(activeRenderedProfile);
+        updateFloatingProfileProgressIndicators();
+    }
+
     private LinearLayout loadingProgressCard(String message, int pct) {
         LinearLayout card = card(dp(18));
         card.setOrientation(LinearLayout.VERTICAL);
@@ -10115,7 +10467,8 @@ public class MainActivity extends Activity {
         }
         row.addView(spinner, new LinearLayout.LayoutParams(dp(30), dp(30)));
 
-        TextView tv = text(message == null ? t(R.string.generic_loading) : message, 13, Color.argb(230,255,255,255), true);
+        TextView tv = text(message == null ? t(R.string.generic_loading) : message, 13, primaryTextColor(), true);
+        profileProgressLabels.put(tv, Boolean.TRUE);
         tv.setSingleLine(true);
         tv.setEllipsize(TextUtils.TruncateAt.END);
         LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, -2, 1);
@@ -10124,15 +10477,6 @@ public class MainActivity extends Activity {
 
         card.addView(inlineProgressBar(Math.max(8, pct)), lp(-1, dp(8), 0, 0, 0, 0));
         return card;
-    }
-
-private int loadingProgressFor(String message) {
-        String m = message == null ? "" : message.toLowerCase(Locale.ROOT);
-        if (m.contains("detalhes")) return 20;
-        if (m.contains("histórico") || m.contains("historico")) return 42;
-        if (m.contains("visuais") || m.contains("amigos")) return 66;
-        if (m.contains("quartos") || m.contains("grupos")) return 86;
-        return 10;
     }
 
     private String loadingProfileAvatarUrl(String figure) {
@@ -11155,7 +11499,7 @@ private int loadingProgressFor(String message) {
                     w.setLayout(-1, -1);
                 }
             });
-            dialog.show();
+            showTrackedDialog(dialog);
             Window w = dialog.getWindow();
             if (w != null) {
                 w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
@@ -12524,8 +12868,8 @@ private int loadingProgressFor(String message) {
         }
         updateProfileSearchAvailability();
         pruneFloatingProfileProgressViews(false);
-        boolean loading = searchInProgress || profileSectionsInProgress;
-        float pct = Math.max(0.01f, Math.min(0.99f, inlineProgressPct / 100f));
+        boolean loading = searchInProgress || profileSectionsInProgress || profileProgressFinishing;
+        float pct = Math.max(0f, Math.min(1f, displayedProfileProgressPct / 100f));
         boolean primaryVisible = isPrimaryProfileProgressVisible();
         for (CircularPullProgressView ring : new ArrayList<>(floatingProfileProgressViews)) {
             if (ring == null || ring.getParent() == null) continue;
@@ -12665,7 +13009,7 @@ private int loadingProgressFor(String message) {
                     try { v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS); } catch (Exception ignored) {}
                     scrollMainToTop(true);
                 };
-                uiHandler.postDelayed(holdTask[0], 2000L);
+                uiHandler.postDelayed(holdTask[0], 1500L);
                 return true;
             }
             if (action == MotionEvent.ACTION_MOVE) {
@@ -12744,18 +13088,18 @@ private int loadingProgressFor(String message) {
         box.setGravity(Gravity.CENTER);
         box.setPadding(dp(12), dp(14), dp(12), dp(14));
         box.setMinimumHeight(dp(84));
-        box.setBackground(round(Color.argb(lightTheme ? 18 : 26, 139, 52, 217), dp(18), Color.argb(70, 139, 52, 217), 1));
+        box.setBackground(round(mixColor(dialogFillColor(), purple, lightTheme ? .08f : .15f), dp(18), adjustAlpha(purple, .3f), 1));
 
         ProgressBar spinner = new ProgressBar(this);
         spinner.setIndeterminate(true);
         if (Build.VERSION.SDK_INT >= 21) {
-            spinner.setIndeterminateTintList(ColorStateList.valueOf(Color.rgb(150, 58, 242)));
+            spinner.setIndeterminateTintList(ColorStateList.valueOf(accentTextColor()));
         }
         box.addView(spinner, new LinearLayout.LayoutParams(dp(34), dp(34)));
 
         String cleanMessage = message == null ? "" : message.trim();
         if (!cleanMessage.isEmpty()) {
-            TextView label = text(cleanMessage, 13, lightTheme ? Color.rgb(70, 36, 92) : Color.WHITE, true);
+            TextView label = text(cleanMessage, 13, primaryTextColor(), true);
             label.setGravity(Gravity.CENTER);
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-1, -2);
             lp.topMargin = dp(10);
@@ -13189,7 +13533,7 @@ private int loadingProgressFor(String message) {
             refreshAll[0].run();
         }
 
-        dialog.show();
+        showTrackedDialog(dialog);
         Window w = dialog.getWindow();
         if (w != null) {
             w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
@@ -13377,7 +13721,7 @@ private int loadingProgressFor(String message) {
         close.setOnClickListener(v -> savedDialog.dismiss());
         rootDialog.addView(close, lp(-1, dp(48), 0, 0, 0, 0));
 
-        savedDialog.show();
+        showTrackedDialog(savedDialog);
         Window w = savedDialog.getWindow();
         if (w != null) {
             w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
@@ -14167,9 +14511,9 @@ private int loadingProgressFor(String message) {
 
     private void applyVisualItemCellStyle(View cell, boolean selected) {
         if (cell == null) return;
-        int selectedStroke = Color.rgb(188, 74, 255);
-        int normalStroke = Color.argb(lightTheme ? 24 : 20, 255, 255, 255);
-        int fill = selected ? Color.argb(lightTheme ? 72 : 70, 168, 76, 255) : Color.argb(lightTheme ? 18 : 26, 255, 255, 255);
+        int selectedStroke = purple;
+        int normalStroke = dialogStrokeColor();
+        int fill = selected ? mixColor(subtleSurfaceColor(), purple, lightTheme ? .14f : .24f) : subtleSurfaceColor();
         cell.setBackground(round(fill, dp(12), selected ? selectedStroke : normalStroke, selected ? 2 : 1));
         if (Build.VERSION.SDK_INT >= 21) cell.setElevation(selected ? dp(4) : 0);
     }
@@ -14269,7 +14613,7 @@ private int loadingProgressFor(String message) {
         wrap.addView(close, lp(-1, dp(46), 0, 4, 0, 0));
         close.setOnClickListener(v -> dialog.dismiss());
 
-        dialog.show();
+        showTrackedDialog(dialog);
         Window w = dialog.getWindow();
         if (w != null) {
             w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
@@ -14846,8 +15190,8 @@ private int loadingProgressFor(String message) {
     private View visualIconTab(String url, boolean active, int size) {
         FrameLayout box = new FrameLayout(this);
         box.setPadding(dp(4), dp(4), dp(4), dp(4));
-        int fill = active ? Color.argb(lightTheme ? 96 : 92, 171, 77, 255) : Color.argb(lightTheme ? 24 : 34, 255, 255, 255);
-        int stroke = active ? Color.rgb(190, 76, 255) : Color.argb(lightTheme ? 28 : 26, 255,255,255);
+        int fill = active ? mixColor(subtleSurfaceColor(), purple, lightTheme ? .14f : .24f) : subtleSurfaceColor();
+        int stroke = active ? purple : dialogStrokeColor();
         box.setBackground(round(fill, dp(14), stroke, active ? 2 : 1));
         if (Build.VERSION.SDK_INT >= 21 && active) box.setElevation(dp(4));
         ImageView img = new ImageView(this);
@@ -15238,7 +15582,7 @@ private int loadingProgressFor(String message) {
                             .putString("appearance_accent", "custom").putInt("appearance_custom_color", color).apply());
         });
         picker.setContentView(scroll);
-        picker.show();
+        showTrackedDialog(picker);
         Window window = picker.getWindow();
         if (window != null) {
             window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
@@ -15718,7 +16062,7 @@ private int loadingProgressFor(String message) {
             toast(t(R.string.history_cleared));
         });
 
-        dialog.show();
+        showTrackedDialog(dialog);
         Window w = dialog.getWindow();
         if (w != null) {
             w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
@@ -15745,9 +16089,12 @@ private int loadingProgressFor(String message) {
                 if (favoriteKey(h).equals(favoriteKey(item))) openedProfilesHistory.remove(i);
             }
             saveOpenedProfilesHistory();
-            if (dialog != null) {
-                dialog.dismiss();
-                showOpenedProfilesHistoryDialog();
+            if (row.getParent() instanceof LinearLayout) {
+                LinearLayout list = (LinearLayout) row.getParent();
+                android.transition.TransitionManager.beginDelayedTransition(list,
+                        new android.transition.AutoTransition().setDuration(180L));
+                list.removeView(row);
+                if (list.getChildCount() == 0) list.addView(centerNote(t(R.string.no_history)));
             }
         });
 
@@ -15792,7 +16139,7 @@ private int loadingProgressFor(String message) {
         if (!owners.isEmpty()) infoGrid.addView(photoInfoCard(t(R.string.total_owners), formatNumericText(owners), "", ""));
         infoGrid.addView(photoInfoCard(t(R.string.code), code, "", ""));
 
-        dialog.show();
+        showTrackedDialog(dialog);
         Window shownWindow = dialog.getWindow();
         if (shownWindow != null) {
             shownWindow.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
@@ -16125,25 +16472,14 @@ private int loadingProgressFor(String message) {
     }
 
     private Bitmap downloadFavoriteHeadBitmap(FavoriteStatus st) {
-        HttpURLConnection c = null;
-        try {
-            if (st == null) return null;
-            String url = "";
-            if (st.nick != null && !st.nick.trim().isEmpty()) {
-                url = avatarHeadByNameForHotel(st.nick, st.hotelKey);
-            } else if (st.figure != null && !st.figure.trim().isEmpty()) {
-                url = "https://" + hotelDomain(st.hotelKey) + "/habbo-imaging/avatarimage?figure=" + enc(st.figure) + "&size=m&direction=2&head_direction=2&headonly=1";
-            }
-            if (url.isEmpty()) return null;
-            c = (HttpURLConnection)new URL(url).openConnection();
-            c.setConnectTimeout(10000);
-            c.setReadTimeout(15000);
-            return BitmapFactory.decodeStream(c.getInputStream());
-        } catch(Exception ignored) {
-            return null;
-        } finally {
-            try { if (c != null) c.disconnect(); } catch(Exception ignored) {}
+        if (st == null) return null;
+        String url = "";
+        if (st.nick != null && !st.nick.trim().isEmpty()) url = avatarHeadByNameForHotel(st.nick, st.hotelKey);
+        else if (st.figure != null && !st.figure.trim().isEmpty()) {
+            url = "https://" + hotelDomain(st.hotelKey) + "/habbo-imaging/avatarimage?figure=" + enc(st.figure)
+                    + "&size=m&direction=2&head_direction=2&headonly=1";
         }
+        return url.isEmpty() ? null : FavoriteAvatarLoader.load(getApplicationContext(), url);
     }
 
     private void saveFavoriteHeadBitmap(FavoriteStatus st, Bitmap bitmap) {
@@ -16157,58 +16493,12 @@ private int loadingProgressFor(String message) {
         } catch(Exception ignored) {}
     }
 
-    private Bitmap loadFavoriteHeadFromCache(FavoriteStatus st) {
-        try {
-            if (st == null) return null;
-            File f = favoriteHeadCacheFile(st.hotelKey, st.nick, st.uniqueId);
-            if (f.exists()) return BitmapFactory.decodeFile(f.getAbsolutePath());
-        } catch(Exception ignored) {}
-        return null;
-    }
-
-    private Bitmap loadNotificationHeadBitmap(FavoriteStatus st) {
-        try {
-            if (st == null) return BitmapFactory.decodeResource(getResources(), R.drawable.pre_load_head);
-            Bitmap fresh = downloadFavoriteHeadBitmap(st);
-            if (fresh != null) {
-                saveFavoriteHeadBitmap(st, fresh);
-                return fresh;
-            }
-            Bitmap cached = loadFavoriteHeadFromCache(st);
-            if (cached != null) return cached;
-            return BitmapFactory.decodeResource(getResources(), R.drawable.pre_load_head);
-        } catch(Exception ignored) {
-            return BitmapFactory.decodeResource(getResources(), R.drawable.pre_load_head);
-        }
-    }
-
     private void showFavoriteOnlineSystemNotification(FavoriteStatus st) {
-        try {
-            if (st == null) return;
-            NotificationManager nm = (NotificationManager)getSystemService(NOTIFICATION_SERVICE);
-            if (nm == null) return;
-            String channelId = "favorite_online";
-            if (Build.VERSION.SDK_INT >= 26) {
-                NotificationChannel ch = new NotificationChannel(channelId, t(R.string.favorites), NotificationManager.IMPORTANCE_HIGH);
-                nm.createNotificationChannel(ch);
-            }
-            Intent intent = new Intent(this, MainActivity.class);
-            intent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_CLEAR_TOP);
-            PendingIntent pi = PendingIntent.getActivity(this, 1207, intent, Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE : 0);
-            Bitmap largeIcon = loadNotificationHeadBitmap(st);
-            Notification.Builder b = Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(this, channelId) : new Notification.Builder(this);
-            b.setSmallIcon(R.drawable.notification_image)
-             .setContentTitle(t(R.string.favorites))
-             .setContentText(tr(R.string.favorite_online_banner, st.nick))
-             .setWhen(System.currentTimeMillis())
-             .setShowWhen(true)
-             .setPriority(Notification.PRIORITY_HIGH)
-             .setContentIntent(pi)
-             .setAutoCancel(true)
-             .setStyle(new Notification.BigTextStyle().bigText(tr(R.string.favorite_online_banner, st.nick)));
-            if (largeIcon != null) b.setLargeIcon(largeIcon);
-            nm.notify(Math.abs(profileIdentityKey(st.hotelKey, st.uniqueId, st.nick).hashCode()), b.build());
-        } catch(Exception ignored) {}
+        if (st == null) return;
+        Context app = getApplicationContext();
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            executor.execute(() -> FavoriteNotifications.showFavoriteOnlineSystemNotificationStatic(app, st));
+        } else FavoriteNotifications.showFavoriteOnlineSystemNotificationStatic(app, st);
     }
 
     private void showFavoriteOnlineBanner(FavoriteStatus st) {
@@ -16454,7 +16744,7 @@ private int loadingProgressFor(String message) {
         render[0].run();
         bindFavoritesPullRefresh(full, sv, wrap, favoritesPullIndicator, render[0]);
 
-        dialog.show();
+        showTrackedDialog(dialog);
         Window w = dialog.getWindow();
         if (w != null) {
             w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
@@ -16837,6 +17127,7 @@ private int loadingProgressFor(String message) {
         rootDialog.addView(loaderLine, lp(-1, dp(38), 0, 0, 0, 10));
 
         TextView motto = habboText("", 15, false);
+        motto.setOnClickListener(v -> copyMissionText(motto.getText().toString()));
         motto.setGravity(Gravity.CENTER);
         motto.setTextColor(lightTheme ? Color.rgb(70,70,70) : Color.argb(220,255,255,255));
         motto.setMaxLines(3);
@@ -16882,7 +17173,7 @@ private int loadingProgressFor(String message) {
             favoriteBtn.setBackground(new FavoriteStarDrawable(isFavoriteProfile(pr)));
         });
 
-        dialog.show();
+        showTrackedDialog(dialog);
         Window w = dialog.getWindow();
         if (w != null) {
             w.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
