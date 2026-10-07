@@ -273,4 +273,11 @@
     <string name="color_invalid_hex">Gebruik zes tekens: #RRGGBB</string>
     <string name="text_copied">Tekst gekopieerd</string>
     <string name="load_complete">Gereed</string>
+    <string name="loading_names_history">Naamgeschiedenis laden...</string>
+    <string name="loading_mottos_history">Vorige motto’s laden...</string>
+    <string name="loading_looks_history">Vorige looks laden...</string>
+    <string name="loading_photos">Foto’s laden...</string>
+    <string name="exit_title">Toxic verlaten?</string>
+    <string name="exit_message">De app sluiten?</string>
+    <string name="exit_action">Afsluiten</string>
 </resources>
