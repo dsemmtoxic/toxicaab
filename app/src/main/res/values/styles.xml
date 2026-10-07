@@ -3,6 +3,7 @@
         <item name="android:windowNoTitle">true</item>
         <item name="android:fontFamily">sans-serif</item>
         <item name="android:colorAccent">@color/toxic_purple</item>
+        <item name="android:colorPrimaryDark">@color/toxic_bg</item>
         <item name="android:windowBackground">@color/toxic_bg</item>
         <item name="android:windowLightStatusBar">false</item>
         <item name="android:windowActionBar">false</item>
