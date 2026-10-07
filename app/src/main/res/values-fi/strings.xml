@@ -273,4 +273,11 @@
     <string name="color_invalid_hex">Käytä kuutta merkkiä: #RRGGBB</string>
     <string name="text_copied">Teksti kopioitu</string>
     <string name="load_complete">Valmis</string>
+    <string name="loading_names_history">Ladataan nimihistoriaa...</string>
+    <string name="loading_mottos_history">Ladataan aiempia mottoja...</string>
+    <string name="loading_looks_history">Ladataan aiempia ulkoasuja...</string>
+    <string name="loading_photos">Ladataan kuvia...</string>
+    <string name="exit_title">Poistutaanko Toxicista?</string>
+    <string name="exit_message">Suljetaanko sovellus?</string>
+    <string name="exit_action">Poistu</string>
 </resources>
