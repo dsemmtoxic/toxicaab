@@ -273,4 +273,11 @@
     <string name="color_invalid_hex">Altı basamak kullanın: #RRGGBB</string>
     <string name="text_copied">Metin kopyalandı</string>
     <string name="load_complete">Tamamlandı</string>
+    <string name="loading_names_history">İsim geçmişi yükleniyor...</string>
+    <string name="loading_mottos_history">Önceki mottolar yükleniyor...</string>
+    <string name="loading_looks_history">Önceki görünümler yükleniyor...</string>
+    <string name="loading_photos">Fotoğraflar yükleniyor...</string>
+    <string name="exit_title">Toxic’ten çıkılsın mı?</string>
+    <string name="exit_message">Uygulama kapatılsın mı?</string>
+    <string name="exit_action">Çıkış</string>
 </resources>
