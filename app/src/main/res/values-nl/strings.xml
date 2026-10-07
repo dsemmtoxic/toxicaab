@@ -271,4 +271,6 @@
     <string name="color_hex">Hexkleur</string>
     <string name="color_apply">Toepassen</string>
     <string name="color_invalid_hex">Gebruik zes tekens: #RRGGBB</string>
+    <string name="text_copied">Tekst gekopieerd</string>
+    <string name="load_complete">Gereed</string>
 </resources>
