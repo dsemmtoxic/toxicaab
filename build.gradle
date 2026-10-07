@@ -1,3 +1,76 @@
-plugins {
-    id 'com.android.application' version '8.10.1' apply false
+plugins { id 'com.android.application' }
+
+// Release signing is intentionally configured from environment variables.
+// Do not commit your .jks/.keystore file to GitHub.
+def releaseStoreFile = System.getenv("KEYSTORE_FILE")
+def releaseStorePassword = System.getenv("KEYSTORE_PASSWORD")
+def releaseKeyAlias = System.getenv("KEY_ALIAS")
+def releaseKeyPassword = System.getenv("KEY_PASSWORD")
+def hasReleaseSigning = releaseStoreFile && releaseStorePassword && releaseKeyAlias && releaseKeyPassword
+def habbodexProxyKey = System.getenv("HABBODEX_PROXY_KEY") ?: (project.findProperty("HABBODEX_PROXY_KEY") ?: "")
+def escapedHabbodexProxyKey = habbodexProxyKey.toString().replace('\\', '\\\\').replace('"', '\\"')
+
+android {
+    namespace 'com.toxic.search'
+    compileSdk 36
+
+    defaultConfig {
+        applicationId 'com.toxic.search'
+        minSdk 23
+        targetSdk 36
+        versionCode 97
+        versionName '1.6.4'
+        buildConfigField 'String', 'HABBODEX_PROXY_KEY', "\"${escapedHabbodexProxyKey}\""
+    }
+
+    testOptions { unitTests.returnDefaultValues = true }
+
+    buildFeatures {
+        buildConfig true
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    // O idioma da interface acompanha o hotel escolhido dentro do app.
+    // Mantém todos os idiomas no APK-base entregue pelo Google Play.
+    bundle {
+        language {
+            enableSplit = false
+        }
+    }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            release {
+                storeFile file(releaseStoreFile)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+        }
+        release {
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+}
+
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation 'org.json:json:20240303'
+    implementation 'androidx.core:core:1.18.0'
+    implementation 'com.github.bumptech.glide:glide:4.16.0'
+    implementation 'com.android.billingclient:billing:9.1.0'
 }
