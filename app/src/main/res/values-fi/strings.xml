@@ -271,4 +271,6 @@
     <string name="color_hex">Heksaväri</string>
     <string name="color_apply">Käytä</string>
     <string name="color_invalid_hex">Käytä kuutta merkkiä: #RRGGBB</string>
+    <string name="text_copied">Teksti kopioitu</string>
+    <string name="load_complete">Valmis</string>
 </resources>
