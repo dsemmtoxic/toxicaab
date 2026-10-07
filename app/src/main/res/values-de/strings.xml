@@ -271,4 +271,6 @@
     <string name="color_hex">Hex-Farbe</string>
     <string name="color_apply">Anwenden</string>
     <string name="color_invalid_hex">Sechs Stellen verwenden: #RRGGBB</string>
+    <string name="text_copied">Text kopiert</string>
+    <string name="load_complete">Fertig</string>
 </resources>
