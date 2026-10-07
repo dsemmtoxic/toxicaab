@@ -273,4 +273,11 @@
     <string name="color_invalid_hex">Use six digits: #RRGGBB</string>
     <string name="text_copied">Text copied</string>
     <string name="load_complete">Ready</string>
+    <string name="loading_names_history">Loading name history...</string>
+    <string name="loading_mottos_history">Loading previous mottos...</string>
+    <string name="loading_looks_history">Loading previous looks...</string>
+    <string name="loading_photos">Loading photos...</string>
+    <string name="exit_title">Leave Toxic?</string>
+    <string name="exit_message">Close the app?</string>
+    <string name="exit_action">Exit</string>
 </resources>
