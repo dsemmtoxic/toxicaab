@@ -271,4 +271,6 @@
     <string name="color_hex">Onaltılık renk</string>
     <string name="color_apply">Uygula</string>
     <string name="color_invalid_hex">Altı basamak kullanın: #RRGGBB</string>
+    <string name="text_copied">Metin kopyalandı</string>
+    <string name="load_complete">Tamamlandı</string>
 </resources>
