@@ -5,5 +5,6 @@ import java.util.*;
 
 final class FavoriteStatus {
     String nick = "", figure = "", hotelKey = "br", uniqueId = "", lastAccess = "";
-    boolean online = false, privateProfile = false;
+    boolean online = false, privateProfile = false, presenceKnown = true;
+    long checkedAtMs = 0L;
 }

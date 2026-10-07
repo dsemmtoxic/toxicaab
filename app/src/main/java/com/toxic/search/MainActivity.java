@@ -226,6 +226,8 @@ public class MainActivity extends Activity {
     private FrameLayout loadingSkeletonProgressBar;
     // Barra principal usada para decidir quando o progresso flutuante precisa aparecer.
     private View profilePrimaryProgressAnchor;
+    private boolean primaryProgressWasVisible = true;
+    private Dialog exitConfirmationDialog;
     private final ArrayList<CircularPullProgressView> floatingProfileProgressViews = new ArrayList<>();
     private LinearLayout suggestionsBox;
     private ScrollView suggestionsScroll;
@@ -341,6 +343,7 @@ public class MainActivity extends Activity {
     private final ArrayList<ProfileHistoryItem> openedProfilesHistory = new ArrayList<>();
     private final ArrayList<ProfileHistoryItem> favoriteProfiles = new ArrayList<>();
     private Dialog activeFavoriteProfilesDialog;
+    private Runnable activeFavoritesRender;
     private String currentHotelKey = "br";
 
     private static final String HABBODEX_GROUP_OWNER_KEY = "__habbodex_group_owner";
@@ -3947,6 +3950,7 @@ public class MainActivity extends Activity {
 
     private int beginProfileRequest() {
         final int requestToken = ++activeSearchToken;
+        primaryProgressWasVisible = true;
         if (activePhotoViewer != null) activePhotoViewer.dialog.dismiss();
         if (profileProgressAnimator != null) profileProgressAnimator.cancel();
         profileProgressAnimator = null;
@@ -4092,6 +4096,8 @@ public class MainActivity extends Activity {
         if (blockRepeatedProfileOpen(name, uniqueId, hotel)) return;
         if (!claimProfileSearchSlot()) return;
 
+        String nextReference = uniqueId == null || uniqueId.trim().isEmpty() ? name : uniqueId;
+        pushCurrentProfileToHistory(normalizeNickKey(nextReference), hotel);
         beginProfileRequest();
         activeSearchNick = "";
         searchInProgress = false;
@@ -4443,11 +4449,11 @@ public class MainActivity extends Activity {
         final int taskCount = restrictedProfile ? 7 : 9;
         synchronized (profileProgressLock) {
             profileSectionTaskCount = taskCount;
-            int[] messages = {R.string.loading_history, R.string.loading_history,
-                    R.string.loading_styles_friends, R.string.loading_styles_friends,
+            int[] messages = {R.string.loading_names_history, R.string.loading_history,
+                    R.string.loading_mottos_history, R.string.loading_styles_friends,
                     R.string.loading_history, R.string.loading_details,
                     restrictedProfile ? R.string.loading_rooms_groups : R.string.loading_details,
-                    R.string.loading_rooms_groups, R.string.loading_details};
+                    R.string.loading_rooms_groups, R.string.loading_photos};
             profilePendingSectionLabels.clear();
             for (int i = 0; i < taskCount; i++) profilePendingSectionLabels.put(i, messages[i]);
         }
@@ -4510,46 +4516,35 @@ public class MainActivity extends Activity {
             }
         });
 
-        // 3) Missões e visuais: somente a primeira página no carregamento inicial.
+        // Missões e visuais continuam por páginas, sem limitar o total do histórico.
         profileSectionsExecutor.execute(() -> {
             try {
                 sleepCriticalRetry(1);
-                JSONObject secondary = fetchDirectHabbodexPriorityBatch(
-                        uniqueId,
-                        "previous-mottos,previous-styles"
-                );
+                PageResult mottos = fetchPage(uniqueId, "previous-mottos", "previousMottos", 1, 100);
                 if (!isActiveToken(token)) return;
-                final JSONObject fallback;
-                synchronized (r) { fallback = copyJsonObject(r.dexProfile); }
-                ProfileSectionPayload mottos = historySectionWithDirectFallback(
-                        secondary, fallback, uniqueId,
-                        "previous-mottos", "previousMottos", 1
-                );
-                ProfileSectionPayload styles = historySectionWithDirectFallback(
-                        secondary, fallback, uniqueId,
-                        "previous-styles", "previousStyles", 1
-                );
                 synchronized (r) {
-                    if (mottos.success || !mottos.items.isEmpty()) {
-                        putComplementSectionLocked(r, "previousMottos", mottos.items);
+                    if (mottos.success) {
+                        r.previousMottos = mergeMottoLists(r.previousMottos, mottos.items);
+                        r.mottosTotal = Math.max(r.previousMottos.size(), mottos.total);
+                        r.mottosHasMore = mottos.hasMore || r.mottosTotal > r.previousMottos.size();
+                        r.mottosNextPage = r.mottosHasMore ? Math.max(2, mottos.nextPage) : 0;
                     }
-                    if (styles.success || !styles.items.isEmpty()) {
-                        putComplementSectionLocked(r, "previousStyles", styles.items);
-                        int remoteTotal = extractBatchSectionTotal(secondary, "previousStyles");
-                        int fetchedCount = r.allStylesSource == null ? 0 : r.allStylesSource.size();
-                        int visibleCount = r.previousStyles == null ? 0 : r.previousStyles.size();
-                        r.stylesRemotePaged = remoteTotal > fetchedCount
-                                || (remoteTotal <= 0 && styles.items.size() >= 100);
-                        r.stylesRemoteNextPage = r.stylesRemotePaged ? 2 : 0;
-                        if (remoteTotal > 0) r.stylesTotal = Math.max(remoteTotal, fetchedCount);
-                        else r.stylesTotal = Math.max(r.stylesTotal, fetchedCount);
-                        r.stylesHasMore = visibleCount < fetchedCount || r.stylesRemotePaged;
-                        r.stylesNextPage = r.stylesHasMore ? 2 : 0;
+                    reconcileProfileSources(r);
+                }
+                publishProgressiveProfile(r, token, firstRenderReleaseAt);
+                updateProfileSectionLabel(token, 2, R.string.loading_looks_history);
+                PageResult styles = fetchPage(uniqueId, "previous-styles", "previousStyles", 1, 100);
+                if (!isActiveToken(token)) return;
+                synchronized (r) {
+                    if (styles.success) {
+                        r.stylesRemotePaged = styles.hasMore;
+                        r.stylesRemoteNextPage = styles.hasMore ? Math.max(2, styles.nextPage) : 0;
+                        r.stylesTotal = Math.max(r.stylesTotal, styles.total);
+                        applyLocalStylesSource(r, mergeLists(r.allStylesSource, styles.items));
                     }
                     reconcileProfileSources(r);
                     enrichPhotoRoomInfo(r);
                 }
-
                 publishProgressiveProfile(r, token, firstRenderReleaseAt);
             } finally {
                 finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups, 2);
@@ -4724,35 +4719,35 @@ public class MainActivity extends Activity {
                 }
             });
 
-            // 9) Fotos oficiais são totalmente independentes do histórico.
+            // HabboDex é a fonte principal; a API oficial é usada somente como reserva.
             profileSectionsExecutor.execute(() -> {
                 try {
-                    ProfileSectionPayload photos;
-                    try {
-                        photos = ProfileSectionPayload.list(
-                                "photos",
-                                fetchOfficialPhotos(uniqueId),
-                                true
-                        );
-                    } catch(Exception ignored) {
-                        photos = ProfileSectionPayload.list(
-                                "photos",
-                                new ArrayList<>(),
-                                false
-                        );
-                    }
+                    PageResult archived = fetchPage(uniqueId, "photos", "photos", 1, 100);
                     if (!isActiveToken(token)) return;
-                    synchronized (r) {
-                        applyOfficialPhotosData(r, photos.items, photos.success);
-                        reconcileProfileSources(r);
-                        enrichPhotoRoomInfo(r);
+                    if (archived.success) {
+                        synchronized (r) {
+                            r.officialPhotosAttempted = true;
+                            applyArchivedPhotosPage(r, archived, false);
+                            enrichPhotoRoomInfo(r);
+                        }
+                    } else {
+                        ArrayList<JSONObject> official = new ArrayList<>();
+                        boolean success = false;
+                        try { official = fetchOfficialPhotos(uniqueId); success = true; }
+                        catch (Exception ignored) {}
+                        if (!isActiveToken(token)) return;
+                        synchronized (r) {
+                            applyOfficialPhotosData(r, official, success);
+                            reconcileProfileSources(r);
+                            enrichPhotoRoomInfo(r);
+                        }
                     }
-
                     publishProgressiveProfile(r, token, firstRenderReleaseAt);
                 } finally {
                     finishProfileSectionsGroup(r, token, firstRenderReleaseAt, pendingGroups, 8);
                 }
             });
+
         } else {
             synchronized (r) {
                 r.officialProfileAttempted = true;
@@ -4777,6 +4772,11 @@ public class MainActivity extends Activity {
                         putComplementSectionLocked(r, "rooms", rooms);
                         putComplementSectionLocked(r, "groups", groups);
                         putComplementSectionLocked(r, "photos", photos);
+                        int remotePhotosTotal = extractBatchSectionTotal(privateDetails, "photos");
+                        r.photosTotal = Math.max(r.photosTotal, remotePhotosTotal);
+                        r.photosRemotePaged = remotePhotosTotal > photos.size() || (remotePhotosTotal <= 0 && photos.size() >= 100);
+                        r.photosRemoteNextPage = r.photosRemotePaged ? 2 : 0;
+                        applyLocalPhotosSource(r, mergePhotoLists(r.allPhotosSource, photos), false);
                         reconcileProfileSources(r);
                         enrichPhotoRoomInfo(r);
                     }
@@ -4820,7 +4820,7 @@ public class MainActivity extends Activity {
             int loadingMessage = profilePendingSectionLabels.isEmpty() ? R.string.loading_details
                     : profilePendingSectionLabels.values().iterator().next();
             inlineProgressMessage = remaining > 0
-                    ? t(loadingMessage) + " · " + completed + "/" + total
+                    ? t(loadingMessage)
                     : t(R.string.load_complete);
             if (remaining <= 0) {
                 profileSectionsInProgress = false;
@@ -5524,7 +5524,7 @@ public class MainActivity extends Activity {
                 r.previousNames,
                 extractList(complement, "previousNames")
         );
-        r.previousMottos = mergeLists(
+        r.previousMottos = mergeMottoLists(
                 r.previousMottos,
                 extractList(complement, "previousMottos")
         );
@@ -5691,14 +5691,11 @@ public class MainActivity extends Activity {
             r.privateProfile = false;
         }
 
-        if (r.officialPhotosAttempted) {
+        if (r.officialPhotosAttempted && !r.photosFromOfficial) {
             ArrayList<JSONObject> complementPhotos = extractList(complement, "photos");
-            // Fotos do complemento são exclusivas de perfis fechados/banidos.
-            // Em perfil público, até uma lista oficial vazia continua soberana.
-            boolean restrictedPhotos = r.privateProfile || r.banned;
-            if (restrictedPhotos
-                    && (!r.officialPhotosSucceeded || r.allPhotosSource.isEmpty())) {
-                if (!complementPhotos.isEmpty()) applyLocalPhotosSource(r, complementPhotos, false);
+            // Complementa somente páginas da mesma fonte escolhida nesta busca.
+            if (!complementPhotos.isEmpty()) {
+                applyLocalPhotosSource(r, mergePhotoLists(r.allPhotosSource, complementPhotos), false);
             }
         }
     }
@@ -5755,6 +5752,116 @@ public class MainActivity extends Activity {
         return 0L;
     }
 
+    private ArrayList<JSONObject> mergePhotoLists(ArrayList<JSONObject> first, ArrayList<JSONObject> second) {
+        ArrayList<JSONObject> out = new ArrayList<>();
+        HashMap<String, JSONObject> byKey = new HashMap<>();
+        for (ArrayList<JSONObject> list : Arrays.asList(first, second)) {
+            if (list == null) continue;
+            for (JSONObject item : list) {
+                if (item == null) continue;
+                ArrayList<String> keys = new ArrayList<>();
+                String id = firstText(item, "photoId", "photo_id", "id");
+                if (!id.isEmpty()) keys.add("photo:" + id);
+                for (String field : new String[]{"url", "previewUrl", "imageUrl", "preview_url"}) {
+                    String url = firstText(item, field);
+                    if (!url.isEmpty()) keys.add("url:" + url.split("\\?", 2)[0]);
+                }
+                if (keys.isEmpty()) keys.add("record:" + item.toString());
+                JSONObject target = null;
+                for (String key : keys) { if (byKey.containsKey(key)) { target = byKey.get(key); break; } }
+                if (target == null) { target = item; out.add(item); }
+                else fillMissingJsonFields(target, item);
+                for (String key : keys) byKey.put(key, target);
+            }
+        }
+        return out;
+    }
+
+    private ArrayList<JSONObject> mergeMottoLists(ArrayList<JSONObject> first, ArrayList<JSONObject> second) {
+        LinkedHashMap<String, JSONObject> records = new LinkedHashMap<>();
+        for (ArrayList<JSONObject> list : Arrays.asList(first, second)) {
+            if (list == null) continue;
+            for (JSONObject item : list) {
+                if (item == null) continue;
+                String mission = firstText(item, "text", "motto", "mission");
+                String date = firstText(item, "changedAt", "date", "createdAt", "creationTime", "time");
+                String key = mission.isEmpty() && date.isEmpty() ? item.toString() : mission + "\u001f" + date;
+                JSONObject existing = records.get(key);
+                if (existing == null) records.put(key, item);
+                else fillMissingJsonFields(existing, item);
+            }
+        }
+        return new ArrayList<>(records.values());
+    }
+
+    private ArrayList<JSONObject> mergePagedHistoryLists(String key, ArrayList<JSONObject> first, ArrayList<JSONObject> second) {
+        if ("photos".equals(key)) return mergePhotoLists(first, second);
+        if ("previousMottos".equals(key)) return mergeMottoLists(first, second);
+        return mergeLists(first, second);
+    }
+
+    private void applyArchivedPhotosPage(ProfileResult profile, PageResult page, boolean revealNext) {
+        int visible = Math.max(PAGE_CHUNK, profile.photos.size() + (revealNext ? PAGE_CHUNK : 0));
+        if (profile.photosFromOfficial) profile.allPhotosSource.clear();
+        profile.photosFromOfficial = false;
+        profile.allPhotosSource = mergePhotoLists(profile.allPhotosSource, page.items);
+        profile.photosRemotePaged = page.hasMore;
+        profile.photosRemoteNextPage = page.hasMore ? Math.max(page.page + 1, page.nextPage) : 0;
+        profile.photosTotal = page.hasMore ? Math.max(page.total, profile.allPhotosSource.size()) : profile.allPhotosSource.size();
+        int end = Math.min(visible, profile.allPhotosSource.size());
+        profile.photos = new ArrayList<>(profile.allPhotosSource.subList(0, end));
+        profile.photosHasMore = end < profile.allPhotosSource.size() || profile.photosRemotePaged;
+        profile.photosNextPage = profile.photosHasMore ? end / PAGE_CHUNK + 1 : 0;
+    }
+
+    private void updateProfileSectionLabel(int token, int job, int label) {
+        synchronized (profileProgressLock) {
+            if (!isActiveToken(token) || !profilePendingSectionLabels.containsKey(job)) return;
+            profilePendingSectionLabels.put(job, label);
+            inlineProgressMessage = t(profilePendingSectionLabels.values().iterator().next());
+        }
+        updateLoadingSkeletonProgress(token, inlineProgressPct);
+    }
+
+    private void syncMottosPaginationToRendered(ProfileResult source) {
+        ProfileResult displayed = activeRenderedProfile;
+        if (source == null || displayed == null || source == displayed || !sameProfile(source, displayed)) return;
+        synchronized (source) {
+            displayed.previousMottos = ProfileSnapshots.list(source.previousMottos);
+            displayed.mottosTotal = source.mottosTotal;
+            displayed.mottosNextPage = source.mottosNextPage;
+            displayed.mottosHasMore = source.mottosHasMore;
+            displayed.mottosLoading = source.mottosLoading;
+            displayed.mottosRetryAfterMs = source.mottosRetryAfterMs;
+        }
+    }
+
+    private void loadMoreMottos(ProfileResult rendered) {
+        ProfileResult source = livePaginationProfile(rendered);
+        final int token = boundProfileToken(rendered);
+        if (source == null || !isCurrentProfileResult(source, token) || !source.mottosHasMore || source.mottosLoading
+                || SystemClock.elapsedRealtime() < source.mottosRetryAfterMs) return;
+        source.mottosLoading = true;
+        syncMottosPaginationToRendered(source);
+        profileRequestsExecutor.execute(() -> {
+            try {
+                PageResult next = fetchHistoryRemoteChunk(source.uniqueId, "previous-mottos", "previousMottos",
+                        Math.max(1, source.mottosNextPage), source.previousMottos, source.mottosTotal, PAGE_CHUNK);
+                if (!isCurrentProfileResult(source, token)) return;
+                synchronized (source) {
+                    if (!next.success) { source.mottosRetryAfterMs = SystemClock.elapsedRealtime() + HORIZONTAL_AUTO_LOAD_RETRY_BACKOFF_MS; return; }
+                    source.previousMottos = mergeMottoLists(source.previousMottos, next.items);
+                    source.mottosTotal = Math.max(source.previousMottos.size(), next.total);
+                    source.mottosHasMore = next.hasMore;
+                    source.mottosNextPage = next.hasMore ? Math.max(next.page + 1, next.nextPage) : 0;
+                }
+            } finally {
+                source.mottosLoading = false;
+                runOnUiThread(() -> { if (isCurrentProfileResult(source, token)) { syncMottosPaginationToRendered(source); renderProfile(activeRenderedProfile); } });
+            }
+        });
+    }
+
     private void applyOfficialPhotosData(
             ProfileResult r,
             ArrayList<JSONObject> photos,
@@ -5763,7 +5870,7 @@ public class MainActivity extends Activity {
         if (r == null) return;
         r.officialPhotosAttempted = true;
         r.officialPhotosSucceeded = success;
-        if (success) applyLocalPhotosSource(r, photos, true);
+        if (success) { r.photosRemotePaged = false; r.photosRemoteNextPage = 0; applyLocalPhotosSource(r, photos, true); }
     }
 
     private void applyLocalPhotosSource(
@@ -5777,8 +5884,8 @@ public class MainActivity extends Activity {
         r.photosFromOfficial = official;
         int end = Math.min(visibleCount, r.allPhotosSource.size());
         r.photos = new ArrayList<>(r.allPhotosSource.subList(0, end));
-        r.photosTotal = r.allPhotosSource.size();
-        r.photosHasMore = end < r.photosTotal;
+        r.photosTotal = r.photosRemotePaged ? Math.max(r.photosTotal, r.allPhotosSource.size()) : r.allPhotosSource.size();
+        r.photosHasMore = end < r.allPhotosSource.size() || r.photosRemotePaged;
         r.photosNextPage = r.photosHasMore ? end / PAGE_CHUNK + 1 : 0;
     }
 
@@ -5799,9 +5906,9 @@ public class MainActivity extends Activity {
         }
         r.allStylesSource = clean;
         r.stylesFromComplement = true;
-        int end = Math.min(PAGE_CHUNK, r.allStylesSource.size());
+        int end = Math.min(Math.max(PAGE_CHUNK, r.previousStyles.size()), r.allStylesSource.size());
         r.previousStyles = new ArrayList<>(r.allStylesSource.subList(0, end));
-        r.stylesTotal = r.allStylesSource.size();
+        r.stylesTotal = r.stylesRemotePaged ? Math.max(r.stylesTotal, r.allStylesSource.size()) : r.allStylesSource.size();
         r.stylesHasMore = end < r.stylesTotal;
         r.stylesNextPage = r.stylesHasMore ? 2 : 0;
     }
@@ -6298,14 +6405,22 @@ public class MainActivity extends Activity {
     }
 
     private PageResult fetchPage(String uniqueId, String endpoint, String primaryKey, int page, int limit) {
+        try {
+            return decodePageResult(unwrap(getJson(habbodexEndpointUrl(uniqueId, endpoint, Math.max(1, page), limit))), primaryKey, page, limit);
+        } catch (Exception ignored) {
+            return decodePageResult(null, primaryKey, page, limit);
+        }
+    }
+
+    private PageResult decodePageResult(JSONObject pageData, String primaryKey, int page, int limit) {
         PageResult out = new PageResult();
         out.page = Math.max(1, page);
         out.nextPage = 0;
         out.hasMore = false;
         out.total = 0;
         try {
-            JSONObject pageData = unwrap(getJson(habbodexEndpointUrl(uniqueId, endpoint, out.page, limit)));
-            if (pageData == null) return out;
+            if (pageData == null || pageData.has("error") || (pageData.has("ok") && !pageData.optBoolean("ok", true))) return out;
+            if (findListArrayDeep(pageData, primaryKey, 0) == null) return out;
             out.success = true;
             out.items = extractList(pageData, primaryKey);
             if (out.items.isEmpty() && "previousFriends".equals(primaryKey)) {
@@ -6330,7 +6445,17 @@ public class MainActivity extends Activity {
                 if (pagination != null) totalPages = Math.max(totalPages, pagination.optInt("totalPages", pagination.optInt("pages", 0)));
                 if (totalPages > out.page) nextPage = out.page + 1;
             }
-            if (nextPage <= 0 && out.items.size() >= limit) nextPage = out.page + 1;
+            // Algumas listas devolvem dez ou vinte itens, mesmo com limit=100.
+            JSONObject pagination = pageData.optJSONObject("pagination");
+            JSONObject meta = pageData.optJSONObject("meta");
+            int pageSize = firstPositiveInt(pageData, "limit", "perPage", "pageSize");
+            if (pageSize <= 0) pageSize = firstPositiveInt(pagination, "limit", "perPage", "pageSize");
+            if (pageSize <= 0) pageSize = firstPositiveInt(meta, "limit", "perPage", "pageSize");
+            if (pageSize <= 0) pageSize = out.page == 1 ? out.items.size() : Math.max(1, limit);
+            if (nextPage <= 0 && !out.items.isEmpty()
+                    && ((out.total > 0 && (long)out.page * pageSize < out.total)
+                    || (out.total <= 0 && out.items.size() >= limit))) nextPage = out.page + 1;
+            if (out.items.isEmpty()) nextPage = 0;
             out.nextPage = nextPage > out.page ? nextPage : 0;
             out.hasMore = out.nextPage > 0;
         } catch (Exception ignored) {}
@@ -6400,6 +6525,11 @@ public class MainActivity extends Activity {
             int knownTotal,
             int desiredNewItems
     ) {
+        return fetchHistoryRemoteChunk(uniqueId, "previous-styles", "previousStyles", startPage, existing, knownTotal, desiredNewItems);
+    }
+
+    private PageResult fetchHistoryRemoteChunk(String uniqueId, String endpoint, String key, int startPage,
+            ArrayList<JSONObject> existing, int knownTotal, int desiredNewItems) {
         PageResult combined = new PageResult();
         combined.page = Math.max(1, startPage);
         combined.total = Math.max(0, knownTotal);
@@ -6412,8 +6542,8 @@ public class MainActivity extends Activity {
         for (int request = 0; request < 12; request++) {
             PageResult part = fetchPage(
                     uniqueId,
-                    "previous-styles",
-                    "previousStyles",
+                    endpoint,
+                    key,
                     page,
                     100
             );
@@ -6421,12 +6551,12 @@ public class MainActivity extends Activity {
             combined.success = true;
             combined.page = part.page;
             combined.total = Math.max(combined.total, part.total);
-            combined.items = mergeLists(combined.items, part.items);
+            combined.items = mergePagedHistoryLists(key, combined.items, part.items);
 
-            ArrayList<JSONObject> withExisting = mergeLists(baseline, combined.items);
+            ArrayList<JSONObject> withExisting = mergePagedHistoryLists(key, baseline, combined.items);
             int newCount = Math.max(0, withExisting.size() - baseline.size());
-            boolean hasMore = part.hasMore
-                    || (combined.total > 0 && withExisting.size() < combined.total);
+            boolean hasMore = !part.items.isEmpty() && (part.hasMore
+                    || (combined.total > 0 && withExisting.size() < combined.total));
             int nextPage = part.nextPage;
             if (hasMore && nextPage <= page && part.items != null && !part.items.isEmpty()) {
                 nextPage = page + 1;
@@ -6514,6 +6644,9 @@ public class MainActivity extends Activity {
         ArrayList<JSONObject> allPhotos;
         int nextPage;
         int total;
+        int remoteNextPage;
+        boolean remotePaged;
+        boolean fromOfficial;
         boolean hasMore;
         boolean loading;
         long retryAfter;
@@ -6522,6 +6655,9 @@ public class MainActivity extends Activity {
             allPhotos = ProfileSnapshots.list(source.allPhotosSource);
             nextPage = source.photosNextPage;
             total = source.photosTotal;
+            remoteNextPage = source.photosRemoteNextPage;
+            remotePaged = source.photosRemotePaged;
+            fromOfficial = source.photosFromOfficial;
             hasMore = source.photosHasMore;
             loading = source.photosLoading;
             retryAfter = source.photosAutoLoadRetryAfterMs;
@@ -6534,6 +6670,9 @@ public class MainActivity extends Activity {
             rendered.photosHasMore = hasMore;
             rendered.photosLoading = loading;
             rendered.photosAutoLoadRetryAfterMs = retryAfter;
+            rendered.photosRemotePaged = remotePaged;
+            rendered.photosRemoteNextPage = remoteNextPage;
+            rendered.photosFromOfficial = fromOfficial;
         }
     }
 
@@ -6696,7 +6835,7 @@ public class MainActivity extends Activity {
         if (state == null || state.photosLoading || !state.photosHasMore
                 || state.uniqueId == null || state.uniqueId.isEmpty()) return;
         if (SystemClock.elapsedRealtime() < state.photosAutoLoadRetryAfterMs) return;
-        if (state.allPhotosSource != null && !state.allPhotosSource.isEmpty()) {
+        if (state.allPhotosSource != null && state.photos.size() < state.allPhotosSource.size()) {
             photosScrollX = photosHsv == null ? photosScrollX : photosHsv.getScrollX();
             synchronized (state) {
                 state.photosAutoLoadRetryAfterMs = 0L;
@@ -6705,8 +6844,8 @@ public class MainActivity extends Activity {
                         state.allPhotosSource.size()
                 );
                 state.photos = new ArrayList<>(state.allPhotosSource.subList(0, end));
-                state.photosTotal = state.allPhotosSource.size();
-                state.photosHasMore = end < state.photosTotal;
+                state.photosTotal = Math.max(state.photosTotal, state.allPhotosSource.size());
+                state.photosHasMore = end < state.allPhotosSource.size() || state.photosRemotePaged;
                 state.photosNextPage = state.photosHasMore
                         ? (end / PAGE_CHUNK) + 1
                         : 0;
@@ -6716,21 +6855,16 @@ public class MainActivity extends Activity {
             refreshPhotosCarouselIncrementally(state, token);
             return;
         }
-        final int page = state.photosNextPage <= 0 ? 2 : state.photosNextPage;
+        final int page = state.photosRemotePaged ? Math.max(1, state.photosRemoteNextPage)
+                : state.photosNextPage <= 0 ? 2 : state.photosNextPage;
         state.photosLoading = true;
         photosScrollX = photosHsv == null ? photosScrollX : photosHsv.getScrollX();
         syncPhotosPaginationToRendered(state);
         setHorizontalCarouselLoading(TAG_PHOTOS_CAROUSEL_ROW, true, 165);
         profileRequestsExecutor.execute(() -> {
             try {
-                PageResult next = fetchPageChunk(
-                        state.uniqueId,
-                        "photos",
-                        "photos",
-                        page,
-                        PAGE_CHUNK,
-                        PAGE_CHUNK
-                );
+                PageResult next = fetchHistoryRemoteChunk(state.uniqueId, "photos", "photos",
+                        page, state.allPhotosSource, state.photosTotal, PAGE_CHUNK);
                 if (!isCurrentProfileResult(r, token)) return;
                 if (!next.success) {
                     state.photosAutoLoadRetryAfterMs = SystemClock.elapsedRealtime()
@@ -6738,13 +6872,7 @@ public class MainActivity extends Activity {
                     return;
                 }
                 synchronized (state) {
-                    if (next.items.isEmpty()) {
-                        state.photosHasMore = false;
-                        state.photosNextPage = 0;
-                        state.photosTotal = state.photos.size();
-                    } else {
-                        applyPhotosPage(state, next, false);
-                    }
+                    applyArchivedPhotosPage(state, next, true);
                     state.photosAutoLoadRetryAfterMs = 0L;
                     try { enrichPhotoRoomInfo(state); } catch(Exception ignored) {}
                 }
@@ -6827,18 +6955,15 @@ public class MainActivity extends Activity {
                         int sourceCountBefore = state.allStylesSource.size();
                         state.allStylesSource = mergeLists(state.allStylesSource, next.items);
                         int addedToSource = state.allStylesSource.size() - sourceCountBefore;
-                        if (addedToSource <= 0 && state.stylesRemotePaged) {
+                        if (addedToSource <= 0 && next.hasMore) {
                             state.stylesAutoLoadRetryAfterMs = SystemClock.elapsedRealtime()
                                     + HORIZONTAL_AUTO_LOAD_RETRY_BACKOFF_MS;
-                            return;
                         }
                         if (next.total > 0) {
                             state.stylesTotal = Math.max(state.stylesTotal, next.total);
                         }
                         state.stylesRemoteNextPage = next.nextPage;
-                        state.stylesRemotePaged = next.hasMore
-                                || (state.stylesTotal > 0
-                                && state.allStylesSource.size() < state.stylesTotal);
+                        state.stylesRemotePaged = next.hasMore;
                         if (state.stylesRemotePaged
                                 && state.stylesRemoteNextPage <= remotePage) {
                             state.stylesRemoteNextPage = Math.max(
@@ -6955,6 +7080,8 @@ public class MainActivity extends Activity {
         if (photosState != r && isCurrentProfileResult(photosState, boundProfileToken(photosState))) {
             // A queued snapshot can predate photo pages loaded while the profile was updating.
             syncPhotosPaginationToRendered(photosState);
+            syncStylesPaginationToRendered(photosState);
+            syncMottosPaginationToRendered(photosState);
         }
         if (pendingProfileRestore != null && pendingProfileRestore.matches(r)) {
             pendingProfileRestore.apply(r);
@@ -6982,13 +7109,14 @@ public class MainActivity extends Activity {
             if ((profileSectionsInProgress || profileProgressFinishing) && inlineProgressMessage != null && !inlineProgressMessage.isEmpty()) {
                 LinearLayout progressCard = loadingProgressCard(inlineProgressMessage, inlineProgressPct);
                 profilePrimaryProgressAnchor = progressCard;
+                progressCard.post(this::updateFloatingProfileProgressIndicators);
                 resultWrap.addView(progressCard, lp(-1, -2, 0, 0, 0, 12));
             }
         });
         renderProfileSection("header", r.name + ":" + r.figure + ":" + r.motto + ":" + r.banned
                 + ":" + recordsSignature(r.selectedBadges) + theme, () -> renderProfileHeader(r));
         renderProfileSection("names", recordsSignature(r.previousNames) + theme, () -> addPreviousNames(r.previousNames));
-        renderProfileSection("mottos", recordsSignature(r.previousMottos) + theme, () -> addPreviousMottos(r, r.previousMottos));
+        renderProfileSection("mottos", recordsSignature(r.previousMottos) + ":" + r.mottosHasMore + ":" + r.mottosLoading + ":" + r.mottosTotal + theme, () -> addPreviousMottos(r, r.previousMottos));
         renderProfileSection("styles", recordsSignature(r.previousStyles) + ":" + r.stylesHasMore + ":" + r.stylesLoading + ":" + r.stylesTotal + theme, () -> {
             if (!r.previousStyles.isEmpty() || r.stylesHasMore || r.stylesLoading) addPreviousStyles(r);
         });
@@ -7342,7 +7470,8 @@ public class MainActivity extends Activity {
         }
         if (valid.isEmpty()) return;
 
-        LinearLayout c = sectionCard(t(R.string.previous_mottos), valid.size(), true);
+        LinearLayout c = sectionCard(t(R.string.previous_mottos), Math.max(valid.size(), profileResult == null ? 0 : profileResult.mottosTotal), true);
+        if (profileResult != null && profileResult.mottosLoading) c.addView(centerNote(t(R.string.loading_mottos_history)));
 
         FrameLayout slideHost = new FrameLayout(this);
         slideHost.setClipChildren(false);
@@ -7401,7 +7530,10 @@ public class MainActivity extends Activity {
                 dlp.rightMargin = dp(3);
                 dot.setLayoutParams(dlp);
                 dot.setOnClickListener(v -> {
-                    if (dotIndex == index[0]) return;
+                    if (dotIndex == index[0]) {
+                        if (profileResult != null && dotIndex >= valid.size() - 3) loadMoreMottos(profileResult);
+                        return;
+                    }
                     animationDirection[0] = dotIndex > index[0] ? 1 : -1;
                     index[0] = dotIndex;
                     syncPreviousMottoSlideIndex(profileResult, index[0]);
@@ -7422,6 +7554,9 @@ public class MainActivity extends Activity {
                 });
             }
             animationDirection[0] = 0;
+            if (profileResult != null && profileResult.mottosHasMore && index[0] >= valid.size() - 3) {
+                uiHandler.post(() -> loadMoreMottos(profileResult));
+            }
         };
 
         slideHost.setOnClickListener(view -> copyMissionText(firstText(valid.get(index[0]), "text", "motto", "mission")));
@@ -7457,6 +7592,8 @@ public class MainActivity extends Activity {
                             animationDirection[0] = -1;
                             index[0]--;
                             render[0].run();
+                        } else if (totalDx < 0 && profileResult != null) {
+                            loadMoreMottos(profileResult);
                         }
                     } else if (event.getActionMasked() == MotionEvent.ACTION_UP
                             && Math.abs(totalDx) < dp(10) && Math.abs(totalDy) < dp(10)) {
@@ -9388,7 +9525,7 @@ public class MainActivity extends Activity {
         TextView label = text(tr(R.string.page_of, page[0], totalPages), 16, lightTheme ? Color.rgb(33,33,33) : Color.WHITE, true); label.setGravity(Gravity.CENTER); content.addView(label, lp(-1,-2,0,6,0,12));
         LinearLayout p = new LinearLayout(this); p.setGravity(Gravity.CENTER); p.setOrientation(LinearLayout.HORIZONTAL); content.addView(p, lp(-1, dp(58), 0, 0, 0, 0));
         TextView prev = pageButton("‹", page[0] > 1); p.addView(prev);
-        TextView one = pageButton(String.valueOf(page[0]), true); one.setBackground(grad(dp(14), purple2, purple)); p.addView(one);
+        TextView one = pageButton(String.valueOf(page[0]), true); one.setTextColor(Color.WHITE); one.setBackground(grad(dp(14), purple2, purple)); p.addView(one);
         TextView next = pageButton("›", page[0] < totalPages); p.addView(next);
         prev.setOnClickListener(v -> {
             if (page[0] > 1) {
@@ -12853,12 +12990,18 @@ public class MainActivity extends Activity {
     }
 
     private boolean isPrimaryProfileProgressVisible() {
+        if (mainScroll == null || mainScroll.getScrollY() <= dp(2)) {
+            primaryProgressWasVisible = true;
+            return true;
+        }
         View anchor = profilePrimaryProgressAnchor;
-        if (anchor == null || mainScroll == null || !anchor.isShown()) return false;
+        if (anchor == null || anchor.getParent() == null || anchor.isLayoutRequested() || anchor.getHeight() == 0) {
+            return primaryProgressWasVisible;
+        }
         Rect visible = new Rect();
-        if (!anchor.getGlobalVisibleRect(visible)) return false;
-        int required = Math.max(dp(4), (int)(anchor.getHeight() * 0.35f));
-        return visible.height() >= required && visible.width() > 0;
+        primaryProgressWasVisible = anchor.isShown() && anchor.getGlobalVisibleRect(visible)
+                && visible.height() > 0 && visible.width() > 0;
+        return primaryProgressWasVisible;
     }
 
     private void updateFloatingProfileProgressIndicators() {
@@ -13009,7 +13152,7 @@ public class MainActivity extends Activity {
                     try { v.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS); } catch (Exception ignored) {}
                     scrollMainToTop(true);
                 };
-                uiHandler.postDelayed(holdTask[0], 1500L);
+                uiHandler.postDelayed(holdTask[0], 1000L);
                 return true;
             }
             if (action == MotionEvent.ACTION_MOVE) {
@@ -16169,10 +16312,14 @@ public class MainActivity extends Activity {
     }
 
     private void pushCurrentProfileToHistory(String nextNickKey) {
+        pushCurrentProfileToHistory(nextNickKey, currentHotelKey);
+    }
+
+    private void pushCurrentProfileToHistory(String nextNickKey, String nextHotel) {
         if (activeRenderedProfile == null || activeRenderedProfile.name == null || activeRenderedProfile.name.trim().isEmpty()) return;
         String currentId = normalizeNickKey(activeRenderedProfile.uniqueId);
         String currentName = normalizeNickKey(activeRenderedProfile.name);
-        if (normalizeHotelKey(activeRenderedProfile.hotelKey).equals(currentHotelKey) && ((!currentId.isEmpty() && currentId.equals(nextNickKey)) || (!currentName.isEmpty() && currentName.equals(nextNickKey)))) return;
+        if (normalizeHotelKey(activeRenderedProfile.hotelKey).equals(normalizeHotelKey(nextHotel)) && ((!currentId.isEmpty() && currentId.equals(nextNickKey)) || (!currentName.isEmpty() && currentName.equals(nextNickKey)))) return;
         if (!profileHistory.isEmpty()) {
             ProfileResult last = profileHistory.peekLast();
             if (sameProfile(last, activeRenderedProfile)) return;
@@ -16183,6 +16330,7 @@ public class MainActivity extends Activity {
 
     private boolean sameProfile(ProfileResult a, ProfileResult b) {
         if (a == null || b == null) return false;
+        if (!normalizeHotelKey(a.hotelKey).equals(normalizeHotelKey(b.hotelKey))) return false;
         String aId = normalizeNickKey(a.uniqueId);
         String bId = normalizeNickKey(b.uniqueId);
         if (!aId.isEmpty() && !bId.isEmpty()) return aId.equals(bId);
@@ -16216,6 +16364,7 @@ public class MainActivity extends Activity {
             inlineProgressMessage = "";
             ProfileResult previous = profileHistory.removeLast();
             previous.searchToken = activeSearchToken;
+            previous.photosLoading = previous.stylesLoading = previous.mottosLoading = previous.friendsLoading = previous.removedFriendsLoading = previous.badgesLoading = false;
             activeProfileSource = copyProfileResult(previous);
             String previousHotel = normalizeHotelKey(previous.hotelKey);
             if (!previousHotel.isEmpty()) {
@@ -16228,12 +16377,45 @@ public class MainActivity extends Activity {
             setSearchTextProgrammatically(previous.name == null ? "" : previous.name);
             clearSearchFocus();
             setStatusMessage("");
-            previous.photosLoading = previous.stylesLoading = previous.friendsLoading = previous.removedFriendsLoading = previous.badgesLoading = false;
             renderProfile(previous);
             friendPresence.refreshNow();
             return true;
         }
-        return false;
+        showExitConfirmation();
+        return true;
+    }
+
+    private void showExitConfirmation() {
+        if (exitConfirmationDialog != null && exitConfirmationDialog.isShowing()) return;
+        final Dialog dialog = new Dialog(this);
+        exitConfirmationDialog = dialog;
+        LinearLayout body = card(dp(24));
+        body.setPadding(dp(24), dp(24), dp(24), dp(20));
+        TextView title = text(t(R.string.exit_title), 22, primaryTextColor(), true);
+        body.addView(title, lp(-1, -2, 0, 0, 0, 12));
+        TextView message = text(t(R.string.exit_message), 14, themeMutedColor(), false);
+        body.addView(message, lp(-1, -2, 0, 0, 0, 24));
+        LinearLayout actions = new LinearLayout(this);
+        actions.setOrientation(LinearLayout.HORIZONTAL);
+        TextView cancel = text(t(R.string.cancel), 15, primaryTextColor(), true);
+        cancel.setGravity(Gravity.CENTER);
+        cancel.setBackground(round(subtleSurfaceColor(), dp(14), dialogStrokeColor(), 1));
+        actions.addView(cancel, new LinearLayout.LayoutParams(0, dp(48), 1));
+        TextView exit = dialogButton(t(R.string.exit_action));
+        LinearLayout.LayoutParams ep = new LinearLayout.LayoutParams(0, dp(48), 1);
+        ep.leftMargin = dp(12);
+        actions.addView(exit, ep);
+        body.addView(actions, lp(-1, dp(48), 0, 0, 0, 0));
+        dialog.setContentView(body);
+        cancel.setOnClickListener(v -> dialog.dismiss());
+        exit.setOnClickListener(v -> { dialog.dismiss(); finishAndRemoveTask(); });
+        dialog.setOnDismissListener(v -> { if (exitConfirmationDialog == dialog) exitConfirmationDialog = null; });
+        showTrackedDialog(dialog);
+        Window window = dialog.getWindow();
+        if (window != null) {
+            window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            window.setLayout(Math.min(dp(420), getResources().getDisplayMetrics().widthPixels - dp(40)), -2);
+        }
     }
 
     private TextView dialogButton(String label) {
@@ -16364,14 +16546,18 @@ public class MainActivity extends Activity {
                 boolean hadPrevious = oldStored != null || oldMemory != null;
                 boolean wasOnline = oldStored != null ? oldStored.booleanValue() : Boolean.TRUE.equals(oldMemory);
 
-                Boolean old = favoriteOnlineStates.put(key, st.online);
+                Boolean old = st.presenceKnown || st.privateProfile
+                        ? favoriteOnlineStates.put(key, st.online) : favoriteOnlineStates.remove(key);
                 favoriteStatusCache.put(key, st);
                 if (!newKey.isEmpty()) {
-                    favoriteOnlineStates.put(newKey, st.online);
+                    if (st.presenceKnown || st.privateProfile) favoriteOnlineStates.put(newKey, st.online);
+                    else favoriteOnlineStates.remove(newKey);
                     favoriteStatusCache.put(newKey, st);
                 }
-                setStoredFavoriteOnlineState(key, st.online);
-                if (!newKey.isEmpty()) setStoredFavoriteOnlineState(newKey, st.online);
+                if (st.presenceKnown || st.privateProfile) {
+                    setStoredFavoriteOnlineState(key, st.online);
+                    if (!newKey.isEmpty()) setStoredFavoriteOnlineState(newKey, st.online);
+                }
                 cacheFavoriteHeadAsync(st);
                 if (old == null || old.booleanValue() != st.online) changedAny = true;
 
@@ -16379,7 +16565,11 @@ public class MainActivity extends Activity {
                     runOnUiThread(() -> showFavoriteOnlineSystemNotification(st));
                 }
             }
-            if (changedAny || !snapshot.isEmpty()) runOnUiThread(() -> updateFavoriteOnlineBadgeText());
+            if (changedAny || !snapshot.isEmpty()) runOnUiThread(() -> {
+                updateFavoriteOnlineBadgeText();
+                if (activeFavoriteProfilesDialog != null && activeFavoriteProfilesDialog.isShowing()
+                        && activeFavoritesRender != null) activeFavoritesRender.run();
+            });
             } finally { FavoriteRefreshCoordinator.checks.finish(); }
         }); } catch (java.util.concurrent.RejectedExecutionException cancelled) {
             FavoriteRefreshCoordinator.checks.finish();
@@ -16426,15 +16616,20 @@ public class MainActivity extends Activity {
         if (result.profile == null) return null;
         JSONObject obj = result.profile;
         boolean privateProfile = !obj.optBoolean("profileVisible", true);
-        if (result.state == PresenceRepository.State.UNKNOWN && !privateProfile) return null;
+
         FavoriteStatus status = new FavoriteStatus();
         status.nick = obj.optString("name", item.nick);
         status.uniqueId = obj.optString("uniqueId", item.uniqueId);
         status.figure = obj.optString("figureString", item.figure);
         status.hotelKey = normalizeHotelKey(item.hotelKey);
-        status.online = !privateProfile && result.state == PresenceRepository.State.ONLINE;
         status.privateProfile = privateProfile;
-        status.lastAccess = firstText(obj, "lastAccessTime", "lastLoginTime", "lastOnline", "lastVisit");
+        status.presenceKnown = result.state != PresenceRepository.State.UNKNOWN
+                && !Boolean.FALSE.equals(optBoolNullable(obj, "onlineStatusVisible", "showOnlineStatus"));
+        status.online = !privateProfile && status.presenceKnown && result.state == PresenceRepository.State.ONLINE;
+        status.lastAccess = !privateProfile && status.presenceKnown
+                && !Boolean.FALSE.equals(optBoolNullable(obj, "lastAccessTimeVisible", "showLastAccessTime"))
+                ? firstText(obj, "lastAccessTime", "lastLoginTime", "lastOnline", "lastVisit") : "";
+        status.checkedAtMs = System.currentTimeMillis();
         return status;
     }
 
@@ -16635,7 +16830,7 @@ public class MainActivity extends Activity {
         if (view instanceof TextView) {
             TextView text = (TextView)view;
             text.setTextColor("favorite_presence".equals(text.getTag()) ? accentTextColor()
-                    : privateProfile ? (lightTheme ? Color.rgb(82, 89, 104) : Color.rgb(157, 165, 184)) : primaryTextColor());
+                    : "favorite_last_seen".equals(text.getTag()) ? themeMutedColor() : privateProfile ? (lightTheme ? Color.rgb(82, 89, 104) : Color.rgb(157, 165, 184)) : primaryTextColor());
         }
         if (view instanceof ViewGroup) {
             ViewGroup group = (ViewGroup)view;
@@ -16648,7 +16843,12 @@ public class MainActivity extends Activity {
         FavoriteStatus st = favoriteStatusCache.get(favoriteKey(item));
         if (st != null && st.privateProfile) return 2;
         boolean online = st != null ? st.online : Boolean.TRUE.equals(favoriteOnlineStates.get(favoriteKey(item)));
-        return online ? 0 : 1;
+        return online ? 0 : favoriteLastSeenMillis(item) > 0 ? 1 : 2;
+    }
+
+    private long favoriteLastSeenMillis(ProfileHistoryItem item) {
+        FavoriteStatus status = item == null ? null : favoriteStatusCache.get(favoriteKey(item));
+        return status == null || status.privateProfile || !status.presenceKnown ? 0L : parseHabboTimestampMs(status.lastAccess);
     }
 
     private boolean isFavoriteProfile(ProfileResult r) {
@@ -16692,7 +16892,10 @@ public class MainActivity extends Activity {
         final Dialog dialog = new Dialog(this);
         activeFavoriteProfilesDialog = dialog;
         dialog.setOnDismissListener(ignored -> {
-            if (activeFavoriteProfilesDialog == dialog) activeFavoriteProfilesDialog = null;
+            if (activeFavoriteProfilesDialog == dialog) {
+                activeFavoriteProfilesDialog = null;
+                activeFavoritesRender = null;
+            }
         });
         PullDispatchFrameLayout full = new PullDispatchFrameLayout(this);
         full.setBackground(makeBg());
@@ -16737,10 +16940,13 @@ public class MainActivity extends Activity {
                 int ra = favoriteSortRank(a);
                 int rb = favoriteSortRank(b);
                 if (ra != rb) return Integer.compare(ra, rb);
+                long ta = favoriteLastSeenMillis(a), tb = favoriteLastSeenMillis(b);
+                if (ta != tb) return Long.compare(tb, ta);
                 return String.valueOf(a.nick).compareToIgnoreCase(String.valueOf(b.nick));
             });
             for (ProfileHistoryItem item : sortedFavorites) list.addView(favoriteProfileRow(item, dialog, render[0]));
         };
+        activeFavoritesRender = render[0];
         render[0].run();
         bindFavoritesPullRefresh(full, sv, wrap, favoritesPullIndicator, render[0]);
 
@@ -16871,12 +17077,16 @@ public class MainActivity extends Activity {
                     String oldKey = favoriteKey(item);
                     String newKey = profileIdentityKey(st.hotelKey, st.uniqueId, st.nick);
                     cacheFavoriteHeadAsync(st);
-                    favoriteOnlineStates.put(oldKey, st.online);
+                    if (st.presenceKnown || st.privateProfile) favoriteOnlineStates.put(oldKey, st.online);
+                    else favoriteOnlineStates.remove(oldKey);
                     favoriteStatusCache.put(oldKey, st);
-                    favoriteOnlineStates.put(newKey, st.online);
+                    if (st.presenceKnown || st.privateProfile) favoriteOnlineStates.put(newKey, st.online);
+                    else favoriteOnlineStates.remove(newKey);
                     favoriteStatusCache.put(newKey, st);
-                    setStoredFavoriteOnlineState(oldKey, st.online);
-                    setStoredFavoriteOnlineState(newKey, st.online);
+                    if (st.presenceKnown || st.privateProfile) {
+                        setStoredFavoriteOnlineState(oldKey, st.online);
+                        setStoredFavoriteOnlineState(newKey, st.online);
+                    }
                 } catch(Exception ignored) {}
             }
             runOnUiThread(() -> {
@@ -16922,14 +17132,18 @@ public class MainActivity extends Activity {
     private void updateFavoriteOnlineRowAsync(ProfileHistoryItem item, Runnable refresh) {
         if (item == null) return;
         final String key = favoriteKey(item);
+        FavoriteStatus cached = favoriteStatusCache.get(key);
+        if (cached != null && System.currentTimeMillis() - cached.checkedAtMs < 30_000L) return;
         executor.execute(() -> {
             FavoriteStatus st = fetchFavoriteStatus(item);
             if (st == null) return;
             cacheFavoriteHeadAsync(st);
             FavoriteStatus oldStatus = favoriteStatusCache.put(key, st);
-            Boolean old = favoriteOnlineStates.put(key, st.online);
-            setStoredFavoriteOnlineState(key, st.online);
-            boolean changed = old == null || old.booleanValue() != st.online || oldStatus == null || oldStatus.privateProfile != st.privateProfile;
+            Boolean old = st.presenceKnown || st.privateProfile
+                    ? favoriteOnlineStates.put(key, st.online) : favoriteOnlineStates.remove(key);
+            if (st.presenceKnown || st.privateProfile) setStoredFavoriteOnlineState(key, st.online);
+            boolean changed = old == null || old.booleanValue() != st.online || oldStatus == null || oldStatus.privateProfile != st.privateProfile
+                    || oldStatus.presenceKnown != st.presenceKnown || !oldStatus.lastAccess.equals(st.lastAccess);
             if (changed) {
                 runOnUiThread(() -> { if (refresh != null) refresh.run(); });
             }
@@ -17014,6 +17228,16 @@ public class MainActivity extends Activity {
             LinearLayout.LayoutParams lockParams = new LinearLayout.LayoutParams(dp(14), dp(14));
             lockParams.leftMargin = dp(8);
             hotelLine.addView(lock, lockParams);
+        }
+        if (showOnlineState && !privateFavorite && !onlineFavorite && favoriteLastSeenMillis(item) > 0) {
+            TextView lastSeen = text(niceDate(status.lastAccess), 11, themeMutedColor(), false);
+            lastSeen.setTag("favorite_last_seen");
+            lastSeen.setContentDescription(t(R.string.last_login) + ": " + niceDate(status.lastAccess));
+            lastSeen.setSingleLine(true);
+            lastSeen.setEllipsize(TextUtils.TruncateAt.END);
+            LinearLayout.LayoutParams dateParams = new LinearLayout.LayoutParams(0, -2, 1);
+            dateParams.leftMargin = dp(8);
+            hotelLine.addView(lastSeen, dateParams);
         }
         mid.addView(hotelLine, new LinearLayout.LayoutParams(-1, -2));
         return row;

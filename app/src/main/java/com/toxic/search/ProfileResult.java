@@ -14,7 +14,10 @@ final class ProfileResult {
     ArrayList<JSONObject> previousNames = new ArrayList<>(), previousMottos = new ArrayList<>(), previousStyles = new ArrayList<>(), photos = new ArrayList<>(), friends = new ArrayList<>(), oldFriends = new ArrayList<>(), rooms = new ArrayList<>(), oldRooms = new ArrayList<>(), groups = new ArrayList<>(), selectedBadges = new ArrayList<>(), badges = new ArrayList<>(), badgesWithAchievements = new ArrayList<>();
     ArrayList<JSONObject> allPhotosSource = new ArrayList<>(), allStylesSource = new ArrayList<>();
     int photosNextPage = 0, stylesNextPage = 0, photosTotal = 0, stylesTotal = 0;
-    int stylesRemoteNextPage = 0;
+    int stylesRemoteNextPage = 0, photosRemoteNextPage = 0, mottosNextPage = 0, mottosTotal = 0;
+    boolean photosRemotePaged = false, mottosHasMore = false;
+    volatile boolean mottosLoading = false;
+    volatile long mottosRetryAfterMs = 0L;
     volatile long photosAutoLoadRetryAfterMs = 0L, stylesAutoLoadRetryAfterMs = 0L;
     int removedFriendsNextPage = 0, removedFriendsTotal = 0, friendsNextPage = 0, friendsTotal = 0, friendsTabPage = 1;
     int previousMottosSlideIndex = 0;

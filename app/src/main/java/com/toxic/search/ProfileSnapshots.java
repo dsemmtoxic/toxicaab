@@ -88,6 +88,13 @@ final class ProfileSnapshots {
         c.stylesFromComplement = src.stylesFromComplement;
         c.stylesRemotePaged = src.stylesRemotePaged;
         c.friendsDatesReady = src.friendsDatesReady;
+        c.photosRemoteNextPage = src.photosRemoteNextPage;
+        c.photosRemotePaged = src.photosRemotePaged;
+        c.mottosNextPage = src.mottosNextPage;
+        c.mottosTotal = src.mottosTotal;
+        c.mottosHasMore = src.mottosHasMore;
+        c.mottosLoading = src.mottosLoading;
+        c.mottosRetryAfterMs = src.mottosRetryAfterMs;
         c.snapshotVersion = versions.incrementAndGet();
         return c;
     }

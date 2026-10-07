@@ -84,6 +84,13 @@ final class ProfileStateMerger {
         target.stylesFromComplement = incoming.stylesFromComplement;
         target.stylesRemotePaged = incoming.stylesRemotePaged;
         target.friendsDatesReady = incoming.friendsDatesReady;
+        target.photosRemoteNextPage = incoming.photosRemoteNextPage;
+        target.photosRemotePaged = incoming.photosRemotePaged;
+        target.mottosNextPage = incoming.mottosNextPage;
+        target.mottosTotal = incoming.mottosTotal;
+        target.mottosHasMore = incoming.mottosHasMore;
+        target.mottosLoading = incoming.mottosLoading;
+        target.mottosRetryAfterMs = incoming.mottosRetryAfterMs;
         target.friendsTabPage = friendsPage;
         target.badgesTabPage = badgesPage;
         target.previousMottosSlideIndex = mottoIndex;
