@@ -273,4 +273,11 @@
     <string name="color_invalid_hex">Usa sei cifre: #RRGGBB</string>
     <string name="text_copied">Testo copiato</string>
     <string name="load_complete">Pronto</string>
+    <string name="loading_names_history">Caricamento dei nomi precedenti...</string>
+    <string name="loading_mottos_history">Caricamento delle missioni precedenti...</string>
+    <string name="loading_looks_history">Caricamento dei look precedenti...</string>
+    <string name="loading_photos">Caricamento delle foto...</string>
+    <string name="exit_title">Uscire da Toxic?</string>
+    <string name="exit_message">Chiudere l’app?</string>
+    <string name="exit_action">Esci</string>
 </resources>
