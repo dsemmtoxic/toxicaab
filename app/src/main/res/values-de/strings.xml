@@ -273,4 +273,11 @@
     <string name="color_invalid_hex">Sechs Stellen verwenden: #RRGGBB</string>
     <string name="text_copied">Text kopiert</string>
     <string name="load_complete">Fertig</string>
+    <string name="loading_names_history">Namensverlauf wird geladen...</string>
+    <string name="loading_mottos_history">Frühere Mottos werden geladen...</string>
+    <string name="loading_looks_history">Frühere Looks werden geladen...</string>
+    <string name="loading_photos">Fotos werden geladen...</string>
+    <string name="exit_title">Toxic verlassen?</string>
+    <string name="exit_message">App schließen?</string>
+    <string name="exit_action">Beenden</string>
 </resources>
