@@ -7478,9 +7478,47 @@ public class MainActivity extends Activity {
         slideHost.setClipToPadding(false);
         c.addView(slideHost, lp(-1, -2, 0, 0, 0, 8));
 
-        HorizontalScrollView dotsScroll = new HorizontalScrollView(this);
+        HorizontalScrollView dotsScroll = new HorizontalScrollView(this) {
+            @Override
+            protected void onMeasure(int widthMeasureSpec, int heightMeasureSpec) {
+                LinearLayout row = (LinearLayout) getChildAt(0);
+                if (row != null && row.getChildCount() > 0
+                        && MeasureSpec.getMode(widthMeasureSpec) != MeasureSpec.UNSPECIFIED) {
+                    int available = MeasureSpec.getSize(widthMeasureSpec)
+                            - getPaddingLeft() - getPaddingRight()
+                            - row.getPaddingLeft() - row.getPaddingRight();
+                    for (int i = 0; i < row.getChildCount(); i++) {
+                        available -= row.getChildAt(i).getLayoutParams().width;
+                    }
+                    int gap = Math.max(0, Math.min(dp(6), available / row.getChildCount()));
+                    for (int i = 0; i < row.getChildCount(); i++) {
+                        LinearLayout.LayoutParams params = (LinearLayout.LayoutParams)
+                                row.getChildAt(i).getLayoutParams();
+                        params.leftMargin = gap / 2;
+                        params.rightMargin = gap - params.leftMargin;
+                    }
+                }
+                super.onMeasure(widthMeasureSpec, heightMeasureSpec);
+            }
+
+            @Override
+            protected void onLayout(boolean changed, int left, int top, int right, int bottom) {
+                super.onLayout(changed, left, top, right, bottom);
+                LinearLayout row = (LinearLayout) getChildAt(0);
+                if (row == null) return;
+                int viewport = getWidth() - getPaddingLeft() - getPaddingRight();
+                int maxScroll = Math.max(0, row.getWidth() - viewport);
+                for (int i = 0; i < row.getChildCount(); i++) {
+                    View dot = row.getChildAt(i);
+                    if (!dot.isSelected()) continue;
+                    int target = dot.getLeft() + dot.getWidth() / 2 - viewport / 2;
+                    scrollTo(Math.max(0, Math.min(maxScroll, target)), 0);
+                    break;
+                }
+            }
+        };
         dotsScroll.setHorizontalScrollBarEnabled(false);
-        dotsScroll.setFillViewport(valid.size() <= 18);
+        dotsScroll.setFillViewport(true);
         LinearLayout dots = new LinearLayout(this);
         dots.setOrientation(LinearLayout.HORIZONTAL);
         dots.setGravity(Gravity.CENTER);
@@ -7514,10 +7552,13 @@ public class MainActivity extends Activity {
             }
 
             dots.removeAllViews();
-            for (int i = 0; i < valid.size(); i++) {
+            int dotCount = Math.min(24, valid.size());
+            int firstDot = Math.max(0, Math.min(index[0] - dotCount / 2, valid.size() - dotCount));
+            for (int i = firstDot; i < firstDot + dotCount; i++) {
                 final int dotIndex = i;
                 View dot = new View(this);
                 boolean active = i == index[0];
+                dot.setSelected(active);
                 dot.setBackground(round(
                         active ? purple : mixColor(purple, Color.BLACK, .32f),
                         dp(999),
@@ -7542,17 +7583,6 @@ public class MainActivity extends Activity {
                 dots.addView(dot);
             }
             syncPreviousMottoSlideIndex(profileResult, index[0]);
-            if (valid.size() > 18) {
-                dotsScroll.post(() -> {
-                    View activeDot = index[0] < dots.getChildCount()
-                            ? dots.getChildAt(index[0]) : null;
-                    if (activeDot != null) {
-                        int target = Math.max(0,
-                                activeDot.getLeft() - (dotsScroll.getWidth() - activeDot.getWidth()) / 2);
-                        dotsScroll.smoothScrollTo(target, 0);
-                    }
-                });
-            }
             animationDirection[0] = 0;
             if (profileResult != null && profileResult.mottosHasMore && index[0] >= valid.size() - 3) {
                 uiHandler.post(() -> loadMoreMottos(profileResult));
