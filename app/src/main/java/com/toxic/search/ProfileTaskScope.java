@@ -23,12 +23,16 @@ final class ProfileTaskScope extends AbstractExecutorService {
 
     @Override public void execute(Runnable command) {
         FutureTask<Void> task = new FutureTask<Void>(command, null) {
+            @Override public boolean cancel(boolean mayInterruptIfRunning) {
+                // Settle the submitted future before interrupting its worker;
+                // otherwise it may finish exceptionally before cancellation.
+                if (command instanceof java.util.concurrent.Future<?>) {
+                    ((java.util.concurrent.Future<?>) command).cancel(mayInterruptIfRunning);
+                }
+                return super.cancel(mayInterruptIfRunning);
+            }
             @Override protected void done() {
                 synchronized (tasks) { tasks.remove(this); }
-                // Wake callers awaiting a submitted task that never got to start.
-                if (isCancelled() && command instanceof java.util.concurrent.Future<?>) {
-                    ((java.util.concurrent.Future<?>) command).cancel(true);
-                }
             }
         };
         synchronized (tasks) {
