@@ -1,6 +1,7 @@
 package com.toxic.search;
 
 import android.view.View;
+import android.os.Build;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import java.util.LinkedHashMap;
@@ -19,7 +20,7 @@ final class ProfileSectionsView {
     ProfileSectionsView(LinearLayout root) {
         this.root = root;
         root.removeAllViews();
-        for (String key : new String[]{"progress", "header", "names", "mottos", "styles", "photos",
+        for (String key : new String[]{"progress", "header", "selected", "names", "mottos", "styles", "photos",
                 "stats", "friends", "rooms", "groups", "badges"}) {
             LinearLayout view = new LinearLayout(root.getContext());
             view.setOrientation(LinearLayout.VERTICAL);
@@ -30,6 +31,8 @@ final class ProfileSectionsView {
     }
 
     boolean owns(LinearLayout view) { return root == view; }
+    void beginUpdate() { if (Build.VERSION.SDK_INT >= 29) root.suppressLayout(true); }
+    void endUpdate() { if (Build.VERSION.SDK_INT >= 29) root.suppressLayout(false); }
 
     void render(String key, String signature, Builder builder) {
         Slot slot = slots.get(key);

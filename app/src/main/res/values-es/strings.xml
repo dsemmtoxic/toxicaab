@@ -73,7 +73,7 @@
     <string name="description">Descripción</string>
     <string name="created">Creado</string>
     <string name="code">Código</string>
-    <string name="owner">Dueño</string>
+    <string name="owner">Propietario</string>
     <string name="room">Sala</string>
     <string name="date">Fecha</string>
     <string name="likes">Me gusta</string>
@@ -280,4 +280,26 @@
     <string name="exit_title">¿Salir de Toxic?</string>
     <string name="exit_message">¿Cerrar la aplicación?</string>
     <string name="exit_action">Salir</string>
+    <string name="next_level">Siguiente nivel</string>
+    <string name="room_photos">Fotos de la sala</string>
+    <string name="photo_author">Autor</string>
+    <string name="room_photos_empty">No se encontraron fotos en esta sala.</string>
+    <string name="room_photos_failed">No se pudieron cargar las fotos.</string>
+    <string name="favorite_time_ago">hace %1$s %2$s</string>
+    <string name="photo_show_more">Mostrar más</string>
+    <string name="photo_show_less">Mostrar menos</string>
+    <string name="room_photos_empty_title">No se encontraron fotos</string>
+    <string name="item_owners">Usuarios con este visual</string>
+    <string name="item_tracked_owners">Usuarios registrados</string>
+    <string name="item_price">Precio</string>
+    <string name="currency_credits">créditos</string>
+    <string name="currency_diamonds">diamantes</string>
+    <string name="currency_duckets">duckets</string>
+    <string name="item_tradeable">Intercambiable</string>
+    <string name="item_limited">Edición limitada</string>
+    <string name="item_bundle_exclusive">Exclusivo de lote</string>
+    <string name="value_yes">Sí</string>
+    <string name="value_no">No</string>
+    <string name="photo_show_likes">Mostrar Me gusta</string>
+    <string name="photo_hide_likes">Ocultar Me gusta</string>
 </resources>

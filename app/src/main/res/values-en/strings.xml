@@ -280,4 +280,26 @@
     <string name="exit_title">Leave Toxic?</string>
     <string name="exit_message">Close the app?</string>
     <string name="exit_action">Exit</string>
+    <string name="next_level">Next level</string>
+    <string name="room_photos">Room photos</string>
+    <string name="photo_author">Author</string>
+    <string name="room_photos_empty">No photos were found in this room.</string>
+    <string name="room_photos_failed">Could not load photos.</string>
+    <string name="favorite_time_ago">%1$s %2$s ago</string>
+    <string name="photo_show_more">Show more</string>
+    <string name="photo_show_less">Show less</string>
+    <string name="room_photos_empty_title">No photos found</string>
+    <string name="item_owners">Users with this look</string>
+    <string name="item_tracked_owners">Tracked owners</string>
+    <string name="item_price">Price</string>
+    <string name="currency_credits">credits</string>
+    <string name="currency_diamonds">diamonds</string>
+    <string name="currency_duckets">duckets</string>
+    <string name="item_tradeable">Tradeable</string>
+    <string name="item_limited">Limited edition</string>
+    <string name="item_bundle_exclusive">Bundle exclusive</string>
+    <string name="value_yes">Yes</string>
+    <string name="value_no">No</string>
+    <string name="photo_show_likes">Show likes</string>
+    <string name="photo_hide_likes">Hide likes</string>
 </resources>

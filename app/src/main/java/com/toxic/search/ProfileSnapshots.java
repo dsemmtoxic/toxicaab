@@ -34,21 +34,21 @@ final class ProfileSnapshots {
         for (Map.Entry<String, JSONObject> e : src.officialBadgeLookup.entrySet()) {
             c.officialBadgeLookup.put(e.getKey(), json(e.getValue()));
         }
-        c.previousNames = list(src.previousNames);
-        c.previousMottos = list(src.previousMottos);
-        c.previousStyles = list(src.previousStyles);
-        c.photos = list(src.photos);
-        c.friends = list(src.friends);
-        c.oldFriends = list(src.oldFriends);
-        c.rooms = list(src.rooms);
-        c.oldRooms = list(src.oldRooms);
-        c.groups = list(src.groups);
-        c.badges = list(src.badges);
-        c.badgesWithAchievements = list(src.badgesWithAchievements);
+        c.previousNames = signedList(src.previousNames, c);
+        c.previousMottos = signedList(src.previousMottos, c);
+        c.previousStyles = signedList(src.previousStyles, c);
+        c.photos = signedList(src.photos, c);
+        c.friends = signedList(src.friends, c);
+        c.oldFriends = signedList(src.oldFriends, c);
+        c.rooms = signedList(src.rooms, c);
+        c.oldRooms = signedList(src.oldRooms, c);
+        c.groups = signedList(src.groups, c);
+        c.badges = signedList(src.badges, c);
+        c.badgesWithAchievements = signedList(src.badgesWithAchievements, c);
         c.totalBadges = src.totalBadges;
-        c.selectedBadges = list(src.selectedBadges);
-        c.allPhotosSource = list(src.allPhotosSource);
-        c.allStylesSource = list(src.allStylesSource);
+        c.selectedBadges = signedList(src.selectedBadges, c);
+        c.allPhotosSource = signedList(src.allPhotosSource, c);
+        c.allStylesSource = signedList(src.allStylesSource, c);
         c.photosNextPage = src.photosNextPage;
         c.stylesNextPage = src.stylesNextPage;
         c.photosTotal = src.photosTotal;
@@ -97,6 +97,19 @@ final class ProfileSnapshots {
         c.mottosRetryAfterMs = src.mottosRetryAfterMs;
         c.snapshotVersion = versions.incrementAndGet();
         return c;
+    }
+
+    private static ArrayList<JSONObject> signedList(ArrayList<JSONObject> values, ProfileResult target) {
+        ArrayList<JSONObject> result = new ArrayList<>();
+        long hash = 1125899906842597L;
+        if (values != null) for (JSONObject value : values) {
+            String encoded = value == null ? null : value.toString();
+            hash = 31L * hash + (encoded == null ? 0 : encoded.hashCode());
+            try { result.add(encoded == null ? null : new JSONObject(encoded)); }
+            catch (JSONException error) { throw new IllegalStateException("Invalid profile snapshot", error); }
+        }
+        target.recordSignatures.put(result, result.size() + ":" + Long.toHexString(hash));
+        return result;
     }
 
     static JSONObject json(JSONObject value) {

@@ -73,7 +73,7 @@
     <string name="description">Beschreibung</string>
     <string name="created">Erstellt</string>
     <string name="code">Code</string>
-    <string name="owner">Besitzer</string>
+    <string name="owner">Eigentümer</string>
     <string name="room">Raum</string>
     <string name="date">Datum</string>
     <string name="likes">Likes</string>
@@ -280,4 +280,26 @@
     <string name="exit_title">Toxic verlassen?</string>
     <string name="exit_message">App schließen?</string>
     <string name="exit_action">Beenden</string>
+    <string name="next_level">Nächstes Level</string>
+    <string name="room_photos">Raumfotos</string>
+    <string name="photo_author">Autor</string>
+    <string name="room_photos_empty">In diesem Raum wurden keine Fotos gefunden.</string>
+    <string name="room_photos_failed">Fotos konnten nicht geladen werden.</string>
+    <string name="favorite_time_ago">vor %1$s %2$s</string>
+    <string name="photo_show_more">Mehr anzeigen</string>
+    <string name="photo_show_less">Weniger anzeigen</string>
+    <string name="room_photos_empty_title">Keine Fotos gefunden</string>
+    <string name="item_owners">Besitzer dieses Looks</string>
+    <string name="item_tracked_owners">Erfasste Besitzer</string>
+    <string name="item_price">Preis</string>
+    <string name="currency_credits">Taler</string>
+    <string name="currency_diamonds">Diamanten</string>
+    <string name="currency_duckets">Duckets</string>
+    <string name="item_tradeable">Handelbar</string>
+    <string name="item_limited">Limitierte Edition</string>
+    <string name="item_bundle_exclusive">Paketexklusiv</string>
+    <string name="value_yes">Ja</string>
+    <string name="value_no">Nein</string>
+    <string name="photo_show_likes">Likes anzeigen</string>
+    <string name="photo_hide_likes">Likes ausblenden</string>
 </resources>

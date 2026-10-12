@@ -54,7 +54,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class MainActivity extends Activity {
     private static final String PROFILE_API = "https://atoxic.com.br/api.php";
     private static final String HABBODEX_BASE = "https://habbodex.com/api/v1/habboinfo";
+    private static final String HABBODEX_ROOMINFO_API = "https://habbodex.com/api/v1/roominfo";
     private static final String HABBODEX_FURNIDEX_API = "https://habbodex.com/api/v1/furnidex/furni/from-figure-string";
+    private final ConcurrentHashMap<String, JSONObject> clothingDetailsCache = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Long> clothingDetailsFetched = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Long> clothingDetailsFailed = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, FutureTask<JSONObject>> clothingDetailsRequests = new ConcurrentHashMap<>();
     private static final String APP_VERSION = BuildConfig.VERSION_NAME;
     private static final long PROFILE_MIN_LOADING_MS = 0L;
     // Cópias exatas dos ícones atualmente usados pelo iframe do HabboNews.
@@ -257,6 +262,7 @@ public class MainActivity extends Activity {
     private volatile boolean profileProgressFinishing;
     private float displayedProfileProgressPct;
     private ValueAnimator profileProgressAnimator;
+    private float profileProgressTarget;
     private final WeakHashMap<View, Boolean> profileProgressFills = new WeakHashMap<>();
     private final WeakHashMap<TextView, Boolean> profileProgressLabels = new WeakHashMap<>();
     // Em aparelhos mais fracos, várias respostas progressivas podem chegar quase
@@ -268,6 +274,7 @@ public class MainActivity extends Activity {
     private long lastProgressiveRenderAtMs = 0L;
     private ProfileResult pendingProgressiveSnapshot = null;
     private int pendingProgressiveToken = 0;
+    private long progressivePublishGeneration;
     private volatile ProfileResult activeRenderedProfile = null;
     private ProfileSectionsView profileSectionsView;
     private String renderedSectionsKey = "";
@@ -1494,7 +1501,7 @@ public class MainActivity extends Activity {
     @Override protected void onDestroy() {
         activityDestroyed = true;
         if (profileProgressAnimator != null) profileProgressAnimator.cancel();
-        if (activePhotoViewer != null) activePhotoViewer.dialog.dismiss();
+        dismissAppDialogs();
 
         cancelTutorialPulseAnimation();
         stopAccessGateMonitoring();
@@ -3951,10 +3958,12 @@ public class MainActivity extends Activity {
     private int beginProfileRequest() {
         final int requestToken = ++activeSearchToken;
         primaryProgressWasVisible = true;
+        for (RoomPhotoGallerySession gallery : new ArrayList<>(roomPhotoGalleries)) gallery.dialog.dismiss();
         if (activePhotoViewer != null) activePhotoViewer.dialog.dismiss();
         if (profileProgressAnimator != null) profileProgressAnimator.cancel();
         profileProgressAnimator = null;
         displayedProfileProgressPct = 0;
+        profileProgressTarget = 0;
         synchronized (profileProgressLock) {
             profileProgressFinishing = false;
             profileSectionTaskCount = 0;
@@ -4008,14 +4017,21 @@ public class MainActivity extends Activity {
             boolean preferUniqueId
     ) {
         if (!isActiveToken(token) || source == null) return;
+        executor.execute(() -> {
+            final ProfileResult snapshot;
+            synchronized (source) {
+                reconcileProfileSources(source);
+                enrichPhotoRoomInfo(source);
+                snapshot = copyProfileResult(source);
+            }
+            runOnUiThread(() -> finishInitialProfileSnapshot(snapshot, source, token, preferUniqueId));
+        });
+    }
+
+    private void finishInitialProfileSnapshot(ProfileResult snapshot, ProfileResult source, int token, boolean preferUniqueId) {
+        if (!isActiveToken(token)) return;
         searchInProgress = false;
         activeSearchNick = "";
-        ProfileResult snapshot;
-        synchronized (source) {
-            reconcileProfileSources(source);
-            enrichPhotoRoomInfo(source);
-            snapshot = copyProfileResult(source);
-        }
 
         if (profileSectionsInProgress) {
             if (inlineProgressPct <= 0) inlineProgressPct = 8;
@@ -4044,6 +4060,7 @@ public class MainActivity extends Activity {
         currentLoadedNick = normalizeNickKey(loadedReference);
         hidePullRefreshIndicator();
         maybeShowProfileFeaturesTutorial();
+        publishProgressiveProfile(source, token, 0L);
         if (profileProgressFinishing && displayedProfileProgressPct >= 99.9f) finishProfileProgressAnimation(token);
         uiHandler.post(this::openPendingNotificationProfile);
     }
@@ -5416,14 +5433,10 @@ public class MainActivity extends Activity {
         if (firstRenderReleaseAt > 0L
                 && SystemClock.elapsedRealtime() < firstRenderReleaseAt) return;
 
-        final ProfileResult snapshot;
-        synchronized (source) {
-            snapshot = copyProfileResult(source);
-        }
-
         long delay;
         synchronized (progressiveRenderLock) {
-            pendingProgressiveSnapshot = snapshot;
+            pendingProgressiveSnapshot = source;
+            progressivePublishGeneration++;
             pendingProgressiveToken = token;
             if (progressiveRenderScheduled) return;
             long elapsed = SystemClock.elapsedRealtime() - lastProgressiveRenderAtMs;
@@ -5431,25 +5444,41 @@ public class MainActivity extends Activity {
             progressiveRenderScheduled = true;
         }
 
-        uiHandler.postDelayed(() -> {
+        uiHandler.postDelayed(() -> executor.execute(() -> {
             final ProfileResult pending;
             final int pendingToken;
+            final long generation;
             synchronized (progressiveRenderLock) {
                 pending = pendingProgressiveSnapshot;
                 pendingToken = pendingProgressiveToken;
-                pendingProgressiveSnapshot = null;
-                progressiveRenderScheduled = false;
-                lastProgressiveRenderAtMs = SystemClock.elapsedRealtime();
+                generation = progressivePublishGeneration;
             }
-            if (pending == null || !isActiveToken(pendingToken)
-                    || searchInProgress || activeRenderedProfile == null) return;
-            if (!sameProfile(activeRenderedProfile, pending)
-                    || !normalizeHotelKey(activeRenderedProfile.hotelKey).equals(
-                            normalizeHotelKey(pending.hotelKey)
-                    )) return;
-            renderProfile(pending);
-
-        }, delay);
+            if (pending == null || !isActiveToken(pendingToken)) {
+                synchronized (progressiveRenderLock) { progressiveRenderScheduled = false; }
+                return;
+            }
+            final ProfileResult snapshot;
+            synchronized (pending) { snapshot = copyProfileResult(pending); }
+            runOnUiThread(() -> {
+                final boolean newer;
+                synchronized (progressiveRenderLock) {
+                    progressiveRenderScheduled = false;
+                    lastProgressiveRenderAtMs = SystemClock.elapsedRealtime();
+                    newer = progressivePublishGeneration != generation;
+                    if (!newer) pendingProgressiveSnapshot = null;
+                }
+                if (isActiveToken(pendingToken) && !searchInProgress && activeRenderedProfile != null
+                        && sameProfile(activeRenderedProfile, snapshot)
+                        && normalizeHotelKey(activeRenderedProfile.hotelKey).equals(normalizeHotelKey(snapshot.hotelKey))) {
+                    renderProfile(snapshot);
+                }
+                if (newer) {
+                    ProfileResult latest; int latestToken;
+                    synchronized (progressiveRenderLock) { latest=pendingProgressiveSnapshot; latestToken=pendingProgressiveToken; }
+                    publishProgressiveProfile(latest, latestToken, 0L);
+                }
+            });
+        }), delay);
     }
 
     private void applyOfficialProfileData(ProfileResult r, JSONObject profile) {
@@ -7104,9 +7133,13 @@ public class MainActivity extends Activity {
         final boolean unavailable = !profileSectionsInProgress && isHabbodexTemporarilyUnavailable();
         final boolean restricted = r.privateProfile || r.banned;
         final String theme = ":" + lightTheme + ":" + currentProfilePrivate + ":" + appearanceSignature();
-        renderProfileSection("progress", profileSectionsInProgress + ":" + profileProgressFinishing + ":" + inlineProgressPct + ":" + inlineProgressMessage, () -> {
+        profileSectionsView.beginUpdate();
+        try {
+        final boolean showProgress = (profileSectionsInProgress || profileProgressFinishing)
+                && inlineProgressMessage != null && !inlineProgressMessage.isEmpty();
+        renderProfileSection("progress", showProgress + theme, () -> {
             profilePrimaryProgressAnchor = null;
-            if ((profileSectionsInProgress || profileProgressFinishing) && inlineProgressMessage != null && !inlineProgressMessage.isEmpty()) {
+            if (showProgress) {
                 LinearLayout progressCard = loadingProgressCard(inlineProgressMessage, inlineProgressPct);
                 profilePrimaryProgressAnchor = progressCard;
                 progressCard.post(this::updateFloatingProfileProgressIndicators);
@@ -7114,41 +7147,51 @@ public class MainActivity extends Activity {
             }
         });
         renderProfileSection("header", r.name + ":" + r.figure + ":" + r.motto + ":" + r.banned
-                + ":" + recordsSignature(r.selectedBadges) + theme, () -> renderProfileHeader(r));
+                + theme, () -> renderProfileHeader(r));
+        renderProfileSection("selected", recordsSignature(r.selectedBadges) + theme, () -> {
+            selectedBadgesLiveHost = null;
+            selectedBadgesLiveToken = 0;
+            addSelectedBadges(r.selectedBadges);
+        });
         renderProfileSection("names", recordsSignature(r.previousNames) + theme, () -> addPreviousNames(r.previousNames));
         renderProfileSection("mottos", recordsSignature(r.previousMottos) + ":" + r.mottosHasMore + ":" + r.mottosLoading + ":" + r.mottosTotal + theme, () -> addPreviousMottos(r, r.previousMottos));
         renderProfileSection("styles", recordsSignature(r.previousStyles) + ":" + r.stylesHasMore + ":" + r.stylesLoading + ":" + r.stylesTotal + theme, () -> {
-            if (!r.previousStyles.isEmpty() || r.stylesHasMore || r.stylesLoading) addPreviousStyles(r);
+            if (ProfileSectionPolicy.visible(r, "styles") && (!r.previousStyles.isEmpty() || r.stylesHasMore || r.stylesLoading)) addPreviousStyles(r);
         });
         renderProfileSection("photos", recordsSignature(r.photos) + ":" + r.photosHasMore + ":" + r.photosLoading + ":" + r.photosTotal + ":" + unavailable + theme, () -> {
-            if (!r.photos.isEmpty() || r.photosHasMore || r.photosLoading) addPhotos(r);
-            else if (unavailable && restricted) addUnavailableSection(R.string.user_photos);
+            if (ProfileSectionPolicy.visible(r, "photos") && (!r.photos.isEmpty() || r.photosHasMore || r.photosLoading)) addPhotos(r);
         });
-        renderProfileSection("stats", r.online + ":" + r.lastAccess + ":" + r.memberSince + ":" + r.starGems + ":" + r.level + theme, () -> addStats(r));
+        renderProfileSection("stats", r.online + ":" + r.lastAccess + ":" + r.memberSince + ":" + r.starGems + ":" + r.level
+                + ":" + profileLevelPercent(r) + theme, () -> addStats(r));
         renderProfileSection("friends", recordsSignature(r.friends) + ":" + recordsSignature(r.oldFriends)
                 + ":" + r.friendsTotal + ":" + r.removedFriendsTotal + ":" + r.friendsDatesReady
                 + ":" + r.friendsLoading + ":" + r.removedFriendsLoading + ":" + r.removedFriendsDataAvailable
                 + ":" + r.friendsLoadFailed + ":" + r.removedFriendsLoadFailed + ":" + r.friendsHasMore + ":" + r.removedFriendsHasMore + ":" + profileSectionsInProgress
                 + ":" + unavailable + theme, () -> {
+            if (!ProfileSectionPolicy.visible(r, "friends")) return;
             if (r.friendsDatesReady || !r.oldFriends.isEmpty() || r.removedFriendsLoading) addFriendsTabs(r);
-            else if (unavailable) addUnavailableSection(R.string.friends);
+            else if (unavailable && !restricted) addUnavailableSection(R.string.friends);
         });
         renderProfileSection("rooms", recordsSignature(r.rooms) + ":" + unavailable + theme, () -> {
-            if (!r.rooms.isEmpty()) addRoomsTabs(r.rooms);
-            else if (unavailable && restricted) addUnavailableSection(R.string.rooms);
+            if (ProfileSectionPolicy.visible(r, "rooms") && !r.rooms.isEmpty()) addRoomsTabs(r.rooms);
         });
         renderProfileSection("groups", recordsSignature(r.groups) + ":" + unavailable + theme, () -> {
-            if (!r.groups.isEmpty()) addGroups(r.groups);
-            else if (unavailable && restricted) addUnavailableSection(R.string.groups);
+            if (ProfileSectionPolicy.visible(r, "groups") && !r.groups.isEmpty()) addGroups(r.groups);
         });
         renderProfileSection("badges", recordsSignature(r.badgesWithAchievements) + ":" + recordsSignature(r.badges)
                 + ":" + r.badgesLoadFailed + ":" + r.badgesTotal + ":" + r.badgesHasMore + ":" + r.badgesLoading + ":" + r.badgesPagedMode + ":" + profileSectionsInProgress
                 + ":" + unavailable + theme, () -> {
+            if (!ProfileSectionPolicy.visible(r, "badges")) return;
             boolean hasBadges = !r.badgesWithAchievements.isEmpty() || !r.badges.isEmpty();
             boolean known = r.officialProfile != null && hasNamedListDeep(r.officialProfile, "badges");
             if (hasBadges || r.badgesLoading || (profileSectionsInProgress && !r.badgesLoadFailed) || !unavailable) addBadgesSection(r);
             else if (!known) addUnavailableSection(R.string.badges);
         });
+        } finally {
+            r.recordSignatures.clear();
+            profileSectionsView.endUpdate();
+        }
+        updateLoadingSkeletonProgress(activeSearchToken, inlineProgressPct);
         updateFloatingProfileProgressIndicators();
         friendPresence.requestSoon();
         if (anchor != null && mainScroll != null) anchor.restore(mainScroll);
@@ -7166,14 +7209,14 @@ public class MainActivity extends Activity {
 
     private String recordsSignature(ArrayList<JSONObject> records) {
         if (records == null) return "0";
+        String prepared = activeRenderedProfile == null ? null : activeRenderedProfile.recordSignatures.get(records);
+        if (prepared != null) return prepared;
         long hash = 1125899906842597L;
         for (JSONObject record : records) hash = 31L * hash + (record == null ? 0 : record.toString().hashCode());
         return records.size() + ":" + Long.toHexString(hash);
     }
 
     private void renderProfileHeader(ProfileResult r) {
-        selectedBadgesLiveHost = null;
-        selectedBadgesLiveToken = 0;
         profileAvatarTutorialTarget = null;
         profileFavoriteTutorialTarget = null;
         LinearLayout profile = card(dp(26));
@@ -7236,7 +7279,6 @@ public class MainActivity extends Activity {
             badges.addView(profileBadge(t(R.string.profile_private), "lock", red));
         }
 
-        addSelectedBadges(r.selectedBadges);
     }
 
 
@@ -7348,7 +7390,69 @@ public class MainActivity extends Activity {
         wrap.addView(statRow("clock", t(R.string.last_login), niceDate(r.lastAccess), timeAgoText(r.lastAccess)));
         wrap.addView(statRow("calendar", t(R.string.creation), niceDateOnly(r.memberSince), timeAgoText(r.memberSince)));
         wrap.addView(statRow("star", t(R.string.stars), formatNumericText(emptyDash(r.starGems))));
-        wrap.addView(statRow("level", t(R.string.level), formatNumericText(emptyDash(r.level))));
+        LinearLayout level = new LinearLayout(this);
+        level.setOrientation(LinearLayout.VERTICAL);
+        level.addView(statRow("level", t(R.string.level), formatNumericText(emptyDash(r.level))));
+        Double percent = profileLevelPercent(r);
+        if (percent != null) {
+            LevelProgressBar bar = new LevelProgressBar(this, percent.floatValue());
+            bar.setContentDescription(t(R.string.level) + ": " + Math.round(percent) + "%");
+            level.addView(bar, lp(-1, dp(8), 14, 0, 14, 8));
+            LinearLayout caption = new LinearLayout(this);
+            caption.setGravity(Gravity.CENTER_VERTICAL);
+            caption.addView(text(t(R.string.next_level), 11, themeMutedColor(), false), new LinearLayout.LayoutParams(0, -2, 1));
+            caption.addView(text(Math.round(percent) + "%", 11, themeMutedColor(), false));
+            level.addView(caption, lp(-1, -2, 14, 0, 14, 12));
+        }
+        wrap.addView(level);
+    }
+
+    private Double profileLevelPercent(ProfileResult profile) {
+        if (profile == null) return null;
+        for (JSONObject source : new JSONObject[]{profile.officialProfile, profile.habboPublic, profile.dexProfile}) {
+            Double value = levelPercentFromJson(source, profile.level, 0);
+            if (value != null) return value;
+        }
+        return null;
+    }
+
+    private Double levelPercentFromJson(JSONObject source, String level, int depth) {
+        if (source == null || depth > 4) return null;
+        String sourceLevel = firstText(source, "currentLevel", "level");
+        if ((sourceLevel.isEmpty() || sourceLevel.equals(level)) && source.has("currentLevelCompletePercent")) {
+            double percent = source.optDouble("currentLevelCompletePercent", Double.NaN);
+            if (!Double.isNaN(percent) && !Double.isInfinite(percent) && percent >= 0 && percent <= 100) return percent;
+        }
+        for (String key : new String[]{"user", "profile", "habbo", "data"}) {
+            Double value = levelPercentFromJson(source.optJSONObject(key), level, depth + 1);
+            if (value != null) return value;
+        }
+        return null;
+    }
+
+    private final class LevelProgressBar extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final float fraction;
+
+        LevelProgressBar(Context context, float percent) {
+            super(context);
+            fraction = Math.max(0, Math.min(1, percent / 100f));
+        }
+
+        @Override protected void onDraw(Canvas canvas) {
+            float width = getWidth(), height = getHeight(), radius = height / 2f;
+            if (width <= 0 || height <= 0) return;
+            paint.setShader(null);
+            paint.setColor(lightTheme ? Color.argb(28, 0, 0, 0) : Color.argb(30, 255, 255, 255));
+            canvas.drawRoundRect(0, 0, width, height, radius, radius, paint);
+            if (fraction <= 0) return;
+            float filled = width * fraction;
+            paint.setColor(Color.WHITE);
+            paint.setShader(new LinearGradient(0, 0, Math.max(1, filled), 0, purple,
+                    ColorUtils.blendARGB(purple, Color.WHITE, .35f), Shader.TileMode.CLAMP));
+            canvas.drawRoundRect(0, 0, filled, height, radius, radius, paint);
+            paint.setShader(null);
+        }
     }
 
     private LinearLayout statRow(String icon, String label, String value) {
@@ -7416,7 +7520,7 @@ public class MainActivity extends Activity {
             img.setPadding(dp(2), dp(2), dp(2), dp(2));
             cell.addView(img, new FrameLayout.LayoutParams(dp(50), dp(50), Gravity.CENTER));
             if (!code.isEmpty()) loadBadgeImage(cell, img, badgeImageUrl(code));
-            if (isTodayCreationTime(badgeObtainedDate(b))) {
+            if (isRecentCreationTime(badgeObtainedDate(b))) {
                 TextView newBadge = text(newBadgeLabel(), 8, Color.WHITE, true);
                 newBadge.setGravity(Gravity.CENTER);
                 newBadge.setPadding(dp(5), 0, dp(5), 0);
@@ -7895,14 +7999,14 @@ public class MainActivity extends Activity {
 
         executor.execute(() -> {
             try {
-                JSONObject data = unwrap(getJson(habbodexFigureUrl(figure)));
-                final ArrayList<JSONObject> clothes = normalizeClothingEntries(data);
-                enrichClothingEntriesWithHabbonews(clothes, figure);
+                final ArrayList<JSONObject> clothes = clothingEntriesForFigure(figure);
+                enrichClothingEntries(clothes, figure);
                 final ArrayList<JSONObject> visibleClothes = new ArrayList<>();
                 for (JSONObject item : clothes) {
                     if (item != null && !isDefaultClothing(item)) visibleClothes.add(item);
                 }
                 runOnUiThread(() -> {
+                    if (activityDestroyed || !dialog.isShowing()) return;
                     clothesContainer.removeAllViews();
                     if (visibleClothes.isEmpty()) {
                         clothesContainer.addView(mottoItem(t(R.string.no_clothes_found), ""));
@@ -7931,7 +8035,8 @@ public class MainActivity extends Activity {
         String name = clothingName(o, code);
         TextView nm = habboText(name.isEmpty()?t(R.string.item):name, 15, true); nm.setMaxLines(2); nm.setEllipsize(TextUtils.TruncateAt.END); txt.addView(nm);
         String lineCode = clothingLineName(o, code);
-        txt.addView(text(lineCode.isEmpty()?code:lineCode, 13, muted, false));
+        if (!lineCode.isEmpty()) txt.addView(text(lineCode, 13, themeMutedColor(), false));
+        row.setOnClickListener(v -> showClothingDetailsDialog(o));
         return row;
     }
 
@@ -7944,6 +8049,8 @@ public class MainActivity extends Activity {
 
     private String completeClothingName(JSONObject item) {
         if (item == null) return "";
+        String primaryName = ClothingDetails.name(ClothingDetails.primary(item), currentHotelKey);
+        if (!primaryName.isEmpty()) return primaryName;
         String code = firstText(item, "code", "classname", "className", "id");
         String categoryIdentity = normalizeClothingIdentity(clothingLineName(item, ""));
         ArrayList<String> candidates = new ArrayList<>();
@@ -8020,6 +8127,7 @@ public class MainActivity extends Activity {
         if (optBoolAny(item, false, "isDefaultClothing", "defaultClothing", "hidden")) {
             return true;
         }
+        if (ClothingDetails.primary(item) != null || item.optBoolean("_defaultChecked", false)) return false;
         JSONObject classification = habbonewsRarityRecord(clothingFigureCode(item));
         return classification != null && classification.optInt("h", 0) == 1;
     }
@@ -8057,8 +8165,20 @@ public class MainActivity extends Activity {
         }
     }
 
+    private void loadHabbodexClothingImage(ImageView target, String url) {
+        HabbodexImage.register(Glide.get(this));
+        Glide.with(this).load(new HabbodexImage(url, this::fetchHabbodexImage))
+                .diskCacheStrategy(DiskCacheStrategy.DATA).dontAnimate().into(target);
+    }
+
     private boolean setClothingRarityIcon(ImageView view, JSONObject item) {
         if (view == null) return false;
+        String primaryIcon = ClothingDetails.image(item, true);
+        if (!primaryIcon.isEmpty()) {
+            view.clearColorFilter(); view.setAlpha(1f); view.setVisibility(View.VISIBLE);
+            loadHabbodexClothingImage(view, primaryIcon);
+            return true;
+        }
         String iconCode = clothingRarityIconCode(item);
         if (iconCode.isEmpty()) {
             view.setImageDrawable(null);
@@ -8109,6 +8229,8 @@ public class MainActivity extends Activity {
     }
 
     private String clothingLineName(JSONObject o, String fallback) {
+        String primaryCollection = ClothingDetails.collection(ClothingDetails.primary(o),currentHotelKey);
+        if (!primaryCollection.isEmpty()) return primaryCollection;
         String n = "";
         if (o != null) {
             JSONObject line = o.optJSONObject("line");
@@ -8276,6 +8398,7 @@ public class MainActivity extends Activity {
             item.put("_figureCode", code);
             item.put("rarityKnown", true);
             item.put("raritySource", "habbonews-iframe");
+            item.put("_defaultChecked", true);
             item.put("isDefaultClothing", hidden);
             if (!hidden && iconCode.matches("^[A-Za-z0-9]{5,12}$")) {
                 item.put("rarityKey", iconCode);
@@ -8285,6 +8408,144 @@ public class MainActivity extends Activity {
                 item.put("rarityIconUrl", "https://i.imgur.com/" + iconCode + ".gif");
             }
         } catch(Exception ignored) {}
+    }
+
+    private JSONObject fetchClothingDetails(String code) {
+        if (code.isEmpty()) return null;
+        long now=SystemClock.elapsedRealtime();
+        JSONObject cached=clothingDetailsCache.get(code);
+        Long fetched=clothingDetailsFetched.get(code);
+        if(cached!=null && fetched!=null && now-fetched<15*60*1000L) return cached;
+        Long failed=clothingDetailsFailed.get(code);
+        if(failed!=null && now-failed<30_000L)return null;
+        FutureTask<JSONObject> request=new FutureTask<>(() -> {
+            try {
+                JSONObject result=unwrap(getJson(ClothingDetails.API+code));
+                if(!ClothingDetails.valid(result,code)) throw new IOException("Invalid clothing metadata");
+                if(clothingDetailsCache.size()>=256){ clothingDetailsCache.clear(); clothingDetailsFetched.clear(); }
+                clothingDetailsCache.put(code,result); clothingDetailsFetched.put(code,SystemClock.elapsedRealtime());
+                clothingDetailsFailed.remove(code);
+                return result;
+            } catch(Exception unavailable) {
+                if(clothingDetailsFailed.size()>=256)clothingDetailsFailed.clear();
+                clothingDetailsFailed.put(code,SystemClock.elapsedRealtime());
+                return null;
+            }
+        });
+        FutureTask<JSONObject> active=clothingDetailsRequests.putIfAbsent(code,request);
+        if(active==null){ active=request; request.run(); }
+        try { return active.get(); }
+        catch(InterruptedException interrupted){ Thread.currentThread().interrupt(); return null; }
+        catch(Exception unavailable){ return null; }
+        finally { if(active.isDone()) clothingDetailsRequests.remove(code,active); }
+    }
+
+    private ArrayList<JSONObject> clothingEntriesForFigure(String figure) {
+        try {
+            ArrayList<JSONObject> clothes=normalizeClothingEntries(unwrap(getJson(habbodexFigureUrl(figure))));
+            if(!clothes.isEmpty())return clothes;
+        } catch(Exception unavailable) {}
+        ArrayList<JSONObject> fallback=new ArrayList<>();
+        for(Map.Entry<String,String> part:figureCodesBySlot(figure).entrySet()) {
+            try { fallback.add(new JSONObject().put("code",part.getValue()).put("_slot",part.getKey()).put("_figureCode",part.getValue())); }
+            catch(Exception ignored){}
+        }
+        return fallback;
+    }
+
+    private void enrichClothingEntries(ArrayList<JSONObject> clothes,String figure) {
+        HashMap<String,String> parts=figureCodesBySlot(figure);
+        for(JSONObject item:clothes) {
+            if(item==null)continue;
+            String code=ClothingDetails.code(item);
+            JSONObject details=fetchClothingDetails(code);
+            if(details!=null) {
+                try { item.put("_habboDexDetails",details); item.put("raritySource","habbodex"); }
+                catch(Exception ignored){}
+            } else {
+                item.remove("_habboDexDetails");
+                String slot=firstText(item,"_slot","slot","type","partType","category");
+                String part=parts.get(slot);
+                applyHabbonewsRarity(item,part==null?clothingFigureCode(item):part);
+            }
+        }
+    }
+
+    private void appendClothingInformation(LinearLayout target,JSONObject item) {
+        String code=firstText(item,"code","classname","className","id");
+        String name=clothingName(item,code);
+        if(!name.isEmpty())target.addView(visualItemInfoRow(t(R.string.item_name),name));
+        JSONObject data=ClothingDetails.primary(item);
+        String collection=clothingLineName(item,"");
+        if(!collection.isEmpty())target.addView(visualItemInfoRow(t(R.string.collection),collection));
+        if(data==null)return;
+        String description=ClothingDetails.description(data,currentHotelKey);
+        if(!description.isEmpty())target.addView(visualItemInfoRow(t(R.string.description),description));
+        long owners=ClothingDetails.ownerCount(data,currentHotelKey,false);
+        long tracked=ClothingDetails.ownerCount(data,currentHotelKey,true);
+        if(owners>=0)target.addView(visualItemInfoRow(t(R.string.item_owners),formatNumericText(String.valueOf(owners))));
+        else if(tracked>=0)target.addView(visualItemInfoRow(t(R.string.item_tracked_owners),formatNumericText(String.valueOf(tracked))));
+        JSONArray prices=ClothingDetails.prices(data,currentHotelKey);
+        if(prices!=null)for(int i=0;i<prices.length();i++) {
+            JSONObject offer=prices.optJSONObject(i); if(offer==null)continue;
+            LinearLayout price=clothingPriceInfoRow(offer);
+            if(price!=null)target.addView(price);
+        }
+        if(data.has("tradeable"))target.addView(visualItemInfoRow(t(R.string.item_tradeable),t(data.optBoolean("tradeable")?R.string.value_yes:R.string.value_no)));
+        if(data.optBoolean("ltd"))target.addView(visualItemInfoRow(t(R.string.item_limited),t(R.string.value_yes)));
+        if(data.optBoolean("bundleExclusive"))target.addView(visualItemInfoRow(t(R.string.item_bundle_exclusive),t(R.string.value_yes)));
+    }
+
+    private LinearLayout clothingPriceInfoRow(JSONObject offer) {
+        SpannableStringBuilder values = new SpannableStringBuilder();
+        ArrayList<String> spokenValues = new ArrayList<>();
+        String[] currencies = {"credits", "diamonds", "duckets"};
+        int[] icons = {R.drawable.credits, R.drawable.diamonds, R.drawable.duckets};
+        int[] labels = {R.string.currency_credits, R.string.currency_diamonds, R.string.currency_duckets};
+        for (int i = 0; i < currencies.length; i++) {
+            String currency = currencies[i];
+            if (!offer.has(currency) || offer.isNull(currency) || !(offer.optDouble(currency, -1) >= 0)) continue;
+            String amount = formatNumericText(offer.optString(currency, ""));
+            if (values.length() > 0) values.append("\u2002\u2002");
+            Drawable icon = getDrawable(icons[i]).mutate();
+            if (icon instanceof BitmapDrawable) {
+                ((BitmapDrawable) icon).setFilterBitmap(false);
+                ((BitmapDrawable) icon).setDither(false);
+            }
+            icon.setBounds(0, 0, dp(15), dp(15));
+            int start = values.length();
+            values.append("\uFFFC\u00A0").append(amount);
+            values.setSpan(new android.text.style.ImageSpan(icon, android.text.style.ImageSpan.ALIGN_BOTTOM),
+                    start, start + 1, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            spokenValues.add(amount + " " + t(labels[i]));
+        }
+        if (values.length() == 0) return null;
+        LinearLayout row = visualItemInfoRow(t(R.string.item_price), values);
+        row.getChildAt(1).setContentDescription(TextUtils.join(", ", spokenValues));
+        return row;
+    }
+
+    private void showClothingDetailsDialog(JSONObject item) {
+        Dialog dialog=new Dialog(this);
+        ScrollView scroll=new ScrollView(this); tintScrollBar(scroll);
+        LinearLayout body=new LinearLayout(this); body.setOrientation(LinearLayout.VERTICAL);
+        body.setPadding(dp(18),dp(18),dp(18),dp(18));
+        body.setBackground(round(dialogFillColor(),dp(22),dialogStrokeColor(),1));
+        scroll.addView(body,new ScrollView.LayoutParams(-1,-2));
+        ImageView image=new ImageView(this); image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        image.setBackground(round(subtleSurfaceColor(),dp(18),dialogStrokeColor(),1));
+        image.setPadding(dp(14),dp(14),dp(14),dp(14));
+        body.addView(image,lp(-1,dp(190),0,0,0,14));
+        String fullImage=ClothingDetails.image(item,false);
+        if(!fullImage.isEmpty())loadHabbodexClothingImage(image, fullImage);
+        else setClothingRarityIcon(image,item);
+        appendClothingInformation(body,item);
+        TextView close=dialogButton(t(R.string.close)); body.addView(close,lp(-1,dp(46),0,4,0,0));
+        close.setOnClickListener(v -> dialog.dismiss());
+        dialog.setContentView(scroll); applySafeAreaInsets(dialog.getWindow(),scroll); showTrackedDialog(dialog);
+        Window window=dialog.getWindow();
+        if(window!=null){ window.setBackgroundDrawable(new ColorDrawable(Color.TRANSPARENT));
+            window.setLayout(Math.min(getResources().getDisplayMetrics().widthPixels-dp(28),dp(460)),WindowManager.LayoutParams.WRAP_CONTENT); }
     }
 
     private void enrichClothingEntriesWithHabbonews(ArrayList<JSONObject> clothes, String figure) {
@@ -8349,7 +8610,7 @@ public class MainActivity extends Activity {
             if (!roomName.isEmpty() && getPhotoRoomName(photo).isEmpty()) {
                 photo.put("room_name", roomName);
             }
-            if (!ownerName.isEmpty() && getPhotoRoomOwnerName(photo).isEmpty()) {
+            if (!ownerName.isEmpty() && firstText(photo, "roomOwner", "roomOwnerName").isEmpty()) {
                 photo.put("roomOwner", ownerName);
             }
             if (!ownerFigure.isEmpty() && getPhotoRoomOwnerFigure(photo).isEmpty()) {
@@ -8374,10 +8635,10 @@ public class MainActivity extends Activity {
 
     private String getPhotoRoomId(JSONObject photo) {
         String rid = firstText(photo, "roomId", "room_id", "roomid");
-        if (!rid.isEmpty()) return rid;
+        if (rid.matches("[1-9]\\d{0,11}")) return rid;
         JSONObject room = photo == null ? null : photo.optJSONObject("room");
         if (room != null) rid = firstText(room, "id", "roomId", "room_id");
-        return rid;
+        return rid.matches("[1-9]\\d{0,11}") ? rid : "";
     }
 
     private String getPhotoRoomName(JSONObject photo) {
@@ -8393,7 +8654,7 @@ public class MainActivity extends Activity {
 
     private String getPhotoRoomOwnerName(JSONObject photo) {
         if (photo == null) return "";
-        String[] directKeys = {"roomOwner", "roomOwnerName", "ownerName", "owner_name"};
+        String[] directKeys = {"roomOwner", "roomOwnerName", "room_owner"};
         for (String key : directKeys) {
             Object value = photo.opt(key);
             String name = extractNameFromUnknown(value);
@@ -8411,12 +8672,14 @@ public class MainActivity extends Activity {
                 if (!name.isEmpty()) return name;
             }
         }
-        return "";
+        return firstText(photo, "ownerName", "owner_name");
     }
 
     private String getPhotoRoomOwnerId(JSONObject photo) {
         if (photo == null) return "";
-        String[] directKeys = {"roomOwner", "roomOwnerId", "ownerId", "owner", "user", "habbo"};
+        String explicitId = firstText(photo, "roomOwnerId", "roomOwnerUniqueId", "room_owner_id", "room_owner_unique_id");
+        if (!explicitId.isEmpty()) return explicitId;
+        String[] directKeys = {"roomOwner", "roomOwnerName", "room_owner"};
         for (String key : directKeys) {
             String id = extractUniqueIdFromUnknown(photo.opt(key));
             if (!id.isEmpty()) return id;
@@ -8435,7 +8698,7 @@ public class MainActivity extends Activity {
 
     private String getPhotoRoomOwnerFigure(JSONObject photo) {
         if (photo == null) return "";
-        String[] directKeys = {"roomOwnerFigureString", "ownerFigureString", "ownerFigure", "figureString", "figure"};
+        String[] directKeys = {"roomOwnerFigureString", "roomOwnerFigure", "ownerFigureString", "ownerFigure"};
 
         for (String key : directKeys) {
             String figure = extractFigureFromUnknown(photo.opt(key));
@@ -8648,7 +8911,7 @@ public class MainActivity extends Activity {
     }
 
     private String getPhotoUrl(JSONObject photo) {
-        String url = firstText(photo, "previewUrl", "url", "imageUrl", "photoUrl");
+        String url = firstText(photo, "previewUrl", "preview_url", "url", "imageUrl", "image_url", "photoUrl", "photo_url", "fullUrl", "full_url", "thumbnailUrl", "thumbnail_url");
         if (url.isEmpty()) url = findImageUrlDeep(photo);
         return normalizeUrl(url);
     }
@@ -8658,10 +8921,50 @@ public class MainActivity extends Activity {
     }
 
     private int getPhotoLikesCount(JSONObject photo) {
-        return getPhotoLikerNames(photo).size();
+        if (photo == null) return 0;
+        int total = getPhotoLikerNames(photo).size();
+        for (String key : new String[]{"likesCount", "likes_count", "totalLikes", "likeCount", "likes"}) {
+            Object value = photo.opt(key);
+            if (value instanceof Number) total = Math.max(total, ((Number) value).intValue());
+            else if (value instanceof String && ((String) value).matches("\\d+")) {
+                try { total = Math.max(total, Integer.parseInt((String) value)); } catch (NumberFormatException ignored) {}
+            }
+        }
+        return total;
+    }
+
+    private String getPhotoDateTime(JSONObject photo) {
+        return niceDate(firstText(photo, "creationTime", "time", "createdAt", "created_at", "date", "formatted_time", "formattedTime"));
+    }
+
+    private String getPhotoAuthorName(JSONObject photo) {
+        String author = firstText(photo == null ? null : photo.optJSONObject("creator"), "name");
+        if (author.isEmpty()) author = firstText(photo, "creatorName", "creator_name", "authorName", "userName", "username");
+        for (String key : new String[]{"creator", "author", "user", "habbo"}) {
+            if (author.isEmpty()) author = extractNameFromUnknown(photo == null ? null : photo.opt(key));
+        }
+        if (author.isEmpty()) author = firstText(photo, "ownerName");
+        return author;
+    }
+
+    private String getPhotoAuthorId(JSONObject photo) {
+        String id = firstText(photo, "creatorUniqueId", "creator_unique_id", "authorUniqueId", "userUniqueId", "uniqueId");
+        for (String key : new String[]{"creator", "author", "user", "habbo"}) {
+            if (id.isEmpty()) id = extractUniqueIdFromUnknown(photo == null ? null : photo.opt(key));
+        }
+        return id;
+    }
+
+    private String getPhotoAuthorFigure(JSONObject photo) {
+        String figure = firstText(photo, "creatorFigureString", "creator_figure_string", "authorFigureString", "figureString", "figure_string");
+        for (String key : new String[]{"creator", "author", "user", "habbo"}) {
+            if (figure.isEmpty()) figure = extractFigureFromUnknown(photo == null ? null : photo.opt(key));
+        }
+        return figure;
     }
 
     private PhotoViewerSession activePhotoViewer;
+    private final ArrayList<RoomPhotoGallerySession> roomPhotoGalleries = new ArrayList<>();
 
     private void showPhotoDialog(JSONObject photo) {
         if (photo == null || getPhotoUrl(photo).isEmpty()) return;
@@ -8676,7 +8979,10 @@ public class MainActivity extends Activity {
         final int token = activeSearchToken;
         final ProfileResult owner;
         final JSONObject standalone;
+        final RoomPhotoGallerySession roomGallery;
+        final PhotoViewerSession parentViewer;
         final PhotoSwipeLayout imagePane = new PhotoSwipeLayout(MainActivity.this);
+        final ScrollView infoScroll = new ScrollView(MainActivity.this);
         final LinearLayout metadata = new LinearLayout(MainActivity.this);
         final TextView counter = text("", 13, themeMutedColor(), false);
         final ProgressBar pageSpinner = new ProgressBar(MainActivity.this);
@@ -8685,16 +8991,25 @@ public class MainActivity extends Activity {
         JSONObject shownPhoto;
         String preloadedNeighborsKey = "";
         int index, lastPrefetchedCount = -1;
-        boolean moving, awaitingNext, closed;
+        boolean moving, awaitingNext, closed, interacted, hintScheduled;
+        ValueAnimator swipeHint;
+        Runnable hintTask;
         int imageWidth = Math.max(dp(120), getResources().getDisplayMetrics().widthPixels - dp(contentPadding() * 2));
-        int imageHeight = Math.max(dp(120), Math.min(dp(360), Math.round(getResources().getDisplayMetrics().heightPixels * .40f)));
+        int imageHeight = Math.max(dp(120), Math.min(imageWidth, Math.round(getResources().getDisplayMetrics().heightPixels * .56f)));
 
         PhotoViewerSession(JSONObject initial) {
+            this(initial, null);
+        }
+
+        PhotoViewerSession(JSONObject initial, RoomPhotoGallerySession gallery) {
+            roomGallery = gallery;
+            parentViewer = gallery == null ? null : activePhotoViewer;
             int found = findPhotoIndex(activeRenderedProfile, initial);
-            owner = found >= 0 ? activeRenderedProfile : null;
-            standalone = owner == null ? initial : null;
-            index = Math.max(0, found);
+            owner = gallery == null && found >= 0 ? activeRenderedProfile : null;
+            standalone = owner == null && gallery == null ? initial : null;
+            index = gallery == null ? Math.max(0, found) : Math.max(0, gallery.photos.indexOf(initial));
             imagePane.setListener(this);
+            imagePane.setInteractionListener(() -> { interacted = true; cancelSwipeHint(); });
         }
 
         int findPhotoIndex(ProfileResult profile, JSONObject target) {
@@ -8712,6 +9027,7 @@ public class MainActivity extends Activity {
         }
 
         ArrayList<JSONObject> photos() {
+            if (roomGallery != null) return roomGallery.photos;
             ProfileResult current = profile();
             if (current != null) return current.photos;
             ArrayList<JSONObject> single = new ArrayList<>();
@@ -8736,7 +9052,7 @@ public class MainActivity extends Activity {
             header.addView(title, titleParams);
             header.addView(counter, lp(-2, -2, 12, 0, 4, 0));
             body.addView(header, lp(-1, dp(52), 0, 0, 0, 16));
-            imagePane.setBackground(round(subtleSurfaceColor(), dp(20), dialogStrokeColor(), 1));
+            imagePane.setBackgroundColor(Color.TRANSPARENT);
             applyRoundedClip(imagePane, appearanceRadius(dp(20)));
             body.addView(imagePane, lp(-1, imageHeight, 0, 0, 0, 16));
             image = newImage();
@@ -8749,7 +9065,6 @@ public class MainActivity extends Activity {
             FrameLayout.LayoutParams spinnerParams = new FrameLayout.LayoutParams(dp(44), dp(44), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
             spinnerParams.bottomMargin = dp(12);
             imagePane.addView(pageSpinner, spinnerParams);
-            ScrollView infoScroll = new ScrollView(MainActivity.this);
             infoScroll.setFillViewport(false);
             tintScrollBar(infoScroll);
             metadata.setOrientation(LinearLayout.VERTICAL);
@@ -8758,13 +9073,18 @@ public class MainActivity extends Activity {
             dialog.setOnDismissListener(ignored -> {
                 closed = true;
                 awaitingNext = false;
+                cancelSwipeHint();
+                appDialogs.remove(dialog);
                 for (int i = 0; i < imagePane.getChildCount(); i++) {
                     View child = imagePane.getChildAt(i);
                     child.animate().cancel();
                     if (child instanceof ImageView) clearImage((ImageView) child);
                 }
                 clearPreloads();
-                if (activePhotoViewer == this) activePhotoViewer = null;
+                if (activePhotoViewer == this) activePhotoViewer = parentViewer != null && !parentViewer.closed && parentViewer.dialog.isShowing()
+                        ? parentViewer : null;
+                if (roomGallery != null && roomGallery.viewer == this) roomGallery.viewer = null;
+                if (activePhotoViewer == parentViewer && parentViewer != null && !activityDestroyed) parentViewer.onPhotosChanged();
             });
             showFullScreenDialog(dialog, full);
             showCurrentPhoto(false);
@@ -8772,18 +9092,55 @@ public class MainActivity extends Activity {
 
         ImageView newImage() {
             ImageView next = new ImageView(MainActivity.this);
-            next.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            next.setScaleType(ImageView.ScaleType.CENTER_CROP);
             return next;
         }
 
         void loadPhotoImage(ImageView target, JSONObject photo) {
             Glide.with(MainActivity.this).load(getPhotoUrl(photo)).override(imageWidth, imageHeight)
-                    .fitCenter().into(target);
+                    .listener(new RequestListener<Drawable>() {
+                        @Override public boolean onLoadFailed(GlideException error, Object model, Target<Drawable> holder, boolean first) { return false; }
+                        @Override public boolean onResourceReady(Drawable resource, Object model, Target<Drawable> holder, DataSource source, boolean first) {
+                            if (target == image && photo == shownPhoto) scheduleSwipeHint();
+                            return false;
+                        }
+                    })
+                    .centerCrop().into(target);
+        }
+
+        void scheduleSwipeHint() {
+            if (closed || interacted || hintScheduled || index != 0 || !canSwipe(1)
+                    || getSharedPreferences(PREFS, MODE_PRIVATE).getInt("photo_swipe_hint_count", 0) >= 3) return;
+            hintScheduled = true;
+            hintTask = () -> {
+                if (closed || interacted || moving || index != 0 || !dialog.isShowing() || !canSwipe(1)) return;
+                SharedPreferences preferences = getSharedPreferences(PREFS, MODE_PRIVATE);
+                int count = preferences.getInt("photo_swipe_hint_count", 0);
+                if (count >= 3) return;
+                preferences.edit().putInt("photo_swipe_hint_count", count + 1).apply();
+                ImageView hinted = image;
+                swipeHint = ValueAnimator.ofFloat(0, 1);
+                swipeHint.setDuration(1200L);
+                swipeHint.setInterpolator(new android.view.animation.LinearInterpolator());
+                swipeHint.addUpdateListener(animation -> {
+                    float fraction = (float) animation.getAnimatedValue();
+                    float part = fraction <= .44f ? fraction / .44f : (1 - fraction) / .56f;
+                    hinted.setTranslationX(-dp(32) * (float)(.5 - .5 * Math.cos(Math.PI * part)));
+                });
+                swipeHint.start();
+            };
+            imagePane.postDelayed(hintTask, 450L);
+        }
+
+        void cancelSwipeHint() {
+            if (hintTask != null) imagePane.removeCallbacks(hintTask);
+            if (swipeHint != null) { swipeHint.cancel(); swipeHint = null; }
+            if (image != null && !moving) image.setTranslationX(0);
         }
 
         void updateSize() {
             imageWidth = Math.max(dp(120), getResources().getDisplayMetrics().widthPixels - dp(contentPadding() * 2));
-            imageHeight = Math.max(dp(120), Math.min(dp(360), Math.round(getResources().getDisplayMetrics().heightPixels * .40f)));
+            imageHeight = Math.max(dp(120), Math.min(imageWidth, Math.round(getResources().getDisplayMetrics().heightPixels * .56f)));
             ViewGroup.LayoutParams params = imagePane.getLayoutParams();
             if (params != null) { params.height = imageHeight; imagePane.setLayoutParams(params); }
             if (image != null && shownPhoto != null) loadPhotoImage(image, shownPhoto);
@@ -8808,13 +9165,18 @@ public class MainActivity extends Activity {
             grid.setOrientation(LinearLayout.VERTICAL);
             metadata.addView(grid, lp(-1, -2, 0, 0, 0, 8));
             populatePhotoInfoGrid(grid, photo, dialog);
-            ArrayList<String> likers = getPhotoLikerNames(photo);
-            if (!likers.isEmpty()) {
-                TextView title = text(t(R.string.liked_by), 17, primaryTextColor(), true);
-                metadata.addView(title, lp(-1, -2, 0, 4, 0, 12));
-                for (String liker : likers) metadata.addView(likerRow(liker, dialog));
+            if (roomGallery != null) {
+                String author = getPhotoAuthorName(photo);
+                if (!author.isEmpty()) {
+                    LinearLayout authorRow = photoInfoCard(t(R.string.photo_author), author,
+                            getPhotoAuthorFigure(photo), author, getPhotoAuthorId(photo));
+                    authorRow.setBackground(null);
+                    metadata.addView(authorRow, lp(-1, -2, 0, 0, 0, 8));
+                }
             }
             if (animate) {
+                infoScroll.scrollTo(0, 0);
+                infoScroll.post(() -> { if (!closed && shownPhoto == photo) infoScroll.scrollTo(0, 0); });
                 metadata.setAlpha(.35f);
                 metadata.setTranslationY(dp(8));
                 metadata.animate().alpha(1).translationY(0).setDuration(220).start();
@@ -8823,7 +9185,7 @@ public class MainActivity extends Activity {
                 metadata.setTranslationY(0);
             }
             String roomId = getPhotoRoomId(photo);
-            boolean needsRoom = !roomId.isEmpty()
+            boolean needsRoom = roomGallery == null && !roomId.isEmpty()
                     && (getPhotoRoomName(photo).isEmpty() || getPhotoRoomOwnerName(photo).isEmpty())
                     && !photo.optBoolean("_officialRoomLookupDone", false);
             if (needsRoom) {
@@ -8841,7 +9203,8 @@ public class MainActivity extends Activity {
 
         void updateCounter() {
             ProfileResult current = profile();
-            int total = current == null ? 1 : Math.max(current.photos.size(), current.photosTotal);
+            int total = roomGallery != null ? Math.max(roomGallery.allPhotos.size(), roomGallery.total)
+                    : current == null ? 1 : Math.max(current.photos.size(), current.photosTotal);
             counter.setText(formatCount(index + 1) + " / " + formatCount(total));
         }
 
@@ -8850,7 +9213,7 @@ public class MainActivity extends Activity {
             ArrayList<JSONObject> items = photos();
             if (direction < 0) return index > 0;
             ProfileResult current = profile();
-            return index + 1 < items.size() || (current != null && current.photosHasMore);
+            return index + 1 < items.size() || (roomGallery != null ? roomGallery.hasMore() : current != null && current.photosHasMore);
         }
 
         @Override public boolean onSwipe(int direction) {
@@ -8863,6 +9226,13 @@ public class MainActivity extends Activity {
                 return true;
             }
             ProfileResult current = profile();
+            if (direction > 0 && roomGallery != null && roomGallery.hasMore()) {
+                awaitingNext = true;
+                roomGallery.loadMore();
+                if (!moving && !roomGallery.loading) awaitingNext = false;
+                updatePageSpinner();
+                return moving;
+            }
             if (direction > 0 && current != null && current.photosHasMore) {
                 awaitingNext = true;
                 loadMorePhotos(current, null);
@@ -8878,6 +9248,7 @@ public class MainActivity extends Activity {
             if (closed || moving) return;
             ArrayList<JSONObject> items = photos();
             if (next < 0 || next >= items.size()) return;
+            cancelSwipeHint();
             moving = true;
             imagePane.setLocked(true);
             ImageView outgoing = image;
@@ -8904,6 +9275,20 @@ public class MainActivity extends Activity {
 
         void onPhotosChanged() {
             if (closed || !dialog.isShowing()) return;
+            if (roomGallery != null) {
+                if (roomGallery.closed) { dialog.dismiss(); return; }
+                updateCounter();
+                if (awaitingNext && index + 1 < roomGallery.photos.size()) {
+                    awaitingNext = false;
+                    if (!moving) moveTo(index + 1, 1);
+                } else if (awaitingNext && !roomGallery.loading) {
+                    awaitingNext = false;
+                    imagePane.bounce(1);
+                }
+                updatePageSpinner();
+                preloadNeighbors();
+                return;
+            }
             ProfileResult current = profile();
             if (owner != null && current == null) { dialog.dismiss(); return; }
             if (current != null && shownPhoto != null) {
@@ -8931,11 +9316,20 @@ public class MainActivity extends Activity {
 
         void updatePageSpinner() {
             ProfileResult current = profile();
-            pageSpinner.setVisibility(awaitingNext && current != null && current.photosLoading ? View.VISIBLE : View.GONE);
+            boolean loading = roomGallery != null ? roomGallery.loading : current != null && current.photosLoading;
+            pageSpinner.setVisibility(awaitingNext && loading ? View.VISIBLE : View.GONE);
             pageSpinner.bringToFront();
         }
 
         void prefetchPage() {
+            if (roomGallery != null) {
+                if (roomGallery.hasMore() && !roomGallery.loading && !roomGallery.failed
+                        && roomGallery.photos.size() - index <= 4 && lastPrefetchedCount != roomGallery.photos.size()) {
+                    lastPrefetchedCount = roomGallery.photos.size();
+                    roomGallery.loadMore();
+                }
+                return;
+            }
             ProfileResult current = profile();
             if (current == null || !current.photosHasMore || current.photosLoading) return;
             if (current.photos.size() - index > 4 || lastPrefetchedCount == current.photos.size()) return;
@@ -8955,7 +9349,7 @@ public class MainActivity extends Activity {
             if (preloadedNeighborsKey.equals(key.toString())) return;
             clearPreloads();
             preloadedNeighborsKey = key.toString();
-            for (String url : urls) preloads.add(Glide.with(MainActivity.this).load(url).override(imageWidth, imageHeight).fitCenter().preload());
+            for (String url : urls) preloads.add(Glide.with(MainActivity.this).load(url).override(imageWidth, imageHeight).centerCrop().preload());
         }
 
         void clearPreloads() {
@@ -8971,47 +9365,340 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void populatePhotoInfoGrid(
-            LinearLayout infoGrid,
-            JSONObject photo,
-            Dialog dialog
-    ) {
-        if (infoGrid == null || photo == null) return;
-        infoGrid.removeAllViews();
-        String room = getPhotoRoomName(photo);
-        String ownerName = getPhotoRoomOwnerName(photo);
-        String ownerFigure = getPhotoRoomOwnerFigure(photo);
-        String ownerId = getPhotoRoomOwnerId(photo);
+    private void showRoomPhotosDialog(JSONObject photo) {
+        String roomId = getPhotoRoomId(photo);
+        if (!roomId.matches("[1-9]\\d{0,11}")) return;
+        if (activePhotoViewer != null) { activePhotoViewer.interacted = true; activePhotoViewer.cancelSwipeHint(); }
+        RoomPhotoGallerySession gallery = new RoomPhotoGallerySession(photo, currentHotelKey);
+        gallery.show();
+    }
 
-        infoGrid.addView(photoInfoCard(t(R.string.date), getPhotoTimestamp(photo), "", ""));
-        if (!room.isEmpty()) {
-            infoGrid.addView(photoInfoCard(t(R.string.room), room, "", ""));
+    private void showRoomPhotosFromRoom(JSONObject room) {
+        String id = firstText(room, "id", "roomId", "room_id");
+        if (!id.matches("[1-9]\\d{0,11}")) return;
+        try {
+            JSONObject reference = new JSONObject().put("roomId", id).put("room", room);
+            enrichPhotoWithRoomInfo(reference, room);
+            showRoomPhotosDialog(reference);
+        } catch (Exception ignored) {}
+    }
+
+    private final class RoomPhotoGallerySession {
+        final Dialog dialog = new Dialog(MainActivity.this);
+        final String roomId, hotel;
+        final int token = activeSearchToken;
+        final ArrayList<JSONObject> allPhotos = new ArrayList<>(), photos = new ArrayList<>();
+        final HashSet<String> identities = new HashSet<>();
+        final ListView list = new ListView(MainActivity.this);
+        final LinearLayout footer = new LinearLayout(MainActivity.this);
+        final TextView title = habboText("", 15, true);
+        final BaseAdapter adapter = new BaseAdapter() {
+            @Override public int getCount() { return photos.size(); }
+            @Override public JSONObject getItem(int position) { return photos.get(position); }
+            @Override public long getItemId(int position) { return position; }
+            @Override public View getView(int position, View recycled, ViewGroup parent) { return galleryRow(getItem(position), recycled); }
+        };
+        JSONObject roomInfo;
+        PhotoViewerSession viewer;
+        Future<?> request;
+        String roomName;
+        int nextPage = 1, total;
+        boolean loading, failed, closed;
+
+        RoomPhotoGallerySession(JSONObject initial, String hotelKey) {
+            roomId = getPhotoRoomId(initial);
+            hotel = normalizeHotelKey(hotelKey);
+            roomName = getPhotoRoomName(initial);
+            try {
+                roomInfo = new JSONObject().put("name", roomName)
+                        .put("ownerName", getPhotoRoomOwnerName(initial))
+                        .put("ownerId", getPhotoRoomOwnerId(initial))
+                        .put("ownerFigureString", getPhotoRoomOwnerFigure(initial));
+            } catch (Exception ignored) {}
         }
-        if (!ownerName.isEmpty()) {
-            LinearLayout ownerCard = photoInfoCard(
-                    t(R.string.owner),
-                    ownerName,
-                    ownerFigure,
-                    ownerName,
-                    ownerId
-            );
-            ownerCard.setOnClickListener(v -> {
-                if (dialog != null) dialog.dismiss();
-                openProfileReference(
-                        ownerName,
-                        ownerId,
-                        ownerFigure,
-                        currentHotelKey
-                );
+
+        void show() {
+            roomPhotoGalleries.add(this);
+            dialog.requestWindowFeature(Window.FEATURE_NO_TITLE);
+            FrameLayout full = new FrameLayout(MainActivity.this);
+            full.setBackground(makeBg());
+            LinearLayout body = new LinearLayout(MainActivity.this);
+            body.setOrientation(LinearLayout.VERTICAL);
+            body.setPadding(dp(contentPadding()), dp(12), dp(contentPadding()), 0);
+            full.addView(body, new FrameLayout.LayoutParams(-1, -1));
+            LinearLayout header = new LinearLayout(MainActivity.this);
+            header.setGravity(Gravity.CENTER_VERTICAL);
+            header.addView(uiIconButton("back", t(R.string.back), dialog::dismiss), new LinearLayout.LayoutParams(dp(48), dp(48)));
+            LinearLayout headings = new LinearLayout(MainActivity.this);
+            headings.setOrientation(LinearLayout.VERTICAL);
+            headings.addView(text(t(R.string.room_photos), 21, primaryTextColor(), true));
+            title.setText(roomName);
+            title.setVisibility(roomName.isEmpty() ? View.GONE : View.VISIBLE);
+            title.setTextColor(accentTextColor());
+            title.setSingleLine(true);
+            title.setEllipsize(TextUtils.TruncateAt.END);
+            headings.addView(title);
+            LinearLayout.LayoutParams headingsParams = new LinearLayout.LayoutParams(0, -2, 1);
+            headingsParams.leftMargin = dp(12);
+            header.addView(headings, headingsParams);
+            body.addView(header, lp(-1, -2, 0, 0, 0, 16));
+            list.setDivider(null);
+            list.setSelector(new ColorDrawable(Color.TRANSPARENT));
+            list.setClipToPadding(false);
+            list.setPadding(0, 0, 0, dp(16));
+            tintScrollBar(list);
+            footer.setOrientation(LinearLayout.VERTICAL);
+            footer.setGravity(Gravity.CENTER);
+            footer.setPadding(0, dp(16), 0, dp(16));
+            list.addFooterView(footer, null, false);
+            list.setAdapter(adapter);
+            list.setOnScrollListener(new AbsListView.OnScrollListener() {
+                @Override public void onScrollStateChanged(AbsListView view, int state) {}
+                @Override public void onScroll(AbsListView view, int first, int visible, int count) {
+                    if (visible > 0 && !photos.isEmpty() && !failed && !loading && hasMore() && first + visible >= photos.size() - 4) loadMore();
+                }
             });
-            infoGrid.addView(ownerCard);
+            body.addView(list, new LinearLayout.LayoutParams(-1, 0, 1));
+            dialog.setOnDismissListener(ignored -> {
+                closed = true;
+                appDialogs.remove(dialog);
+                roomPhotoGalleries.remove(this);
+                if (request != null) request.cancel(true);
+                if (viewer != null && viewer.dialog.isShowing()) viewer.dialog.dismiss();
+                clearGalleryImages(list);
+            });
+            showFullScreenDialog(dialog, full);
+            loadMore();
         }
-        infoGrid.addView(photoInfoCard(
-                t(R.string.likes),
-                formatCount(getPhotoLikerNames(photo).size()),
-                "",
-                ""
-        ));
+
+        boolean hasMore() { return photos.size() < allPhotos.size() || nextPage > 0; }
+
+        void loadMore() {
+            if (closed || loading || activityDestroyed || token != activeSearchToken) return;
+            if (photos.size() < allPhotos.size()) { releaseChunk(); return; }
+            if (nextPage <= 0) return;
+            failed = false;
+            loading = true;
+            renderFooter();
+            final int requestedPage = nextPage;
+            request = profileRequestsExecutor.submit(() -> {
+                RoomPhotosPage page;
+                try {
+                    Object response = getJsonAny(RoomPhotosPage.url(hotel, roomId, requestedPage));
+                    page = RoomPhotosPage.decode(response, requestedPage, RoomPhotosPage.PAGE_SIZE, roomId);
+                } catch (Exception error) { page = new RoomPhotosPage(); }
+                final RoomPhotosPage result = page;
+                runOnUiThread(() -> applyPage(result, requestedPage));
+            });
+        }
+
+        void applyPage(RoomPhotosPage page, int requestedPage) {
+            if (closed || activityDestroyed || token != activeSearchToken || !dialog.isShowing()) return;
+            loading = false;
+            failed = !page.success;
+            if (page.success) {
+                if (page.room != null) {
+                    roomInfo = page.room;
+                    String name = firstText(page.room, "name", "roomName", "room_name");
+                    if (!name.isEmpty()) { roomName = name; title.setText(name); title.setVisibility(View.VISIBLE); }
+                }
+                int added = 0;
+                for (JSONObject photo : page.items) {
+                    String url = getPhotoUrl(photo);
+                    if (url.isEmpty()) continue;
+                    String identity = firstText(photo, "id", "photoId", "photo_id");
+                    if (identity.isEmpty()) identity = url;
+                    if (!identities.add(identity)) continue;
+                    enrichPhotoWithRoomInfo(photo, roomInfo);
+                    allPhotos.add(photo);
+                    added++;
+                }
+                total = Math.max(total, Math.max(page.total, allPhotos.size()));
+                // A repeated server page ends pagination without duplicating photos.
+                nextPage = added == 0 && !page.items.isEmpty() ? 0 : page.nextPage > requestedPage ? page.nextPage : 0;
+                releaseChunk();
+                if (photos.isEmpty() && nextPage > 0) list.post(this::loadMore);
+            } else {
+                renderFooter();
+                if (viewer != null) viewer.onPhotosChanged();
+            }
+        }
+
+        void releaseChunk() {
+            int end = Math.min(allPhotos.size(), photos.size() + PAGE_CHUNK);
+            while (photos.size() < end) photos.add(allPhotos.get(photos.size()));
+            adapter.notifyDataSetChanged();
+            renderFooter();
+            if (viewer != null) viewer.onPhotosChanged();
+        }
+
+        View galleryRow(JSONObject photo, View recycled) {
+            RoomPhotoRow holder;
+            if (recycled != null && recycled.getTag() instanceof RoomPhotoRow) {
+                holder = (RoomPhotoRow) recycled.getTag();
+            } else {
+                holder = new RoomPhotoRow();
+            }
+            holder.author.setText(getPhotoAuthorName(photo));
+            holder.date.setText(getPhotoDateTime(photo));
+            holder.likes.setText(formatCount(getPhotoLikesCount(photo)));
+            holder.likesLine.setContentDescription(t(R.string.likes) + ": " + getPhotoLikesCount(photo));
+            Glide.with(MainActivity.this).load(getPhotoUrl(photo)).override(dp(128), dp(128)).centerCrop().into(holder.thumbnail);
+            holder.card.setOnClickListener(v -> {
+                if (viewer != null && viewer.dialog.isShowing()) return;
+                viewer = new PhotoViewerSession(photo, this);
+                activePhotoViewer = viewer;
+                viewer.show();
+            });
+            return holder.wrapper;
+        }
+
+        final class RoomPhotoRow {
+            final FrameLayout wrapper = new FrameLayout(MainActivity.this);
+            final LinearLayout card = new LinearLayout(MainActivity.this);
+            final ImageView thumbnail = new ImageView(MainActivity.this);
+            final TextView author = habboText("", 15, true);
+            final TextView date = text("", 12, themeMutedColor(), false);
+            final TextView likes = text("", 12, primaryTextColor(), false);
+            final LinearLayout likesLine = new LinearLayout(MainActivity.this);
+
+            RoomPhotoRow() {
+                LinearLayout row = card;
+                row.setGravity(Gravity.CENTER_VERTICAL);
+                row.setBackground(round(dialogFillColor(), dp(18), dialogStrokeColor(), 1));
+                applyRoundedClip(row, appearanceRadius(dp(18)));
+                int height = dp(compactUi ? 112 : 128);
+                wrapper.setLayoutParams(new AbsListView.LayoutParams(-1, height + dp(sectionSpacing())));
+                wrapper.addView(row, new FrameLayout.LayoutParams(-1, height));
+                wrapper.setTag(this);
+                thumbnail.setScaleType(ImageView.ScaleType.CENTER_CROP);
+                row.addView(thumbnail, new LinearLayout.LayoutParams(dp(compactUi ? 112 : 128), -1));
+                LinearLayout details = new LinearLayout(MainActivity.this);
+                details.setOrientation(LinearLayout.VERTICAL);
+                details.setPadding(dp(12), dp(12), dp(12), dp(12));
+                author.setTextColor(accentTextColor());
+                author.setSingleLine(true);
+                author.setEllipsize(TextUtils.TruncateAt.END);
+                details.addView(author, lp(-1, -2, 0, 0, 0, 8));
+                details.addView(date);
+                likesLine.setGravity(Gravity.CENTER_VERTICAL);
+                ImageView heart = new ImageView(MainActivity.this);
+                heart.setImageDrawable(new ToxicIcons("heart", accentTextColor()));
+                heart.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+                likesLine.addView(heart, new LinearLayout.LayoutParams(dp(14), dp(14)));
+                likesLine.addView(likes, lp(-2, -2, 5, 0, 0, 0));
+                details.addView(likesLine, lp(-1, -2, 0, 8, 0, 0));
+                row.addView(details, new LinearLayout.LayoutParams(0, -2, 1));
+            }
+        }
+
+        void renderFooter() {
+            footer.removeAllViews();
+            footer.setMinimumHeight(0);
+            if (loading) {
+                ProgressBar spinner = new ProgressBar(MainActivity.this);
+                spinner.setIndeterminateTintList(ColorStateList.valueOf(purple));
+                footer.addView(spinner, new LinearLayout.LayoutParams(dp(36), dp(36)));
+            } else if (failed) {
+                footer.addView(text(t(R.string.room_photos_failed), 13, themeMutedColor(), false));
+            } else if (photos.isEmpty() && nextPage == 0) {
+                footer.setMinimumHeight(dp(280));
+                ImageView emptyIcon = new ImageView(MainActivity.this);
+                emptyIcon.setImageResource(android.R.drawable.ic_menu_gallery);
+                emptyIcon.setImageTintList(ColorStateList.valueOf(accentTextColor()));
+                emptyIcon.setPadding(dp(14),dp(14),dp(14),dp(14));
+                emptyIcon.setBackground(round(subtleSurfaceColor(),dp(24),dialogStrokeColor(),1));
+                footer.addView(emptyIcon,new LinearLayout.LayoutParams(dp(76),dp(76)));
+                TextView title=text(t(R.string.room_photos_empty_title),18,primaryTextColor(),true);
+                title.setGravity(Gravity.CENTER);
+                footer.addView(title,lp(-1,-2,12,18,12,8));
+                TextView note=text(t(R.string.room_photos_empty),14,themeMutedColor(),false);
+                note.setGravity(Gravity.CENTER);
+                footer.addView(note,lp(-1,-2,18,0,18,0));
+            }
+        }
+
+        void clearGalleryImages(View view) {
+            if (view instanceof ImageView) Glide.with(getApplicationContext()).clear((ImageView) view);
+            else if (view instanceof ViewGroup) {
+                ViewGroup group = (ViewGroup) view;
+                for (int i = 0; i < group.getChildCount(); i++) clearGalleryImages(group.getChildAt(i));
+            }
+        }
+    }
+
+    private void populatePhotoInfoGrid(LinearLayout grid, JSONObject photo, Dialog dialog) {
+        if (grid == null || photo == null) return;
+        boolean expanded = Boolean.TRUE.equals(grid.getTag());
+        grid.removeAllViews();
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(round(dialogFillColor(), dp(18), dialogStrokeColor(), 1));
+        grid.addView(card, lp(-1, -2, 0, 0, 0, 8));
+        String owner = getPhotoRoomOwnerName(photo);
+        if (!owner.isEmpty()) addPhotoMetadataRow(card, photoInfoCard(t(R.string.owner), owner,
+                getPhotoRoomOwnerFigure(photo), owner, getPhotoRoomOwnerId(photo)));
+        String room = getPhotoRoomName(photo);
+        if (!room.isEmpty()) {
+            LinearLayout roomRow = photoInfoCard(t(R.string.room), room, "", "");
+            addPhotoMetadataRow(card, roomRow);
+            if (!getPhotoRoomId(photo).isEmpty()) roomRow.setOnClickListener(v -> {
+                if (activePhotoViewer != null && activePhotoViewer.roomGallery != null
+                        && activePhotoViewer.dialog == dialog && activePhotoViewer.roomGallery.roomId.equals(getPhotoRoomId(photo))) dialog.dismiss();
+                else showRoomPhotosDialog(photo);
+            });
+        }
+        addPhotoMetadataRow(card, photoInfoCard(t(R.string.date), getPhotoDateTime(photo), "", ""));
+        LinearLayout header = new LinearLayout(this);
+        header.setGravity(Gravity.CENTER_VERTICAL);
+        header.setPadding(dp(12), dp(8), dp(4), dp(8));
+        TextView liked = text(t(R.string.liked_by) + " (" + formatCount(getPhotoLikesCount(photo)) + ")", 15, primaryTextColor(), true);
+        liked.setMaxLines(2);
+        header.addView(liked, new LinearLayout.LayoutParams(0, -2, 1));
+        LinearLayout toggle = new LinearLayout(this);
+        toggle.setGravity(Gravity.CENTER_VERTICAL);
+        toggle.setPadding(dp(8), dp(10), dp(8), dp(10));
+        TextView label = text(t(expanded ? R.string.photo_hide_likes : R.string.photo_show_likes), 12, accentTextColor(), true);
+        toggle.addView(label);
+        ImageView arrow = new ImageView(this);
+        arrow.setImageDrawable(new ToxicIcons("back", accentTextColor()));
+        arrow.setRotation(expanded ? 90 : -90);
+        toggle.addView(arrow, lp(dp(18), dp(18), 4, 0, 0, 0));
+        header.addView(toggle, new LinearLayout.LayoutParams(-2, -2));
+        card.addView(header, new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout likers = new LinearLayout(this);
+        likers.setOrientation(LinearLayout.VERTICAL);
+        card.addView(likers, new LinearLayout.LayoutParams(-1, -2));
+        Runnable populate = () -> {
+            if (likers.getChildCount() > 0) return;
+            for (String liker : getPhotoLikerNames(photo)) likers.addView(likerRow(liker, dialog), lp(-1, -2, 12, 0, 12, 8));
+        };
+        if (expanded) populate.run();
+        likers.setVisibility(expanded ? View.VISIBLE : View.GONE);
+        toggle.setContentDescription(label.getText());
+        toggle.setOnClickListener(v -> {
+            boolean open = likers.getVisibility() != View.VISIBLE;
+            grid.setTag(open);
+            likers.animate().cancel();
+            if (open) populate.run();
+            likers.setVisibility(open ? View.VISIBLE : View.GONE);
+            label.setText(t(open ? R.string.photo_hide_likes : R.string.photo_show_likes));
+            toggle.setContentDescription(label.getText());
+            arrow.animate().rotation(open ? 90 : -90).setDuration(180).start();
+            if (open) { likers.setAlpha(0); likers.animate().alpha(1).setDuration(180).start(); }
+        });
+    }
+
+    private void addPhotoMetadataRow(LinearLayout details, LinearLayout row) {
+        if (details.getChildCount() > 0) {
+            View divider = new View(this);
+            divider.setBackgroundColor(dialogStrokeColor());
+            details.addView(divider, lp(-1, dp(1), 12, 0, 12, 0));
+        }
+        row.setBackground(null);
+        row.setLayoutParams(new LinearLayout.LayoutParams(-1, -2));
+        row.setPadding(dp(12), dp(compactUi ? 7 : 9), dp(12), dp(compactUi ? 7 : 9));
+        details.addView(row);
     }
 
     private LinearLayout photoInfoCard(String label, String value, String figure, String nickToOpen) {
@@ -9094,7 +9781,8 @@ public class MainActivity extends Activity {
         Object raw = photo.opt("likerNames");
         addLikerNamesFromUnknown(names, raw);
 
-        if (names.isEmpty()) addLikerNamesFromUnknown(names, photo.opt("likes"));
+        Object likes = photo.opt("likes");
+        if (names.isEmpty() && !(likes instanceof String && ((String) likes).trim().matches("\\d+"))) addLikerNamesFromUnknown(names, likes);
         if (names.isEmpty()) addLikerNamesFromUnknown(names, photo.opt("likers"));
 
         LinkedHashSet<String> unique = new LinkedHashSet<>();
@@ -9107,6 +9795,7 @@ public class MainActivity extends Activity {
 
     private void addLikerNamesFromUnknown(ArrayList<String> out, Object raw) {
         if (out == null || raw == null || raw == JSONObject.NULL) return;
+        if (raw instanceof Number || raw instanceof Boolean) return;
 
         if (raw instanceof JSONArray) {
             JSONArray a = (JSONArray) raw;
@@ -9495,7 +10184,7 @@ public class MainActivity extends Activity {
         headWrap.addView(head, hp);
         loadHeadImageForKnownProfile(head, fig, fid, n, currentHotelKey);
 
-        if (isToday(date)) {
+        if (isRecent(date)) {
             TextView novo = text(newBadgeLabel(), 9, Color.WHITE, true);
             novo.setGravity(Gravity.CENTER);
             novo.setBackground(removed
@@ -9602,7 +10291,7 @@ public class MainActivity extends Activity {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setPadding(dp(12), dp(10), dp(12), dp(10));
+        row.setPadding(0, 0, 0, 0);
         row.setBackground(round(
                 lightTheme ? Color.rgb(250,250,250) : Color.argb(18,255,255,255),
                 dp(16),
@@ -9611,20 +10300,13 @@ public class MainActivity extends Activity {
                         : (lightTheme ? Color.rgb(220,220,220) : Color.argb(24,255,255,255)),
                 1
         ));
-        // Card compacto: a área útil tem exatamente a mesma altura da miniatura.
-        // O título encosta no topo da imagem e Nota/Limite/Data ficam presos à base dela.
         row.setLayoutParams(lp(-1, dp(124), 0, 0, 0, 12));
+        applyRoundedClip(row, appearanceRadius(dp(16)));
 
         ImageView img = new ImageView(this);
         img.setScaleType(ImageView.ScaleType.CENTER_CROP);
-        img.setBackground(round(
-                lightTheme ? Color.rgb(245,245,245) : Color.argb(25,255,255,255),
-                dp(12),
-                lightTheme ? Color.rgb(220,220,220) : Color.argb(20,255,255,255),
-                1
-        ));
-        applyRoundedClip(img, dp(12));
-        row.addView(img, new LinearLayout.LayoutParams(dp(104), dp(104)));
+        img.setBackgroundColor(subtleSurfaceColor());
+        row.addView(img, new LinearLayout.LayoutParams(dp(124), -1));
         String image = getRoomImageUrl(room);
         if (!image.isEmpty()) {
             Glide.with(this).load(image).error(R.drawable.quarto).into(img);
@@ -9635,19 +10317,19 @@ public class MainActivity extends Activity {
         LinearLayout txt = new LinearLayout(this);
         txt.setOrientation(LinearLayout.VERTICAL);
         txt.setGravity(Gravity.TOP);
-        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, dp(104), 1);
-        tp.leftMargin = dp(12);
+        txt.setPadding(dp(12), dp(10), dp(12), dp(10));
+        LinearLayout.LayoutParams tp = new LinearLayout.LayoutParams(0, -1, 1);
         row.addView(txt, tp);
 
         String roomNameValue = firstText(room, "name", "roomName", "caption", "title");
-        String shownName = roomNameValue.isEmpty() ? t(R.string.room) : roomNameValue;
+        String shownName = roomNameValue;
         int nameSize = shownName.length() > 62 ? 10 : shownName.length() > 42 ? 11
                 : shownName.length() > 28 ? 12 : 14;
         TextView roomName = habboText(shownName, nameSize, true);
         roomName.setIncludeFontPadding(false);
         roomName.setSingleLine(true);
         roomName.setEllipsize(TextUtils.TruncateAt.END);
-        txt.addView(roomName, lp(-1, dp(18), 0, 0, 0, 1));
+        if (!shownName.isEmpty()) txt.addView(roomName, lp(-1, dp(18), 0, 0, 0, 1));
 
         // Tags permanecem diretamente abaixo do nome, sem aumentar a altura do card.
         ArrayList<String> tags = roomTags(room);
@@ -9711,6 +10393,9 @@ public class MainActivity extends Activity {
         bottom.addView(roomMetaColumn(t(R.string.room_rating), score), new LinearLayout.LayoutParams(0, -1, 1f));
         bottom.addView(roomMetaColumn(t(R.string.room_limit), maxVisitors), new LinearLayout.LayoutParams(0, -1, 1f));
         bottom.addView(roomMetaColumn(t(R.string.date), date), new LinearLayout.LayoutParams(0, -1, 1f));
+        if (firstText(room, "id", "roomId", "room_id").matches("[1-9]\\d{0,11}")) {
+            row.setOnClickListener(v -> showRoomPhotosFromRoom(room));
+        }
         return row;
     }
 
@@ -9884,6 +10569,9 @@ public class MainActivity extends Activity {
                 return;
             }
             renderBadgePage(content, data, page[0], 24);
+            if (r.badgesLoading) {
+                addBadgeSkeletonGrid(content, 4);
+            }
             final ArrayList<JSONObject> currentData = data;
             renderPager(content, currentData.size(), 24, page, render[0], () -> {
                 r.badgesTabPage = page[0];
@@ -9907,9 +10595,6 @@ public class MainActivity extends Activity {
                 TextView retry = dialogButton(t(R.string.retry_section));
                 retry.setOnClickListener(v -> { retry.setEnabled(false); loadMoreBadges(r); });
                 content.addView(retry, lp(-1, dp(42), 0, 8, 0, 0));
-            }
-            if (r.badgesLoading) {
-                addBadgeSkeletonGrid(content, 4);
             }
         };
 
@@ -9939,8 +10624,8 @@ public class MainActivity extends Activity {
         }
     }
 
-    private boolean isTodayCreationTime(String raw) {
-        return isToday(raw);
+    private boolean isRecentCreationTime(String raw) {
+        return isRecent(raw);
     }
 
     private String badgeObtainedDate(JSONObject badge) {
@@ -10020,7 +10705,7 @@ public class MainActivity extends Activity {
             cell.addView(img, new FrameLayout.LayoutParams(dp(50), dp(50), Gravity.CENTER));
             if (!code.isEmpty()) loadBadgeImage(cell, img, badgeImageUrl(code));
 
-            if (isTodayCreationTime(badgeObtainedDate(badgeObj))) {
+            if (isRecentCreationTime(badgeObtainedDate(badgeObj))) {
                 TextView newBadge = text(newBadgeLabel(), 8, Color.WHITE, true);
                 newBadge.setGravity(Gravity.CENTER);
                 newBadge.setPadding(dp(5), 0, dp(5), 0);
@@ -10583,6 +11268,8 @@ public class MainActivity extends Activity {
     private void animateProfileProgress(int token, int pct) {
         if (!isActiveToken(token)) return;
         float target = Math.max(displayedProfileProgressPct, Math.min(100, Math.max(0, Math.max(pct, inlineProgressPct))));
+        if (profileProgressAnimator != null && profileProgressAnimator.isRunning() && target <= profileProgressTarget) return;
+        profileProgressTarget = target;
         if (profileProgressAnimator != null) profileProgressAnimator.cancel();
         if (Math.abs(target - displayedProfileProgressPct) < .01f) {
             if (target >= 99.9f) finishProfileProgressAnimation(token);
@@ -11148,7 +11835,7 @@ public class MainActivity extends Activity {
 
     private boolean isDirectHabbodexUrl(String u) {
         if (u == null) return false;
-        return u.startsWith(HABBODEX_BASE) || u.startsWith(HABBODEX_FURNIDEX_API);
+        return u.startsWith(HABBODEX_BASE) || u.startsWith(ClothingDetails.API) || u.startsWith(HABBODEX_ROOMINFO_API + "/");
     }
 
     private boolean isFiveMinuteJsonCacheUrl(String u) {
@@ -11698,7 +12385,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    private Object fetchHabbodexViaWebViewOnce(String url) throws Exception {
+    private String executeHabbodexWebRequest(String url, boolean binary) throws Exception {
         if (isHabbodexTemporarilyUnavailable()) {
             throw new HabbodexUnavailableException();
         }
@@ -11728,6 +12415,21 @@ public class MainActivity extends Activity {
                 + "send({ok:r.ok,status:r.status,url:r.url||u,contentType:r.headers.get('content-type')||'',cfMitigated:r.headers.get('cf-mitigated')||'',body:body});});})"
                 + ".catch(function(e){send({ok:false,status:0,url:u,error:String(e),body:''});});})();";
 
+        final String requestScript = binary
+                ? "(function(){var token=" + quotedToken + ";var id=" + quotedId + ";var u=" + quotedUrl + ";"
+                + "var requests=window.__toxicActiveRequests||(window.__toxicActiveRequests={});"
+                + "var controller=typeof AbortController==='function'?new AbortController():null;requests[id]=controller;"
+                + "var send=function(o){delete requests[id];try{ToxicNative.deliver(token,id,JSON.stringify(o));}catch(e){}};"
+                + "fetch(u,{credentials:'include',cache:'default',signal:controller?controller.signal:undefined,headers:{'Accept':'image/png,image/*;q=0.9,*/*;q=0.8'}})"
+                + ".then(function(r){var type=r.headers.get('content-type')||'';var cf=r.headers.get('cf-mitigated')||'';"
+                + "if(!r.ok||(!/^image\\//i.test(type)&&!/^application\\/octet-stream/i.test(type)))return r.text().then(function(t){send({ok:false,status:r.status,url:r.url||u,contentType:type,cfMitigated:cf,body:t.slice(0,32768)});});"
+                + "return r.blob().then(function(b){if(!b.size||b.size>4194304){send({ok:false,status:r.status,error:'Invalid image size'});return;}"
+                + "var reader=new FileReader();reader.onload=function(){send({ok:true,status:r.status,contentType:type,image:String(reader.result)});};"
+                + "reader.onerror=function(){send({ok:false,status:0,error:'Image read failed'});};reader.readAsDataURL(b);});})"
+                + ".catch(function(e){send({ok:false,status:0,error:String(e)});});})();"
+                : script;
+
+
         uiHandler.post(() -> {
             try {
                 if (habbodexWebView == null) {
@@ -11735,7 +12437,7 @@ public class MainActivity extends Activity {
                     if (pending != null) pending.completeExceptionally(new IOException("WebView unavailable"));
                     return;
                 }
-                habbodexWebView.evaluateJavascript(script, null);
+                habbodexWebView.evaluateJavascript(requestScript, null);
             } catch(Exception error) {
                 SettableFuture<String> pending = habbodexWebRequests.remove(requestId);
                 if (pending != null) pending.completeExceptionally(error);
@@ -11754,6 +12456,36 @@ public class MainActivity extends Activity {
                 habbodexWebView.evaluateJavascript(cancel, null);
             });
         }
+        return envelopeText;
+    }
+
+    private byte[] fetchHabbodexImage(String url) throws Exception {
+        if (!HabbodexImage.allowed(url)) throw new IOException("Invalid catalogue image URL");
+        for (int attempt = 0; attempt < 2; attempt++) {
+            JSONObject response = new JSONObject(executeHabbodexWebRequest(url, true));
+            int status = response.optInt("status", 0);
+            boolean challenge = "challenge".equalsIgnoreCase(response.optString("cfMitigated"))
+                    || looksLikeHabbodexChallenge("", response.optString("body"), response.optString("url", url));
+            if (challenge && attempt == 0) {
+                SettableFuture<Boolean> session = beginHabbodexInteractiveVerification("https://habbodex.com/");
+                if (Boolean.TRUE.equals(session.get(HABBODEX_WEB_INTERACTIVE_TIMEOUT_MS, TimeUnit.MILLISECONDS))) continue;
+            }
+            String data = response.optString("image");
+            int comma = data.indexOf(',');
+            if (!response.optBoolean("ok") || status < 200 || status >= 300
+                    || !data.startsWith("data:") || comma < 0
+                    || !data.substring(0, comma).endsWith(";base64") || data.length() > 5_600_000) {
+                throw new IOException("Catalogue image unavailable: " + status);
+            }
+            byte[] bytes = android.util.Base64.decode(data.substring(comma + 1), android.util.Base64.DEFAULT);
+            if (bytes.length == 0 || bytes.length > 4_194_304) throw new IOException("Invalid catalogue image size");
+            return bytes;
+        }
+        throw new IOException("Catalogue image unavailable");
+    }
+
+    private Object fetchHabbodexViaWebViewOnce(String url) throws Exception {
+        String envelopeText = executeHabbodexWebRequest(url, false);
         JSONObject envelope = new JSONObject(envelopeText == null || envelopeText.trim().isEmpty()
                 ? "{}" : envelopeText);
         int status = envelope.optInt("status", 0);
@@ -11772,6 +12504,16 @@ public class MainActivity extends Activity {
         if ("challenge".equalsIgnoreCase(cfMitigated.trim())
                 || looksLikeHabbodexChallenge("", body, responseUrl)) {
             throw new HabbodexWebChallengeException(responseUrl, status);
+        }
+
+        if (RoomPhotosPage.emptyHttpResult(url, status)) {
+            clearHabbodexUnavailableState();
+            return RoomPhotosPage.emptyResult();
+        }
+        if (RoomPhotosPage.isResourceUrl(url) && ok && status >= 200 && status < 300
+                && (trimmedBody.isEmpty() || "null".equalsIgnoreCase(trimmedBody))) {
+            clearHabbodexUnavailableState();
+            return RoomPhotosPage.emptyResult();
         }
 
         boolean htmlResponse = trimmedBody.startsWith("<")
@@ -12684,6 +13426,10 @@ public class MainActivity extends Activity {
     }
 
     private String timeAgoText(String in) {
+        return timeAgoText(in, false);
+    }
+
+    private String timeAgoText(String in, boolean daysOnly) {
         Date d = parseHabboDate(in);
         if (d == null) return "";
         long diff = Math.max(0L, System.currentTimeMillis() - d.getTime()) / 1000L;
@@ -12692,22 +13438,18 @@ public class MainActivity extends Activity {
         if (diff < 60) { value = Math.max(1, diff); unitResource = value == 1 ? R.string.ago_second : R.string.ago_seconds; }
         else if (diff < 3600) { value = diff / 60; unitResource = value == 1 ? R.string.ago_minute : R.string.ago_minutes; }
         else if (diff < 86400) { value = diff / 3600; unitResource = value == 1 ? R.string.ago_hour : R.string.ago_hours; }
-        else if (diff < 604800) { value = diff / 86400; unitResource = value == 1 ? R.string.ago_day : R.string.ago_days; }
+        else if (daysOnly || diff < 604800) { value = diff / 86400; unitResource = value == 1 ? R.string.ago_day : R.string.ago_days; }
         else if (diff < 2629800) { value = diff / 604800; unitResource = value == 1 ? R.string.ago_week : R.string.ago_weeks; }
         else if (diff < 31557600) { value = diff / 2629800; unitResource = value == 1 ? R.string.ago_month : R.string.ago_months; }
         else { value = diff / 31557600; unitResource = value == 1 ? R.string.ago_year : R.string.ago_years; }
-        return tr(R.string.time_ago, value, t(unitResource));
+        return tr(daysOnly ? R.string.favorite_time_ago : R.string.time_ago, value, t(unitResource));
     }
 
-    private boolean isToday(String in) {
+    private boolean isRecent(String in) {
         Date value = parseHabboDate(in);
         if (value == null) return false;
-        Calendar now = Calendar.getInstance();
-        Calendar date = Calendar.getInstance();
-        date.setTime(value);
-        return now.get(Calendar.ERA) == date.get(Calendar.ERA)
-                && now.get(Calendar.YEAR) == date.get(Calendar.YEAR)
-                && now.get(Calendar.DAY_OF_YEAR) == date.get(Calendar.DAY_OF_YEAR);
+        long age = System.currentTimeMillis() - value.getTime();
+        return age >= 0L && age < 24L * 60L * 60L * 1000L;
     }
 
 
@@ -14802,16 +15544,20 @@ public class MainActivity extends Activity {
             try {
                 JSONObject payload = unwrap(getJson(habbodexFigureUrl(previewFigure)));
                 ArrayList<JSONObject> clothes = normalizeClothingEntries(payload);
-                enrichClothingEntriesWithHabbonews(clothes, previewFigure);
                 for (JSONObject o : clothes) {
                     String slot = firstText(o, "_slot", "type", "partType", "category");
                     if (type.equals(slot)) { found = o; break; }
                 }
-                if (found == null && !clothes.isEmpty()) found = clothes.get(0);
             } catch(Exception ignored) {}
+            if(found==null) {
+                try { found=new JSONObject().put("code",type+"-"+itemId).put("_slot",type).put("_figureCode",type+"-"+itemId); }
+                catch(Exception ignored){}
+            }
+            if(found!=null) { ArrayList<JSONObject> selected=new ArrayList<>(); selected.add(found); enrichClothingEntries(selected,previewFigure); }
 
             final JSONObject itemInfo = found;
             runOnUiThread(() -> {
+                if(activityDestroyed || !dialog.isShowing())return;
                 info.removeAllViews();
 
                 if (itemInfo == null) {
@@ -14820,14 +15566,7 @@ public class MainActivity extends Activity {
                     return;
                 }
 
-                String code = firstText(itemInfo, "code", "classname", "className", "id");
-                String name = clothingName(itemInfo, code);
-                String collection = clothingLineName(itemInfo, "");
-
-                info.addView(visualItemInfoRow(t(R.string.item_name), name));
-                if (!collection.isEmpty()) {
-                    info.addView(visualItemInfoRow(t(R.string.collection), collection));
-                }
+                appendClothingInformation(info,itemInfo);
 
                 rarityThumbnail.setImageDrawable(null);
                 if (setClothingRarityIcon(rarityThumbnail, itemInfo)) {
@@ -14839,7 +15578,7 @@ public class MainActivity extends Activity {
         });
     }
 
-    private LinearLayout visualItemInfoRow(String label, String value) {
+    private LinearLayout visualItemInfoRow(String label, CharSequence value) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.VERTICAL);
         row.setPadding(dp(12), dp(9), dp(12), dp(9));
@@ -14850,10 +15589,13 @@ public class MainActivity extends Activity {
         l.setGravity(Gravity.LEFT);
         row.addView(l, lp(-1, -2, 0, 0, 0, 2));
 
-        TextView v = text(value == null ? "" : value, 14, lightTheme ? Color.rgb(35,35,35) : Color.WHITE, false);
+        String plainValue = value == null ? "" : value.toString();
+        TextView v = label.equals(t(R.string.item_name)) ? habboText(plainValue,16,true)
+                : text(plainValue, 14, primaryTextColor(), false);
+        v.setText(value == null ? "" : value);
+        if(label.equals(t(R.string.item_name)))v.setTextColor(accentTextColor());
         v.setGravity(Gravity.LEFT);
-        v.setMaxLines(3);
-        v.setEllipsize(TextUtils.TruncateAt.END);
+        v.setMaxLines(Integer.MAX_VALUE);
         row.addView(v, lp(-1, -2, 0, 0, 0, 0));
         return row;
     }
@@ -17243,6 +17985,16 @@ public class MainActivity extends Activity {
             LinearLayout.LayoutParams op = new LinearLayout.LayoutParams(-2, -2);
             op.leftMargin = dp(8);
             nameRow.addView(online, op);
+        } else if (showOnlineState && !privateFavorite && favoriteLastSeenMillis(item) > 0L) {
+            TextView lastSeen = text(timeAgoText(status.lastAccess, true), 12, themeMutedColor(), false);
+            lastSeen.setTag("favorite_last_seen");
+            lastSeen.setSingleLine(true);
+            lastSeen.setEllipsize(TextUtils.TruncateAt.END);
+            lastSeen.setContentDescription(t(R.string.last_login) + ": " + lastSeen.getText());
+            LinearLayout.LayoutParams ageParams = new LinearLayout.LayoutParams(-2, -2);
+            ageParams.leftMargin = dp(8);
+            nameRow.addView(lastSeen, ageParams);
+            bindFavoriteAge(lastSeen, item);
         }
         mid.addView(nameRow);
 
@@ -17259,18 +18011,28 @@ public class MainActivity extends Activity {
             lockParams.leftMargin = dp(8);
             hotelLine.addView(lock, lockParams);
         }
-        if (showOnlineState && !privateFavorite && !onlineFavorite && favoriteLastSeenMillis(item) > 0) {
-            TextView lastSeen = text(niceDate(status.lastAccess), 11, themeMutedColor(), false);
-            lastSeen.setTag("favorite_last_seen");
-            lastSeen.setContentDescription(t(R.string.last_login) + ": " + niceDate(status.lastAccess));
-            lastSeen.setSingleLine(true);
-            lastSeen.setEllipsize(TextUtils.TruncateAt.END);
-            LinearLayout.LayoutParams dateParams = new LinearLayout.LayoutParams(0, -2, 1);
-            dateParams.leftMargin = dp(8);
-            hotelLine.addView(lastSeen, dateParams);
-        }
         mid.addView(hotelLine, new LinearLayout.LayoutParams(-1, -2));
         return row;
+    }
+
+    private void bindFavoriteAge(TextView label, ProfileHistoryItem item) {
+        Runnable tick = new Runnable() {
+            @Override public void run() {
+                if (!label.isAttachedToWindow()) return;
+                FavoriteStatus status = favoriteStatusCache.get(favoriteKey(item));
+                if (status == null || status.online || status.privateProfile || !status.presenceKnown) return;
+                String age = timeAgoText(status.lastAccess, true);
+                if (!age.contentEquals(label.getText())) {
+                    label.setText(age);
+                    label.setContentDescription(t(R.string.last_login) + ": " + age);
+                }
+                label.postDelayed(this, 1000L);
+            }
+        };
+        label.addOnAttachStateChangeListener(new View.OnAttachStateChangeListener() {
+            @Override public void onViewAttachedToWindow(View view) { label.post(tick); }
+            @Override public void onViewDetachedFromWindow(View view) { label.removeCallbacks(tick); }
+        });
     }
 
 

@@ -5,6 +5,8 @@ final class ProfileStateMerger {
         if (target == incoming) return true;
         if (incoming.snapshotVersion < target.snapshotVersion) return false;
         target.snapshotVersion = incoming.snapshotVersion;
+        target.recordSignatures.clear();
+        target.recordSignatures.putAll(incoming.recordSignatures);
         int friendsPage = target.friendsTabPage, badgesPage = target.badgesTabPage;
         int mottoIndex = target.previousMottosSlideIndex;
         boolean removed = target.friendsTabShowingRemoved, touched = target.friendsTabSelectionTouched;

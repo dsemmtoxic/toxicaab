@@ -7,6 +7,7 @@ final class ProfileResult {
     boolean friendsLoadFailed, removedFriendsLoadFailed, badgesLoadFailed;
     int searchToken = 0;
     long snapshotVersion = 0L;
+    final IdentityHashMap<ArrayList<JSONObject>, String> recordSignatures = new IdentityHashMap<>();
     String searchedNick = "", uniqueId = "", name = "", motto = "", figure = "", memberSince = "", lastAccess = "", level = "", starGems = "", totalBadges = "", hotelKey = "br";
     boolean online = false, privateProfile = false, banned = false;
     JSONObject habboPublic, dex, suggest, dexProfile, officialProfile;

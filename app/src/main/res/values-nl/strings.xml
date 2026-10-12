@@ -280,4 +280,26 @@
     <string name="exit_title">Toxic verlaten?</string>
     <string name="exit_message">De app sluiten?</string>
     <string name="exit_action">Afsluiten</string>
+    <string name="next_level">Volgend level</string>
+    <string name="room_photos">Kamerfoto’s</string>
+    <string name="photo_author">Auteur</string>
+    <string name="room_photos_empty">Er zijn geen foto’s gevonden in deze kamer.</string>
+    <string name="room_photos_failed">Foto’s konden niet worden geladen.</string>
+    <string name="favorite_time_ago">%1$s %2$s geleden</string>
+    <string name="photo_show_more">Meer tonen</string>
+    <string name="photo_show_less">Minder tonen</string>
+    <string name="room_photos_empty_title">Geen foto’s gevonden</string>
+    <string name="item_owners">Gebruikers met deze look</string>
+    <string name="item_tracked_owners">Geregistreerde eigenaars</string>
+    <string name="item_price">Prijs</string>
+    <string name="currency_credits">credits</string>
+    <string name="currency_diamonds">diamanten</string>
+    <string name="currency_duckets">duckets</string>
+    <string name="item_tradeable">Verhandelbaar</string>
+    <string name="item_limited">Beperkte editie</string>
+    <string name="item_bundle_exclusive">Exclusief in bundel</string>
+    <string name="value_yes">Ja</string>
+    <string name="value_no">Nee</string>
+    <string name="photo_show_likes">Likes tonen</string>
+    <string name="photo_hide_likes">Likes verbergen</string>
 </resources>

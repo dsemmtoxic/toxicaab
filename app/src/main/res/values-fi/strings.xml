@@ -280,4 +280,26 @@
     <string name="exit_title">Poistutaanko Toxicista?</string>
     <string name="exit_message">Suljetaanko sovellus?</string>
     <string name="exit_action">Poistu</string>
+    <string name="next_level">Seuraava taso</string>
+    <string name="room_photos">Huoneen kuvat</string>
+    <string name="photo_author">Tekijä</string>
+    <string name="room_photos_empty">Tästä huoneesta ei löytynyt kuvia.</string>
+    <string name="room_photos_failed">Kuvia ei voitu ladata.</string>
+    <string name="favorite_time_ago">%1$s %2$s sitten</string>
+    <string name="photo_show_more">Näytä lisää</string>
+    <string name="photo_show_less">Näytä vähemmän</string>
+    <string name="room_photos_empty_title">Kuvia ei löytynyt</string>
+    <string name="item_owners">Asun omistajat</string>
+    <string name="item_tracked_owners">Seuratut omistajat</string>
+    <string name="item_price">Hinta</string>
+    <string name="currency_credits">kolikkoa</string>
+    <string name="currency_diamonds">timanttia</string>
+    <string name="currency_duckets">ducketsia</string>
+    <string name="item_tradeable">Vaihdettava</string>
+    <string name="item_limited">Rajoitettu erä</string>
+    <string name="item_bundle_exclusive">Vain paketissa</string>
+    <string name="value_yes">Kyllä</string>
+    <string name="value_no">Ei</string>
+    <string name="photo_show_likes">Näytä tykkääjät</string>
+    <string name="photo_hide_likes">Piilota tykkääjät</string>
 </resources>

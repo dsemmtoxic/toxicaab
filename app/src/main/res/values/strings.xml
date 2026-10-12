@@ -75,7 +75,7 @@
     <string name="description">Descrição</string>
     <string name="created">Criado</string>
     <string name="code">Código</string>
-    <string name="owner">Dono</string>
+    <string name="owner">Proprietário</string>
     <string name="room">Quarto</string>
     <string name="date">Data</string>
     <string name="likes">Curtidas</string>
@@ -282,4 +282,26 @@
     <string name="exit_title">Sair da Toxic?</string>
     <string name="exit_message">Deseja fechar o aplicativo?</string>
     <string name="exit_action">Sair</string>
+    <string name="next_level">Próximo nível</string>
+    <string name="room_photos">Fotos do quarto</string>
+    <string name="photo_author">Autor</string>
+    <string name="room_photos_empty">Não foram encontradas fotos neste quarto.</string>
+    <string name="room_photos_failed">Não foi possível carregar as fotos.</string>
+    <string name="favorite_time_ago">%1$s %2$s atrás</string>
+    <string name="photo_show_more">Mostrar mais</string>
+    <string name="photo_show_less">Mostrar menos</string>
+    <string name="room_photos_empty_title">Nenhuma foto encontrada</string>
+    <string name="item_owners">Usuários com este visual</string>
+    <string name="item_tracked_owners">Usuários registrados</string>
+    <string name="item_price">Preço</string>
+    <string name="currency_credits">créditos</string>
+    <string name="currency_diamonds">diamantes</string>
+    <string name="currency_duckets">duckets</string>
+    <string name="item_tradeable">Negociável</string>
+    <string name="item_limited">Edição limitada</string>
+    <string name="item_bundle_exclusive">Exclusivo de pacote</string>
+    <string name="value_yes">Sim</string>
+    <string name="value_no">Não</string>
+    <string name="photo_show_likes">Mostrar curtidas</string>
+    <string name="photo_hide_likes">Ocultar curtidas</string>
 </resources>

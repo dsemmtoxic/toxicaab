@@ -280,4 +280,26 @@
     <string name="exit_title">Quitter Toxic ?</string>
     <string name="exit_message">Fermer l’application ?</string>
     <string name="exit_action">Quitter</string>
+    <string name="next_level">Niveau suivant</string>
+    <string name="room_photos">Photos de la salle</string>
+    <string name="photo_author">Auteur</string>
+    <string name="room_photos_empty">Aucune photo n’a été trouvée dans cet appart.</string>
+    <string name="room_photos_failed">Impossible de charger les photos.</string>
+    <string name="favorite_time_ago">il y a %1$s %2$s</string>
+    <string name="photo_show_more">Afficher plus</string>
+    <string name="photo_show_less">Afficher moins</string>
+    <string name="room_photos_empty_title">Aucune photo trouvée</string>
+    <string name="item_owners">Utilisateurs possédant ce look</string>
+    <string name="item_tracked_owners">Propriétaires suivis</string>
+    <string name="item_price">Prix</string>
+    <string name="currency_credits">crédits</string>
+    <string name="currency_diamonds">diamants</string>
+    <string name="currency_duckets">duckets</string>
+    <string name="item_tradeable">Échangeable</string>
+    <string name="item_limited">Édition limitée</string>
+    <string name="item_bundle_exclusive">Exclusif au pack</string>
+    <string name="value_yes">Oui</string>
+    <string name="value_no">Non</string>
+    <string name="photo_show_likes">Afficher les mentions J’aime</string>
+    <string name="photo_hide_likes">Masquer les mentions J’aime</string>
 </resources>

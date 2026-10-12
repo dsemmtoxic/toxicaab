@@ -280,4 +280,26 @@
     <string name="exit_title">Uscire da Toxic?</string>
     <string name="exit_message">Chiudere l’app?</string>
     <string name="exit_action">Esci</string>
+    <string name="next_level">Prossimo livello</string>
+    <string name="room_photos">Foto della stanza</string>
+    <string name="photo_author">Autore</string>
+    <string name="room_photos_empty">Non sono state trovate foto in questa stanza.</string>
+    <string name="room_photos_failed">Impossibile caricare le foto.</string>
+    <string name="favorite_time_ago">%1$s %2$s fa</string>
+    <string name="photo_show_more">Mostra altro</string>
+    <string name="photo_show_less">Mostra meno</string>
+    <string name="room_photos_empty_title">Nessuna foto trovata</string>
+    <string name="item_owners">Utenti con questo look</string>
+    <string name="item_tracked_owners">Proprietari registrati</string>
+    <string name="item_price">Prezzo</string>
+    <string name="currency_credits">crediti</string>
+    <string name="currency_diamonds">diamanti</string>
+    <string name="currency_duckets">duckets</string>
+    <string name="item_tradeable">Scambiabile</string>
+    <string name="item_limited">Edizione limitata</string>
+    <string name="item_bundle_exclusive">Esclusivo del pacchetto</string>
+    <string name="value_yes">Sì</string>
+    <string name="value_no">No</string>
+    <string name="photo_show_likes">Mostra Mi piace</string>
+    <string name="photo_hide_likes">Nascondi Mi piace</string>
 </resources>

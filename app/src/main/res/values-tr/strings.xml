@@ -280,4 +280,26 @@
     <string name="exit_title">Toxic’ten çıkılsın mı?</string>
     <string name="exit_message">Uygulama kapatılsın mı?</string>
     <string name="exit_action">Çıkış</string>
+    <string name="next_level">Sonraki seviye</string>
+    <string name="room_photos">Oda fotoğrafları</string>
+    <string name="photo_author">Yazar</string>
+    <string name="room_photos_empty">Bu odada fotoğraf bulunamadı.</string>
+    <string name="room_photos_failed">Fotoğraflar yüklenemedi.</string>
+    <string name="favorite_time_ago">%1$s %2$s önce</string>
+    <string name="photo_show_more">Daha fazla göster</string>
+    <string name="photo_show_less">Daha az göster</string>
+    <string name="room_photos_empty_title">Fotoğraf bulunamadı</string>
+    <string name="item_owners">Bu kıyafete sahip kullanıcılar</string>
+    <string name="item_tracked_owners">Kayıtlı sahipler</string>
+    <string name="item_price">Fiyat</string>
+    <string name="currency_credits">kredi</string>
+    <string name="currency_diamonds">elmas</string>
+    <string name="currency_duckets">ducket</string>
+    <string name="item_tradeable">Takas edilebilir</string>
+    <string name="item_limited">Sınırlı sürüm</string>
+    <string name="item_bundle_exclusive">Pakete özel</string>
+    <string name="value_yes">Evet</string>
+    <string name="value_no">Hayır</string>
+    <string name="photo_show_likes">Beğenileri göster</string>
+    <string name="photo_hide_likes">Beğenileri gizle</string>
 </resources>
